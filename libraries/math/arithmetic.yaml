@@ -1,0 +1,38 @@
+# Integer arithmetic blocks (int32). Stateless functions.
+
+- name: Add
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "a + b" }]
+  contract:
+    guarantees: ["y = (a + b)"]
+
+- name: Subtract
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "a - b" }]
+  contract:
+    guarantees: ["y = (a - b)"]
+
+- name: Multiply
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "a * b" }]
+  contract:
+    guarantees: ["y = (a * b)"]
+
+- name: Divide
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "a / b" }]
+  contract:
+    assumptions: ["b <> 0"]
+    guarantees: ["y = (a / b)"]

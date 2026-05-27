@@ -70,6 +70,11 @@ enum Cmd {
     },
     /// Contract-check only.
     ContractCheck { model: PathBuf },
+    /// Load the standard block library and type/contract-check every block.
+    LibCheck {
+        /// Directory of library YAML files (e.g. `libraries`).
+        dir: PathBuf,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -99,6 +104,7 @@ fn main() -> Result<()> {
             workdir,
         } => cmd_prove(&model, node.as_deref(), mode, &kind2, workdir.as_deref()),
         Cmd::ContractCheck { model } => cmd_contract_check(&model),
+        Cmd::LibCheck { dir } => cmd_lib_check(&dir),
     }
 }
 
@@ -147,6 +153,28 @@ fn cmd_contract_check(model: &Path) -> Result<()> {
         anyhow::bail!("contract-check failed");
     }
     println!("contract-check: OK ({} contracts)", creport.contracts.len());
+    Ok(())
+}
+
+fn cmd_lib_check(dir: &Path) -> Result<()> {
+    let lib = ol_stdlib::load_dir(dir)
+        .with_context(|| format!("loading library from {}", dir.display()))?;
+    let diags = lib.check();
+    for d in &diags {
+        println!("{}", d.render());
+    }
+    let errors = diags
+        .iter()
+        .filter(|d| matches!(d.severity, ol_ir::Severity::Error))
+        .count();
+    if errors > 0 {
+        anyhow::bail!("lib-check failed: {errors} error(s)");
+    }
+    println!(
+        "lib-check: OK ({} blocks, {} contracts)",
+        lib.entries.len(),
+        lib.contracts().count()
+    );
     Ok(())
 }
 

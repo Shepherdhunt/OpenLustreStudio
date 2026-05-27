@@ -1,0 +1,56 @@
+# Range blocks: min, max, clamp, and symmetric saturate (int32).
+
+- name: Min
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "if a <= b then a else b" }]
+  contract:
+    guarantees:
+      - "y <= a"
+      - "y <= b"
+
+- name: Max
+  kind: function
+  category: math
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations: [{ lhs: [y], body: "if a >= b then a else b" }]
+  contract:
+    guarantees:
+      - "y >= a"
+      - "y >= b"
+
+- name: Clamp
+  kind: function
+  category: math
+  inputs:
+    - { name: x,  type: int32 }
+    - { name: lo, type: int32 }
+    - { name: hi, type: int32 }
+  outputs: [{ name: y, type: int32 }]
+  equations:
+    - lhs: [y]
+      body: "if x < lo then lo else if x > hi then hi else x"
+  contract:
+    assumptions: ["lo <= hi"]
+    guarantees:
+      - "y >= lo"
+      - "y <= hi"
+
+- name: Saturate
+  kind: function
+  category: math
+  inputs:
+    - { name: x,     type: int32 }
+    - { name: limit, type: int32 }
+  outputs: [{ name: y, type: int32 }]
+  equations:
+    - lhs: [y]
+      body: "if x > limit then limit else if x < -limit then -limit else x"
+  contract:
+    assumptions: ["limit >= 0"]
+    guarantees:
+      - "y <= limit"
+      - "y >= -limit"

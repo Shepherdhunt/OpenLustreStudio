@@ -166,6 +166,7 @@ dependencies = [
  "ol_kind2",
  "ol_lustre_emit",
  "ol_sim",
+ "ol_stdlib",
  "ol_typecheck",
  "serde",
  "serde_json",
@@ -252,6 +253,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ol_stdlib"
+version = "0.1.0"
+dependencies = [
+ "ol_contract_check",
+ "ol_contract_ir",
+ "ol_ir",
+ "ol_typecheck",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+]
+
+[[package]]
 name = "ol_typecheck"
 version = "0.1.0"
 dependencies = [
@@ -277,6 +292,7 @@ dependencies = [
  "ol_ir",
  "ol_lustre_emit",
  "ol_sim",
+ "ol_stdlib",
  "ol_typecheck",
  "serde_json",
 ]

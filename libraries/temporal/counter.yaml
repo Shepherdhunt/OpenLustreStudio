@@ -1,0 +1,19 @@
+# Resettable up-counter. `reset` forces the count to 0; otherwise `incr`
+# advances it by one each cycle.
+name: Counter
+kind: operator
+category: temporal
+inputs:
+  - { name: reset, type: bool }
+  - { name: incr,  type: bool }
+outputs:
+  - { name: count, type: int32 }
+equations:
+  - lhs: [count]
+    body: "if reset then 0 else (0 -> pre count) + (if incr then 1 else 0)"
+contract:
+  guarantees:
+    - "count >= 0"
+  modes:
+    - { name: Reset, requires: ["reset"],                  ensures: ["count = 0"] }
+    - { name: Hold,  requires: ["not reset and not incr"], ensures: ["count = (0 -> pre count)"] }

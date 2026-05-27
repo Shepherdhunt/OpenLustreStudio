@@ -1,0 +1,13 @@
+# Unit delay: y is x delayed by one cycle, false on the first cycle.
+name: Delay
+kind: operator
+category: temporal
+inputs:  [{ name: x, type: bool }]
+outputs: [{ name: y, type: bool }]
+equations:
+  - lhs: [y]
+    body: "false -> pre x"
+contract:
+  modes:
+    - { name: FirstCycle, requires: ["first_cycle"],     ensures: ["not y"] }
+    - { name: Steady,     requires: ["not first_cycle"], ensures: ["y = pre x"] }

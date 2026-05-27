@@ -1,0 +1,35 @@
+# Selection blocks: numeric multiplexer and boolean switch.
+
+- name: Mux
+  kind: function
+  category: selection
+  inputs:
+    - { name: sel, type: bool }
+    - { name: a,   type: int32 }
+    - { name: b,   type: int32 }
+  outputs:
+    - { name: y, type: int32 }
+  equations:
+    - lhs: [y]
+      body: "if sel then a else b"
+  contract:
+    guarantees:
+      - "sel => (y = a)"
+      - "not sel => (y = b)"
+
+- name: Switch
+  kind: function
+  category: selection
+  inputs:
+    - { name: sel, type: bool }
+    - { name: a,   type: bool }
+    - { name: b,   type: bool }
+  outputs:
+    - { name: y, type: bool }
+  equations:
+    - lhs: [y]
+      body: "if sel then a else b"
+  contract:
+    guarantees:
+      - "sel => (y = a)"
+      - "not sel => (y = b)"

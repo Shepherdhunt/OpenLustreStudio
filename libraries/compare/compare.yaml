@@ -1,0 +1,55 @@
+# Comparison blocks (int32 -> bool). Stateless functions.
+
+- name: Equal
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a = b" }]
+  contract:
+    guarantees: ["y = (a = b)"]
+
+- name: NotEqual
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a <> b" }]
+  contract:
+    guarantees: ["y = (a <> b)"]
+
+- name: Less
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a < b" }]
+  contract:
+    guarantees: ["y = (a < b)"]
+
+- name: LessEqual
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a <= b" }]
+  contract:
+    guarantees: ["y = (a <= b)"]
+
+- name: Greater
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a > b" }]
+  contract:
+    guarantees: ["y = (a > b)"]
+
+- name: GreaterEqual
+  kind: function
+  category: comparison
+  inputs:  [{ name: a, type: int32 }, { name: b, type: int32 }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a >= b" }]
+  contract:
+    guarantees: ["y = (a >= b)"]

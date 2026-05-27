@@ -10,6 +10,7 @@ members = [
     "crates/ol_clite_emit",
     "crates/ol_sim",
     "crates/ol_kind2",
+    "crates/ol_stdlib",
     "crates/ol_cli",
     "examples/release_logic/builder",
     "tests",
@@ -40,6 +41,7 @@ ol_cocospec_emit = { path = "crates/ol_cocospec_emit" }
 ol_clite_emit = { path = "crates/ol_clite_emit" }
 ol_sim = { path = "crates/ol_sim" }
 ol_kind2 = { path = "crates/ol_kind2" }
+ol_stdlib = { path = "crates/ol_stdlib" }
 
 [profile.release]
 lto = "thin"
