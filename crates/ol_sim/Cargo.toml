@@ -1,0 +1,12 @@
+[package]
+name = "ol_sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ol_ir = { workspace = true }
+ol_contract_ir = { workspace = true }

@@ -1,0 +1,12 @@
+[package]
+name = "ol_clite_emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+ol_ir = { workspace = true }
+ol_contract_ir = { workspace = true }

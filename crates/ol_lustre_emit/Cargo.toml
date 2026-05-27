@@ -1,0 +1,8 @@
+[package]
+name = "ol_lustre_emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ol_ir = { workspace = true }

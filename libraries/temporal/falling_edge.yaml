@@ -1,0 +1,15 @@
+name: FallingEdge
+kind: operator
+category: temporal
+inputs:
+  - { name: x, type: bool }
+outputs:
+  - { name: edge, type: bool }
+equations:
+  - lhs: [edge]
+    body: "(not x) and (false -> pre x)"
+contract:
+  modes:
+    - { name: FirstCycle, requires: ["first_cycle"], ensures: ["not edge"] }
+    - { name: Falling,    requires: ["(not x) and pre_x"], ensures: ["edge"] }
+    - { name: NotFalling, requires: ["not ((not x) and pre_x)"], ensures: ["not edge"] }

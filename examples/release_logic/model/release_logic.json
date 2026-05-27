@@ -1,0 +1,402 @@
+{
+  "name": "release_authorization",
+  "packages": [
+    {
+      "name": "release",
+      "types": [],
+      "constants": [],
+      "nodes": [
+        {
+          "name": "ReleaseLogic",
+          "kind": "Operator",
+          "inputs": [
+            {
+              "name": "master_arm",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "station_selected",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "consent",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "fault_present",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "release_request",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "release_cmd",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "inhibit",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "locals": [],
+          "equations": [
+            {
+              "lhs": [
+                "release_cmd"
+              ],
+              "rhs": {
+                "expr": "Binary",
+                "op": "And",
+                "lhs": {
+                  "expr": "Binary",
+                  "op": "And",
+                  "lhs": {
+                    "expr": "Binary",
+                    "op": "And",
+                    "lhs": {
+                      "expr": "Binary",
+                      "op": "And",
+                      "lhs": {
+                        "expr": "Var",
+                        "name": "master_arm"
+                      },
+                      "rhs": {
+                        "expr": "Var",
+                        "name": "station_selected"
+                      }
+                    },
+                    "rhs": {
+                      "expr": "Var",
+                      "name": "consent"
+                    }
+                  },
+                  "rhs": {
+                    "expr": "Unary",
+                    "op": "Not",
+                    "arg": {
+                      "expr": "Var",
+                      "name": "fault_present"
+                    }
+                  }
+                },
+                "rhs": {
+                  "expr": "Var",
+                  "name": "release_request"
+                }
+              }
+            },
+            {
+              "lhs": [
+                "inhibit"
+              ],
+              "rhs": {
+                "expr": "Binary",
+                "op": "And",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "release_request"
+                },
+                "rhs": {
+                  "expr": "Unary",
+                  "op": "Not",
+                  "arg": {
+                    "expr": "Var",
+                    "name": "release_cmd"
+                  }
+                }
+              }
+            }
+          ],
+          "contract": "ReleaseLogic_contract",
+          "diagram": {
+            "notes": null
+          }
+        },
+        {
+          "name": "ArmedAndConsented",
+          "kind": "Function",
+          "inputs": [
+            {
+              "name": "master_arm",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "consent",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "armed_consented",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "locals": [],
+          "equations": [
+            {
+              "lhs": [
+                "armed_consented"
+              ],
+              "rhs": {
+                "expr": "Binary",
+                "op": "And",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "master_arm"
+                },
+                "rhs": {
+                  "expr": "Var",
+                  "name": "consent"
+                }
+              }
+            }
+          ],
+          "contract": null,
+          "diagram": {
+            "notes": null
+          }
+        }
+      ],
+      "contracts": [
+        {
+          "assumptions": [],
+          "ghost_vars": [],
+          "guarantees": [
+            {
+              "expr": {
+                "expr": "Binary",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "release_cmd"
+                },
+                "op": "Implies",
+                "rhs": {
+                  "expr": "Var",
+                  "name": "master_arm"
+                }
+              },
+              "name": "release_implies_arm"
+            },
+            {
+              "expr": {
+                "expr": "Binary",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "release_cmd"
+                },
+                "op": "Implies",
+                "rhs": {
+                  "expr": "Var",
+                  "name": "station_selected"
+                }
+              },
+              "name": "release_implies_station"
+            },
+            {
+              "expr": {
+                "expr": "Binary",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "release_cmd"
+                },
+                "op": "Implies",
+                "rhs": {
+                  "expr": "Var",
+                  "name": "consent"
+                }
+              },
+              "name": "release_implies_consent"
+            },
+            {
+              "expr": {
+                "expr": "Binary",
+                "lhs": {
+                  "expr": "Var",
+                  "name": "release_cmd"
+                },
+                "op": "Implies",
+                "rhs": {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "fault_present"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              },
+              "name": "release_excludes_fault"
+            }
+          ],
+          "imports": [],
+          "inputs": [
+            {
+              "name": "master_arm",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "station_selected",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "consent",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "fault_present",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "release_request",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "modes": [
+            {
+              "ensures": [
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "release_cmd"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                },
+                {
+                  "expr": "Var",
+                  "name": "inhibit"
+                }
+              ],
+              "name": "SafeInhibit",
+              "requires": [
+                {
+                  "expr": "Var",
+                  "name": "release_request"
+                },
+                {
+                  "expr": "Var",
+                  "name": "fault_present"
+                }
+              ]
+            },
+            {
+              "ensures": [
+                {
+                  "expr": "Var",
+                  "name": "release_cmd"
+                },
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "inhibit"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              ],
+              "name": "AuthorizedRelease",
+              "requires": [
+                {
+                  "expr": "Var",
+                  "name": "release_request"
+                },
+                {
+                  "expr": "Var",
+                  "name": "master_arm"
+                },
+                {
+                  "expr": "Var",
+                  "name": "station_selected"
+                },
+                {
+                  "expr": "Var",
+                  "name": "consent"
+                },
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "fault_present"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              ]
+            },
+            {
+              "ensures": [
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "release_cmd"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              ],
+              "name": "Idle",
+              "requires": [
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "release_request"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              ]
+            }
+          ],
+          "name": "ReleaseLogic_contract",
+          "outputs": [
+            {
+              "name": "release_cmd",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "inhibit",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ]
+        }
+      ],
+      "imported_operators": []
+    }
+  ],
+  "main": "ReleaseLogic"
+}

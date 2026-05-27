@@ -1,0 +1,35 @@
+- name: And
+  kind: function
+  category: logic
+  inputs:  [{ name: a, type: bool }, { name: b, type: bool }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a and b" }]
+  contract:
+    guarantees: ["y = (a and b)"]
+
+- name: Or
+  kind: function
+  category: logic
+  inputs:  [{ name: a, type: bool }, { name: b, type: bool }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a or b" }]
+  contract:
+    guarantees: ["y = (a or b)"]
+
+- name: Not
+  kind: function
+  category: logic
+  inputs:  [{ name: a, type: bool }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "not a" }]
+  contract:
+    guarantees: ["y = (not a)"]
+
+- name: Xor
+  kind: function
+  category: logic
+  inputs:  [{ name: a, type: bool }, { name: b, type: bool }]
+  outputs: [{ name: y, type: bool }]
+  equations: [{ lhs: [y], body: "a xor b" }]
+  contract:
+    guarantees: ["y = (a xor b)"]

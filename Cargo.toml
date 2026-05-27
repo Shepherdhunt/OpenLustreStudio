@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ol_ir",
+    "crates/ol_contract_ir",
+    "crates/ol_typecheck",
+    "crates/ol_contract_check",
+    "crates/ol_lustre_emit",
+    "crates/ol_cocospec_emit",
+    "crates/ol_clite_emit",
+    "crates/ol_sim",
+    "crates/ol_kind2",
+    "crates/ol_cli",
+    "examples/release_logic/builder",
+    "tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["OpenLustre Studio contributors"]
+repository = "https://github.com/openlustre/openlustre-studio"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+thiserror = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+indexmap = { version = "2", features = ["serde"] }
+
+ol_ir = { path = "crates/ol_ir" }
+ol_contract_ir = { path = "crates/ol_contract_ir" }
+ol_typecheck = { path = "crates/ol_typecheck" }
+ol_contract_check = { path = "crates/ol_contract_check" }
+ol_lustre_emit = { path = "crates/ol_lustre_emit" }
+ol_cocospec_emit = { path = "crates/ol_cocospec_emit" }
+ol_clite_emit = { path = "crates/ol_clite_emit" }
+ol_sim = { path = "crates/ol_sim" }
+ol_kind2 = { path = "crates/ol_kind2" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

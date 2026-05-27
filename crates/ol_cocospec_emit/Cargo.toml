@@ -1,0 +1,10 @@
+[package]
+name = "ol_cocospec_emit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ol_ir = { workspace = true }
+ol_contract_ir = { workspace = true }
+ol_lustre_emit = { workspace = true }

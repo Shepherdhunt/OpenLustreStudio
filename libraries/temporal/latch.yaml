@@ -1,0 +1,17 @@
+name: Latch
+kind: operator
+category: temporal
+inputs:
+  - { name: set,   type: bool }
+  - { name: reset, type: bool }
+outputs:
+  - { name: q, type: bool }
+equations:
+  - lhs: [q]
+    body: "if set then true else if reset then false else (false -> pre q)"
+contract:
+  modes:
+    - { name: Set,    requires: ["set and not reset"], ensures: ["q"] }
+    - { name: Reset,  requires: ["reset and not set"], ensures: ["not q"] }
+    - { name: Hold,   requires: ["not set and not reset"], ensures: ["q = pre q"] }
+    - { name: Tie,    requires: ["set and reset"],     ensures: ["q"] }

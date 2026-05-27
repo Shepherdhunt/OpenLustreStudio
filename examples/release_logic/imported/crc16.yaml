@@ -1,0 +1,28 @@
+name: CRC16_CCITT
+kind: imported_operator
+language: c
+header: crc16.h
+source: crc16.c
+symbol: crc16_ccitt
+
+inputs:
+  - name: data
+    type: uint8[32]
+  - name: length
+    type: uint32
+
+outputs:
+  - name: crc
+    type: uint16
+
+contract:
+  assumptions:
+    - length <= 32
+  guarantees:
+    - crc_is_deterministic
+  properties:
+    pure: true
+    deterministic: true
+    no_dynamic_memory: true
+    no_global_write: true
+    bounded_execution: true

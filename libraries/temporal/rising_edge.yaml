@@ -1,0 +1,34 @@
+# OpenLustre standard library block: rising-edge detector.
+#
+# This is metadata only — the IR construction happens in a builder. The YAML
+# documents the block's contract and library category so the GUI can show it
+# in the block palette.
+name: RisingEdge
+kind: operator
+category: temporal
+inputs:
+  - { name: x, type: bool }
+outputs:
+  - { name: edge, type: bool }
+
+equations:
+  - lhs: [edge]
+    body: "x and not (false -> pre x)"
+
+contract:
+  modes:
+    - name: FirstCycle
+      requires:
+        - "first_cycle"
+      ensures:
+        - "not edge"
+    - name: Rising
+      requires:
+        - "x and not pre_x"
+      ensures:
+        - "edge"
+    - name: NotRising
+      requires:
+        - "not (x and not pre_x)"
+      ensures:
+        - "not edge"
