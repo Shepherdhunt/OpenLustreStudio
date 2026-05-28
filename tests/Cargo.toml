@@ -34,3 +34,7 @@ path = "stdlib_library.rs"
 [[test]]
 name = "stdlib_subnode_calls"
 path = "stdlib_subnode_calls.rs"
+
+[[test]]
+name = "trace_comparison"
+path = "trace_comparison.rs"

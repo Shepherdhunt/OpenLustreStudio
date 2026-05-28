@@ -9,11 +9,22 @@
 //!
 //! Contracts produce *monitors* in a separate translation unit so production
 //! C-Lite is not polluted with proof-only logic.
+//!
+//! ## Calls
+//!
+//! Every `Expr::Call` in an equation body is lowered into a self-contained
+//! block of statements that declares an `{Callee}_Input` / `{Callee}_Output`
+//! pair, fills the inputs, and invokes `{Callee}_step`. The call's value is
+//! then substituted with `__outN.<output_name>` in the surrounding expression
+//! (administrative-normal-form lowering). Stateful operator call sites each
+//! get their own `{Callee}_State sub_N` field in the parent's state struct,
+//! initialized in the parent's `_init`.
 
+pub mod harness;
 pub mod manifest;
 pub mod monitor;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
 use ol_ir::{BinOp, Equation, Expr, Literal, NodeDef, NodeKind, Project, Type, UnaryOp};
@@ -42,18 +53,144 @@ pub fn emit_project(project: &Project) -> EmittedClite {
     let _ = writeln!(source, "#include \"openlustre_generated.h\"");
     source.push('\n');
 
-    for pkg in &project.packages {
-        for node in &pkg.nodes {
-            emit_node_header(node, &mut header);
-            emit_node_source(node, &mut source);
-        }
+    // Topologically sort nodes so each callee's struct/function is declared
+    // before any caller that embeds or invokes it.
+    let ordered = topo_sort_nodes(project);
+    for node in &ordered {
+        emit_node_header(node, project, &mut header);
+        emit_node_source(node, project, &mut source);
     }
 
     let _ = writeln!(header, "#endif /* OL_GENERATED_H */");
     EmittedClite { header, source }
 }
 
-fn emit_node_header(node: &NodeDef, out: &mut String) {
+fn topo_sort_nodes<'a>(project: &'a Project) -> Vec<&'a NodeDef> {
+    let all: Vec<&NodeDef> = project.all_nodes().collect();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut order: Vec<&NodeDef> = Vec::new();
+
+    fn visit<'a>(
+        node: &'a NodeDef,
+        project: &'a Project,
+        visited: &mut BTreeSet<String>,
+        order: &mut Vec<&'a NodeDef>,
+    ) {
+        if !visited.insert(node.name.clone()) {
+            return;
+        }
+        for eq in &node.equations {
+            walk_call_targets(&eq.rhs, &mut |callee_name| {
+                if let Some(callee) = project.find_node(callee_name) {
+                    visit(callee, project, visited, order);
+                }
+            });
+        }
+        order.push(node);
+    }
+
+    for n in &all {
+        visit(n, project, &mut visited, &mut order);
+    }
+    order
+}
+
+fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
+    match expr {
+        Expr::Call { node, args } => {
+            f(node);
+            for a in args {
+                walk_call_targets(a, f);
+            }
+        }
+        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
+            walk_call_targets(arg, f)
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
+            walk_call_targets(lhs, f);
+            walk_call_targets(rhs, f);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            walk_call_targets(cond, f);
+            walk_call_targets(then_branch, f);
+            walk_call_targets(else_branch, f);
+        }
+        Expr::Index { base, index } => {
+            walk_call_targets(base, f);
+            walk_call_targets(index, f);
+        }
+        Expr::Tuple { items } => {
+            for i in items {
+                walk_call_targets(i, f);
+            }
+        }
+        Expr::Const { .. } | Expr::Var { .. } => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CallSite {
+    idx: usize,
+    callee_name: String,
+}
+
+fn compute_call_sites(node: &NodeDef) -> HashMap<usize, CallSite> {
+    let mut map = HashMap::new();
+    let mut idx = 0usize;
+    for eq in &node.equations {
+        walk_calls_assign(&eq.rhs, &mut map, &mut idx);
+    }
+    map
+}
+
+fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut usize) {
+    if let Expr::Call { node, args } = expr {
+        let site = CallSite {
+            idx: *idx,
+            callee_name: node.clone(),
+        };
+        map.insert(expr as *const Expr as usize, site);
+        *idx += 1;
+        for a in args {
+            walk_calls_assign(a, map, idx);
+        }
+        return;
+    }
+    match expr {
+        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
+            walk_calls_assign(arg, map, idx)
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
+            walk_calls_assign(lhs, map, idx);
+            walk_calls_assign(rhs, map, idx);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            walk_calls_assign(cond, map, idx);
+            walk_calls_assign(then_branch, map, idx);
+            walk_calls_assign(else_branch, map, idx);
+        }
+        Expr::Index { base, index } => {
+            walk_calls_assign(base, map, idx);
+            walk_calls_assign(index, map, idx);
+        }
+        Expr::Tuple { items } => {
+            for i in items {
+                walk_calls_assign(i, map, idx);
+            }
+        }
+        Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
+    }
+}
+
+fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
     let prefix = &node.name;
     let _ = writeln!(out, "/* --- {prefix} --- */");
 
@@ -78,10 +215,16 @@ fn emit_node_header(node: &NodeDef, out: &mut String) {
     out.push('\n');
 
     let state_fields = node_state_fields(node);
+    let call_sites = compute_call_sites(node);
+    let stateful_subs = stateful_subs(node, &call_sites, project);
+
     let _ = writeln!(out, "typedef struct {{");
     let _ = writeln!(out, "  bool initialized;");
     for (name, ty) in &state_fields {
         let _ = writeln!(out, "  {} {name};", type_decl(ty, name));
+    }
+    for (idx, callee) in &stateful_subs {
+        let _ = writeln!(out, "  {callee}_State sub_{idx};");
     }
     let _ = writeln!(out, "}} {prefix}_State;");
     out.push('\n');
@@ -101,7 +244,7 @@ fn emit_node_header(node: &NodeDef, out: &mut String) {
     out.push('\n');
 }
 
-fn emit_node_source(node: &NodeDef, out: &mut String) {
+fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
     if node.is_imported() {
         let _ = writeln!(
             out,
@@ -114,10 +257,15 @@ fn emit_node_source(node: &NodeDef, out: &mut String) {
 
     let prefix = &node.name;
     let state_fields = node_state_fields(node);
+    let call_sites = compute_call_sites(node);
+    let stateful_subs = stateful_subs(node, &call_sites, project);
 
     if node.kind != NodeKind::Function {
         let _ = writeln!(out, "void {prefix}_init({prefix}_State* self) {{");
         let _ = writeln!(out, "  memset(self, 0, sizeof(*self));");
+        for (idx, callee) in &stateful_subs {
+            let _ = writeln!(out, "  {callee}_init(&self->sub_{idx});");
+        }
         let _ = writeln!(out, "  self->initialized = false;");
         let _ = writeln!(out, "}}");
         out.push('\n');
@@ -143,19 +291,88 @@ fn emit_node_source(node: &NodeDef, out: &mut String) {
         is_stateful: node.kind != NodeKind::Function,
     };
 
+    let mut ctx = EmitCtx {
+        scope: &scope,
+        project,
+        call_sites: &call_sites,
+    };
+
     for eq in &node.equations {
-        emit_equation_body(eq, &scope, out);
+        emit_equation_body(eq, &mut ctx, out);
     }
 
     if node.kind != NodeKind::Function {
         for (sname, _) in &state_fields {
-            let driver = state_driver_name(sname);
+            let driver = state_driver_name(sname, &scope);
             let _ = writeln!(out, "  self->{sname} = {driver};");
         }
         let _ = writeln!(out, "  self->initialized = true;");
     }
     let _ = writeln!(out, "}}");
     out.push('\n');
+}
+
+fn stateful_subs<'a>(
+    node: &'a NodeDef,
+    call_sites: &'a HashMap<usize, CallSite>,
+    project: &'a Project,
+) -> Vec<(usize, String)> {
+    let mut subs: Vec<(usize, String)> = Vec::new();
+    for eq in &node.equations {
+        collect_stateful(&eq.rhs, call_sites, project, &mut subs);
+    }
+    subs.sort_by_key(|(i, _)| *i);
+    subs
+}
+
+fn collect_stateful(
+    expr: &Expr,
+    call_sites: &HashMap<usize, CallSite>,
+    project: &Project,
+    out: &mut Vec<(usize, String)>,
+) {
+    if let Expr::Call { node: callee_name, args } = expr {
+        if let Some(callee) = project.find_node(callee_name) {
+            if callee.kind == NodeKind::Operator {
+                let key = expr as *const Expr as usize;
+                if let Some(site) = call_sites.get(&key) {
+                    out.push((site.idx, callee_name.clone()));
+                }
+            }
+        }
+        for a in args {
+            collect_stateful(a, call_sites, project, out);
+        }
+        return;
+    }
+    match expr {
+        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
+            collect_stateful(arg, call_sites, project, out)
+        }
+        Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
+            collect_stateful(lhs, call_sites, project, out);
+            collect_stateful(rhs, call_sites, project, out);
+        }
+        Expr::IfThenElse {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_stateful(cond, call_sites, project, out);
+            collect_stateful(then_branch, call_sites, project, out);
+            collect_stateful(else_branch, call_sites, project, out);
+        }
+        Expr::Index { base, index } => {
+            collect_stateful(base, call_sites, project, out);
+            collect_stateful(index, call_sites, project, out);
+        }
+        Expr::Tuple { items } => {
+            for i in items {
+                collect_stateful(i, call_sites, project, out);
+            }
+        }
+        Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
+    }
 }
 
 #[derive(Debug)]
@@ -180,53 +397,104 @@ impl Scope {
     }
 }
 
-fn emit_equation_body(eq: &Equation, scope: &Scope, out: &mut String) {
-    if eq.lhs.len() == 1 {
-        let lhs = scope.ref_var(&eq.lhs[0]);
-        let rhs = emit_expr(&eq.rhs, scope);
-        let _ = writeln!(out, "  {lhs} = {rhs};");
-    } else if let Expr::Call { node, args } = &eq.rhs {
-        let arg_inits = args
-            .iter()
-            .map(|a| emit_expr(a, scope))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let _ = writeln!(out, "  /* multi-output call to {node}({arg_inits}) */");
-        let _ = writeln!(
-            out,
-            "  /* TODO: bind tuple outputs ({}) — not lowered in this profile. */",
-            eq.lhs.join(", ")
-        );
+struct EmitCtx<'a> {
+    scope: &'a Scope,
+    project: &'a Project,
+    call_sites: &'a HashMap<usize, CallSite>,
+}
+
+fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
+    // Multi-output: only direct top-level Call binding is supported.
+    if eq.lhs.len() > 1 {
+        if let Expr::Call { args, .. } = &eq.rhs {
+            let key = &eq.rhs as *const Expr as usize;
+            let site = ctx
+                .call_sites
+                .get(&key)
+                .expect("multi-output call missing site index");
+            let callee = ctx
+                .project
+                .find_node(&site.callee_name)
+                .expect("callee resolved");
+            let (stmts, arg_strs) = lower_args(args, ctx);
+            for s in stmts {
+                out.push_str(&s);
+            }
+            emit_call_block(callee, site.idx, &arg_strs, out);
+            for (lhs, p) in eq.lhs.iter().zip(callee.outputs.iter()) {
+                let l = ctx.scope.ref_var(lhs);
+                let _ = writeln!(out, "  {l} = __out{}.{};", site.idx, p.name);
+            }
+        } else {
+            let _ = writeln!(out, "  /* unsupported multi-output rhs */");
+        }
+        return;
+    }
+
+    let (stmts, rhs_expr) = lower_anf(&eq.rhs, ctx);
+    for s in stmts {
+        out.push_str(&s);
+    }
+    let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+    let _ = writeln!(out, "  {lhs} = {rhs_expr};");
+}
+
+fn lower_args(args: &[Expr], ctx: &mut EmitCtx) -> (Vec<String>, Vec<String>) {
+    let mut all_stmts = Vec::new();
+    let mut arg_strs = Vec::new();
+    for a in args {
+        let (s, e) = lower_anf(a, ctx);
+        all_stmts.extend(s);
+        arg_strs.push(e);
+    }
+    (all_stmts, arg_strs)
+}
+
+fn emit_call_block(callee: &NodeDef, idx: usize, arg_strs: &[String], out: &mut String) {
+    let name = &callee.name;
+    let _ = writeln!(out, "  {name}_Input __in{idx};");
+    let _ = writeln!(out, "  {name}_Output __out{idx};");
+    for (p, a) in callee.inputs.iter().zip(arg_strs.iter()) {
+        let _ = writeln!(out, "  __in{idx}.{} = {};", p.name, a);
+    }
+    if callee.is_function() {
+        let _ = writeln!(out, "  {name}_step(&__in{idx}, &__out{idx});");
     } else {
-        let _ = writeln!(out, "  /* unsupported multi-output rhs */");
+        let _ = writeln!(out, "  {name}_step(&self->sub_{idx}, &__in{idx}, &__out{idx});");
     }
 }
 
-fn emit_expr(expr: &Expr, scope: &Scope) -> String {
+/// Lower `expr` into (preceding statements, substituted expression). Calls are
+/// hoisted into named struct pairs (`__inN` / `__outN`) and substituted with
+/// `__outN.<output_name>` in the surrounding expression.
+fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
     match expr {
-        Expr::Const { lit } => match lit {
-            Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
-            Literal::Int { value } => format!("({})", value),
-            Literal::Float { value } => format!("({})", value),
-        },
-        Expr::Var { name } => scope.ref_var(name),
+        Expr::Const { lit } => {
+            let s = match lit {
+                Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
+                Literal::Int { value } => format!("({value})"),
+                Literal::Float { value } => format!("({value})"),
+            };
+            (vec![], s)
+        }
+        Expr::Var { name } => (vec![], ctx.scope.ref_var(name)),
         Expr::Unary { op, arg } => {
-            let a = emit_expr(arg, scope);
-            match op {
+            let (s, a) = lower_anf(arg, ctx);
+            let r = match op {
                 UnaryOp::Not => format!("(!{a})"),
                 UnaryOp::Neg => format!("(-{a})"),
-            }
+            };
+            (s, r)
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = emit_expr(lhs, scope);
-            let r = emit_expr(rhs, scope);
+            let (mut s, l) = lower_anf(lhs, ctx);
+            let (sr, r) = lower_anf(rhs, ctx);
+            s.extend(sr);
             let sym = match op {
                 BinOp::And => "&&",
                 BinOp::Or => "||",
                 BinOp::Xor => "^",
-                BinOp::Implies => {
-                    return format!("((!{l}) || ({r}))");
-                }
+                BinOp::Implies => return (s, format!("((!{l}) || ({r}))")),
                 BinOp::Eq => "==",
                 BinOp::Neq => "!=",
                 BinOp::Lt => "<",
@@ -239,50 +507,76 @@ fn emit_expr(expr: &Expr, scope: &Scope) -> String {
                 BinOp::Div => "/",
                 BinOp::Mod => "%",
             };
-            format!("({l} {sym} {r})")
+            (s, format!("({l} {sym} {r})"))
         }
         Expr::IfThenElse {
             cond,
             then_branch,
             else_branch,
-        } => format!(
-            "({} ? {} : {})",
-            emit_expr(cond, scope),
-            emit_expr(then_branch, scope),
-            emit_expr(else_branch, scope)
-        ),
+        } => {
+            let (mut s, c) = lower_anf(cond, ctx);
+            let (st, t) = lower_anf(then_branch, ctx);
+            let (se, e) = lower_anf(else_branch, ctx);
+            s.extend(st);
+            s.extend(se);
+            (s, format!("({c} ? {t} : {e})"))
+        }
         Expr::Pre { arg } => {
-            // `pre x` reads the previous value of `x` from the state struct.
-            // The state field is named after the inner expression (one of the
-            // node's outputs/locals/inputs).
             if let Expr::Var { name } = arg.as_ref() {
-                format!("self->{}", state_field_name(name))
+                (vec![], format!("self->{}", state_field_name(name)))
             } else {
-                format!("/* pre of complex expr unsupported: {arg:?} */ 0")
+                (vec![], format!("/* pre of complex expr unsupported: {arg:?} */ 0"))
             }
         }
         Expr::Arrow { init, body } => {
-            let i = emit_expr(init, scope);
-            let b = emit_expr(body, scope);
-            let prefix = if scope.is_stateful { "self->initialized" } else { "false" };
-            format!("(!{prefix} ? ({i}) : ({b}))")
+            let (mut s, i) = lower_anf(init, ctx);
+            let (sb, b) = lower_anf(body, ctx);
+            s.extend(sb);
+            let prefix = if ctx.scope.is_stateful { "self->initialized" } else { "false" };
+            (s, format!("(!{prefix} ? ({i}) : ({b}))"))
         }
-        Expr::Call { node, args } => {
-            let parts = args
-                .iter()
-                .map(|a| emit_expr(a, scope))
-                .collect::<Vec<_>>()
-                .join(", ");
-            // Inline calls assume the callee is also code-generated as a
-            // single-step pure function with all-args-in form. The contract
-            // monitor harness is responsible for re-checking these.
-            format!("{node}_inline({parts})")
+        Expr::Call { args, .. } => {
+            let key = expr as *const Expr as usize;
+            let site = ctx
+                .call_sites
+                .get(&key)
+                .expect("call site index not registered");
+            let callee = ctx
+                .project
+                .find_node(&site.callee_name)
+                .expect("callee resolves");
+
+            let (mut s, arg_strs) = lower_args(args, ctx);
+            let mut block = String::new();
+            emit_call_block(callee, site.idx, &arg_strs, &mut block);
+            s.push(block);
+
+            if callee.outputs.len() == 1 {
+                (s, format!("__out{}.{}", site.idx, callee.outputs[0].name))
+            } else {
+                // Non-top-level multi-output call — return only the first
+                // output; the surrounding equation should have used a tuple
+                // binding. Emit a comment so it's visible in the generated C.
+                (
+                    s,
+                    format!(
+                        "/* multi-output call used in expression position */ __out{}.{}",
+                        site.idx, callee.outputs[0].name
+                    ),
+                )
+            }
         }
-        Expr::Field { base, field } => format!("{}.{field}", emit_expr(base, scope)),
+        Expr::Field { base, field } => {
+            let (s, b) = lower_anf(base, ctx);
+            (s, format!("{b}.{field}"))
+        }
         Expr::Index { base, index } => {
-            format!("{}[{}]", emit_expr(base, scope), emit_expr(index, scope))
+            let (mut s, b) = lower_anf(base, ctx);
+            let (si, i) = lower_anf(index, ctx);
+            s.extend(si);
+            (s, format!("{b}[{i}]"))
         }
-        Expr::Tuple { .. } => "/* tuple */ 0".into(),
+        Expr::Tuple { .. } => (vec![], "/* tuple */ 0".into()),
     }
 }
 
@@ -297,12 +591,13 @@ fn state_field_name(name: &str) -> String {
     format!("prev_{name}")
 }
 
-fn state_driver_name(state_field: &str) -> String {
-    // The driver for `prev_x` is the *current* value of `x` after this step.
+fn state_driver_name(state_field: &str, scope: &Scope) -> String {
     if let Some(stripped) = state_field.strip_prefix("prev_") {
-        // outputs and locals are accessed by their natural name; here we
-        // generate `out->x` since most `pre` consumers reference outputs.
-        format!("out->{stripped}")
+        // The "previous value" for a `pre x` is the current cycle's `x` after
+        // the step body runs. Resolve where that name lives so the driver is
+        // valid C — inputs come from `in->`, outputs from `out->`, and locals
+        // are plain identifiers.
+        scope.ref_var(stripped)
     } else {
         state_field.to_string()
     }

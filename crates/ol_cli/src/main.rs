@@ -50,6 +50,11 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+        /// Also emit a CSV driver that drives the named (or main) node, so
+        /// `cc *.c -o trace_driver` produces an executable that reads inputs
+        /// on stdin in the same shape as `openlustre simulate`.
+        #[arg(long)]
+        driver: bool,
     },
     /// Run the IR simulator against a CSV input vector.
     Simulate {
@@ -117,7 +122,8 @@ fn main() -> Result<()> {
             model,
             out,
             with_stdlib,
-        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref()),
+            driver,
+        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref(), driver),
         Cmd::Simulate {
             model,
             node,
@@ -267,7 +273,12 @@ fn cmd_emit_lustre(
     Ok(())
 }
 
-fn cmd_emit_clite(model: &Path, out: &Path, with_stdlib: Option<&Path>) -> Result<()> {
+fn cmd_emit_clite(
+    model: &Path,
+    out: &Path,
+    with_stdlib: Option<&Path>,
+    driver: bool,
+) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let clite_dir = out.join("clite");
@@ -282,9 +293,22 @@ fn cmd_emit_clite(model: &Path, out: &Path, with_stdlib: Option<&Path>) -> Resul
     std::fs::write(mon_dir.join("openlustre_monitors.h"), mon.header)?;
     std::fs::write(mon_dir.join("openlustre_monitors.c"), mon.source)?;
 
+    if driver {
+        let entry_name = project
+            .main
+            .clone()
+            .context("--driver requires the project to declare a `main` node")?;
+        let entry = project
+            .find_node(&entry_name)
+            .with_context(|| format!("no node named `{entry_name}`"))?;
+        let driver_src = ol_clite_emit::harness::emit_csv_driver(entry);
+        std::fs::write(clite_dir.join("driver.c"), driver_src)?;
+    }
+
     println!(
-        "emit-clite: wrote {} (sources) and {} (monitors)",
+        "emit-clite: wrote {} (sources){} and {} (monitors)",
         clite_dir.display(),
+        if driver { " + driver.c" } else { "" },
         mon_dir.display()
     );
     Ok(())
