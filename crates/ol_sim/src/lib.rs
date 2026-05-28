@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ol_contract_ir::{parse_contracts, ContractDef};
-use ol_ir::{BinOp, Expr, Literal, NodeDef, NodeKind, Project, Type, UnaryOp};
+use ol_ir::{BinOp, Expr, Literal, NodeDef, NodeKind, Project, Type, TypeBody, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -22,6 +22,14 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Tuple(Vec<Value>),
+    /// Record value, keyed by field name. Field order follows the declared
+    /// schema in the producing record type.
+    Record(BTreeMap<String, Value>),
+    /// Fixed-length array.
+    Array(Vec<Value>),
+    /// Enum variant (variant name only — the enum type is recovered from
+    /// context when needed).
+    Enum(String),
     /// CSV-only marker for the active-mode column. Never used by the evaluator.
     ModeLabel(String),
 }
@@ -58,6 +66,17 @@ impl Value {
                 .map(|v| v.to_csv())
                 .collect::<Vec<_>>()
                 .join("|"),
+            Value::Record(m) => {
+                // `{k=v;...}` — `;` rather than `,` so the trace stays CSV-safe.
+                let parts: Vec<String> =
+                    m.iter().map(|(k, v)| format!("{k}={}", v.to_csv())).collect();
+                format!("{{{}}}", parts.join(";"))
+            }
+            Value::Array(xs) => {
+                let parts: Vec<String> = xs.iter().map(|v| v.to_csv()).collect();
+                format!("[{}]", parts.join(";"))
+            }
+            Value::Enum(name) => name.clone(),
             Value::ModeLabel(s) => s.clone(),
         }
     }
@@ -150,11 +169,11 @@ impl<'a> Sim<'a> {
         let mut env: BTreeMap<String, Value> = inputs.clone();
         for p in &self.node.outputs {
             env.entry(p.name.clone())
-                .or_insert_with(|| default_value(&p.ty));
+                .or_insert_with(|| default_value(&p.ty, self.project));
         }
         for l in &self.node.locals {
             env.entry(l.name.clone())
-                .or_insert_with(|| default_value(&l.ty));
+                .or_insert_with(|| default_value(&l.ty, self.project));
         }
 
         // Combinational cycles have been ruled out at typecheck time, so a
@@ -189,7 +208,7 @@ impl<'a> Sim<'a> {
         for p in &self.node.outputs {
             outputs.insert(
                 p.name.clone(),
-                env.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty)),
+                env.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, self.project)),
             );
         }
         Ok(outputs)
@@ -253,12 +272,63 @@ impl<'a> Sim<'a> {
     }
 }
 
-fn default_value(ty: &Type) -> Value {
+fn default_value(ty: &Type, project: &Project) -> Value {
     match ty {
         Type::Bool => Value::Bool(false),
         Type::Float32 | Type::Float64 => Value::Float(0.0),
-        _ => Value::Int(0),
+        Type::Int8
+        | Type::Int16
+        | Type::Int32
+        | Type::Int64
+        | Type::Uint8
+        | Type::Uint16
+        | Type::Uint32
+        | Type::Uint64 => Value::Int(0),
+        Type::Array { elem, len } => {
+            Value::Array((0..*len).map(|_| default_value(elem, project)).collect())
+        }
+        Type::Named(name) => default_named(name, project).unwrap_or(Value::Int(0)),
     }
+}
+
+fn default_named(name: &str, project: &Project) -> Option<Value> {
+    for pkg in &project.packages {
+        for t in &pkg.types {
+            if t.name() == name {
+                return Some(match &t.body {
+                    TypeBody::Enum(e) => e
+                        .variants
+                        .first()
+                        .map(|v| Value::Enum(v.clone()))
+                        .unwrap_or(Value::Enum(String::new())),
+                    TypeBody::Record { fields, .. } => {
+                        let mut m = BTreeMap::new();
+                        for f in fields {
+                            m.insert(f.name.clone(), default_value(&f.ty, project));
+                        }
+                        Value::Record(m)
+                    }
+                    TypeBody::Alias { target, .. } => default_value(target, project),
+                });
+            }
+        }
+    }
+    None
+}
+
+/// Look up `name` against any declared enum in the project; if it matches a
+/// variant, return that variant as an [`Value::Enum`].
+fn enum_variant_value(name: &str, project: &Project) -> Option<Value> {
+    for pkg in &project.packages {
+        for t in &pkg.types {
+            if let TypeBody::Enum(e) = &t.body {
+                if e.variants.iter().any(|v| v == name) {
+                    return Some(Value::Enum(name.to_string()));
+                }
+            }
+        }
+    }
+    None
 }
 
 fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
@@ -317,10 +387,11 @@ fn eval(
             Literal::Int { value } => Value::Int(*value),
             Literal::Float { value } => Value::Float(*value),
         }),
-        Expr::Var { name } => env
-            .get(name)
-            .cloned()
-            .ok_or_else(|| SimError::EvalError(format!("unbound variable `{name}`"))),
+        Expr::Var { name } => match env.get(name).cloned() {
+            Some(v) => Ok(v),
+            None => enum_variant_value(name, project)
+                .ok_or_else(|| SimError::EvalError(format!("unbound variable `{name}`"))),
+        },
         Expr::Unary { op, arg } => {
             let v = eval(arg, env, state, call_states, project)?;
             Ok(match (op, v) {
@@ -376,9 +447,46 @@ fn eval(
             }
         }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project),
-        Expr::Field { .. } | Expr::Index { .. } | Expr::Tuple { .. } => Err(SimError::EvalError(
-            "records, arrays, and tuple literals are not supported in the Phase 0 simulator".into(),
-        )),
+        Expr::Field { base, field } => {
+            let bv = eval(base, env, state, call_states, project)?;
+            match bv {
+                Value::Record(m) => m.get(field).cloned().ok_or_else(|| {
+                    SimError::EvalError(format!("record has no field `{field}`"))
+                }),
+                other => Err(SimError::EvalError(format!(
+                    "field access `.{field}` on non-record value: {other:?}"
+                ))),
+            }
+        }
+        Expr::Index { base, index } => {
+            let bv = eval(base, env, state, call_states, project)?;
+            let iv = eval(index, env, state, call_states, project)?;
+            let i = iv.as_int().ok_or_else(|| {
+                SimError::EvalError(format!("array index must be int, got {iv:?}"))
+            })?;
+            match bv {
+                Value::Array(xs) => {
+                    if i < 0 || (i as usize) >= xs.len() {
+                        Err(SimError::EvalError(format!(
+                            "array index {i} out of bounds (len {})",
+                            xs.len()
+                        )))
+                    } else {
+                        Ok(xs[i as usize].clone())
+                    }
+                }
+                other => Err(SimError::EvalError(format!(
+                    "indexing non-array value: {other:?}"
+                ))),
+            }
+        }
+        Expr::Tuple { items } => {
+            let mut vs = Vec::with_capacity(items.len());
+            for it in items {
+                vs.push(eval(it, env, state, call_states, project)?);
+            }
+            Ok(Value::Tuple(vs))
+        }
     }
 }
 
@@ -419,10 +527,10 @@ fn eval_call(
         callee_env.insert(p.name.clone(), v);
     }
     for p in &callee.outputs {
-        callee_env.insert(p.name.clone(), default_value(&p.ty));
+        callee_env.insert(p.name.clone(), default_value(&p.ty, project));
     }
     for l in &callee.locals {
-        callee_env.insert(l.name.clone(), default_value(&l.ty));
+        callee_env.insert(l.name.clone(), default_value(&l.ty, project));
     }
 
     match callee.kind {

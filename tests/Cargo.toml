@@ -32,6 +32,10 @@ name = "typecheck_records_enums"
 path = "typecheck_records_enums.rs"
 
 [[test]]
+name = "compound_types"
+path = "compound_types.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

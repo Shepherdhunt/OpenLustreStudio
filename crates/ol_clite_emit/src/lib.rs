@@ -27,7 +27,9 @@ pub mod monitor;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
 
-use ol_ir::{BinOp, Equation, Expr, Literal, NodeDef, NodeKind, Project, Type, UnaryOp};
+use ol_ir::{
+    BinOp, Equation, Expr, Literal, NodeDef, NodeKind, Project, Type, TypeBody, TypeDef, UnaryOp,
+};
 
 pub use manifest::{load_manifest_dir, ImportedOperator};
 
@@ -53,6 +55,13 @@ pub fn emit_project(project: &Project) -> EmittedClite {
     let _ = writeln!(source, "#include \"openlustre_generated.h\"");
     source.push('\n');
 
+    // User-declared types must appear before any node struct that uses them.
+    for pkg in &project.packages {
+        for t in &pkg.types {
+            emit_typedef(t, &mut header);
+        }
+    }
+
     // Topologically sort nodes so each callee's struct/function is declared
     // before any caller that embeds or invokes it.
     let ordered = topo_sort_nodes(project);
@@ -63,6 +72,32 @@ pub fn emit_project(project: &Project) -> EmittedClite {
 
     let _ = writeln!(header, "#endif /* OL_GENERATED_H */");
     EmittedClite { header, source }
+}
+
+fn emit_typedef(t: &TypeDef, out: &mut String) {
+    match &t.body {
+        TypeBody::Enum(e) => {
+            let _ = writeln!(out, "typedef enum {{");
+            for (i, v) in e.variants.iter().enumerate() {
+                let comma = if i + 1 == e.variants.len() { "" } else { "," };
+                let _ = writeln!(out, "  {v}{comma}");
+            }
+            let _ = writeln!(out, "}} {};", e.name);
+            out.push('\n');
+        }
+        TypeBody::Record { name, fields } => {
+            let _ = writeln!(out, "typedef struct {{");
+            for f in fields {
+                let _ = writeln!(out, "  {};", type_decl(&f.ty, &f.name));
+            }
+            let _ = writeln!(out, "}} {name};");
+            out.push('\n');
+        }
+        TypeBody::Alias { name, target } => {
+            let _ = writeln!(out, "typedef {} {name};", target.c_name());
+            out.push('\n');
+        }
+    }
 }
 
 fn topo_sort_nodes<'a>(project: &'a Project) -> Vec<&'a NodeDef> {
@@ -196,7 +231,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
 
     let _ = writeln!(out, "typedef struct {{");
     for p in &node.inputs {
-        let _ = writeln!(out, "  {} {};", type_decl(&p.ty, &p.name), p.name);
+        let _ = writeln!(out, "  {};", type_decl(&p.ty, &p.name));
     }
     if node.inputs.is_empty() {
         let _ = writeln!(out, "  int8_t _unused;");
@@ -206,7 +241,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
 
     let _ = writeln!(out, "typedef struct {{");
     for p in &node.outputs {
-        let _ = writeln!(out, "  {} {};", type_decl(&p.ty, &p.name), p.name);
+        let _ = writeln!(out, "  {};", type_decl(&p.ty, &p.name));
     }
     if node.outputs.is_empty() {
         let _ = writeln!(out, "  int8_t _unused;");
@@ -221,7 +256,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
     let _ = writeln!(out, "typedef struct {{");
     let _ = writeln!(out, "  bool initialized;");
     for (name, ty) in &state_fields {
-        let _ = writeln!(out, "  {} {name};", type_decl(ty, name));
+        let _ = writeln!(out, "  {};", type_decl(ty, name));
     }
     for (idx, callee) in &stateful_subs {
         let _ = writeln!(out, "  {callee}_State sub_{idx};");
@@ -281,7 +316,9 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
     let _ = writeln!(out, "{sig} {{");
 
     for l in &node.locals {
-        let _ = writeln!(out, "  {} {} = ({}) 0;", type_decl(&l.ty, &l.name), l.name, l.ty.c_name());
+        // `= {0}` is C's universal zero-initializer — works for scalars,
+        // arrays, and structs — so we don't need a per-shape cast.
+        let _ = writeln!(out, "  {} = {{0}};", type_decl(&l.ty, &l.name));
     }
 
     let scope = Scope {
@@ -580,10 +617,12 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
     }
 }
 
-fn type_decl(ty: &Type, _name: &str) -> String {
+/// Emit a complete C declarator (`<type> <name>`, with array brackets after the
+/// name as C requires). Caller appends `;` or `= ...` etc.
+fn type_decl(ty: &Type, name: &str) -> String {
     match ty {
-        Type::Array { elem, len } => format!("{}", format!("{}", elem.c_name())) + &format!("[{len}]"),
-        other => other.c_name(),
+        Type::Array { elem, len } => format!("{} {name}[{len}]", elem.c_name()),
+        other => format!("{} {name}", other.c_name()),
     }
 }
 
