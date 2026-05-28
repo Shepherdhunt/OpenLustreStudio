@@ -28,6 +28,10 @@ name = "typecheck_rules"
 path = "typecheck_rules.rs"
 
 [[test]]
+name = "typecheck_records_enums"
+path = "typecheck_records_enums.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

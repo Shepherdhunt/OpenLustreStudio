@@ -1,18 +1,23 @@
 //! OpenLustre Studio: type and well-formedness checker for the dataflow IR.
 //!
 //! Responsibilities:
-//! * Validate every wire type
+//! * Validate every wire type, with type aliases resolved transitively
 //! * Resolve and validate every node call against a signature
+//! * Resolve record-field access against the record's declared schema
+//! * Resolve enum-variant references against the enum's declared variants
 //! * Enforce the function-vs-operator distinction (no `pre`, `->`, or stateful
 //!   node calls inside `function`s)
 //! * Enforce single assignment for every output and local
 //! * Detect combinational cycles that don't cross a temporal break
 //! * Report uninitialized `pre` (i.e. `pre` not under an `->`)
+//! * Range-check integer literals when the expected type is known, so that
+//!   `uint8_var = 5` succeeds but `uint8_var = 500` fails
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ol_ir::{
-    BinOp, Diagnostic, Expr, Literal, NodeDef, NodeKind, Port, Project, Severity, Type, UnaryOp,
+    BinOp, Diagnostic, Expr, Literal, NodeDef, NodeKind, Port, Project, RecordField, Severity,
+    Type, TypeBody, UnaryOp,
 };
 
 #[derive(Debug, Clone)]
@@ -41,8 +46,77 @@ impl CheckReport {
     }
 }
 
+/// Project-wide type information collected once and threaded through every
+/// expression-level check.
+#[derive(Debug, Default, Clone)]
+pub struct TypeContext {
+    aliases: HashMap<String, Type>,
+    records: HashMap<String, Vec<RecordField>>,
+    enums: HashMap<String, Vec<String>>,
+    enum_variant_to_name: HashMap<String, String>,
+}
+
+impl TypeContext {
+    pub fn from_project(project: &Project) -> Self {
+        let mut ctx = TypeContext::default();
+        for pkg in &project.packages {
+            for t in &pkg.types {
+                match &t.body {
+                    TypeBody::Alias { name, target } => {
+                        ctx.aliases.insert(name.clone(), target.clone());
+                    }
+                    TypeBody::Record { name, fields } => {
+                        ctx.records.insert(name.clone(), fields.clone());
+                    }
+                    TypeBody::Enum(e) => {
+                        ctx.enums.insert(e.name.clone(), e.variants.clone());
+                        for v in &e.variants {
+                            ctx.enum_variant_to_name
+                                .insert(v.clone(), e.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+        ctx
+    }
+
+    /// Resolve named types through the alias chain. Self-referential aliases
+    /// terminate at a fixed depth rather than looping forever.
+    pub fn resolve(&self, ty: &Type) -> Type {
+        let mut cur = ty.clone();
+        for _ in 0..64 {
+            match cur {
+                Type::Named(ref n) => match self.aliases.get(n) {
+                    Some(target) => {
+                        cur = target.clone();
+                    }
+                    None => return cur,
+                },
+                Type::Array { elem, len } => {
+                    return Type::Array {
+                        elem: Box::new(self.resolve(&elem)),
+                        len,
+                    };
+                }
+                other => return other,
+            }
+        }
+        cur
+    }
+
+    pub fn record_fields(&self, name: &str) -> Option<&Vec<RecordField>> {
+        self.records.get(name)
+    }
+
+    pub fn enum_for_variant(&self, variant: &str) -> Option<&str> {
+        self.enum_variant_to_name.get(variant).map(|s| s.as_str())
+    }
+}
+
 pub fn check_project(project: &Project) -> CheckReport {
     let mut diags = Vec::new();
+    let tctx = TypeContext::from_project(project);
 
     let mut signatures: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
     for n in project.all_nodes() {
@@ -61,7 +135,7 @@ pub fn check_project(project: &Project) -> CheckReport {
     }
 
     for n in project.all_nodes() {
-        check_node(n, &signatures, &mut diags);
+        check_node(n, &signatures, &tctx, &mut diags);
     }
 
     CheckReport { diagnostics: diags }
@@ -70,6 +144,7 @@ pub fn check_project(project: &Project) -> CheckReport {
 fn check_node(
     node: &NodeDef,
     sigs: &HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)>,
+    tctx: &TypeContext,
     diags: &mut Vec<Diagnostic>,
 ) {
     let ctx = format!("node {}", node.name);
@@ -145,13 +220,32 @@ fn check_node(
 
         check_pre_initialization(&eq.rhs, false, diags, &ctx);
 
-        if let Some(rhs_ty) = infer_expr_type(&eq.rhs, &env, sigs, node, diags, &ctx) {
+        // For single-output equations we pass the LHS's declared type as a
+        // bidirectional hint so integer literals adopt the target type when
+        // they fit (no implicit narrowing — only "untyped literal becomes
+        // typed in context").
+        let lhs_hint: Option<Type> = if eq.lhs.len() == 1 {
+            env.get(&eq.lhs[0]).cloned()
+        } else {
+            None
+        };
+        let inferred = infer_expr_type(
+            &eq.rhs,
+            &env,
+            sigs,
+            node,
+            diags,
+            &ctx,
+            tctx,
+            lhs_hint.as_ref(),
+        );
+
+        if let Some(rhs_ty) = inferred {
             match eq.lhs.len() {
                 1 => {
                     if let Some(expected) = env.get(&eq.lhs[0]) {
-                        if !types_compatible(expected, &rhs_ty)
-                            && rhs_ty != Type::Named("__tuple__".into())
-                        {
+                        let is_tuple = matches!(&rhs_ty, Type::Named(n) if n == "__tuple__");
+                        if !types_compatible(tctx, expected, &rhs_ty) && !is_tuple {
                             diags.push(
                                 Diagnostic::error(
                                     "E0040",
@@ -166,7 +260,8 @@ fn check_node(
                     }
                 }
                 _ => {
-                    if rhs_ty != Type::Named("__tuple__".into()) {
+                    let is_tuple = matches!(&rhs_ty, Type::Named(n) if n == "__tuple__");
+                    if !is_tuple {
                         diags.push(
                             Diagnostic::error(
                                 "E0041",
@@ -272,8 +367,22 @@ fn check_pre_initialization(
     }
 }
 
-fn types_compatible(a: &Type, b: &Type) -> bool {
-    a == b
+fn types_compatible(tctx: &TypeContext, a: &Type, b: &Type) -> bool {
+    tctx.resolve(a) == tctx.resolve(b)
+}
+
+fn fits_in_integer(value: i64, ty: &Type) -> bool {
+    match ty {
+        Type::Int8 => (i8::MIN as i64..=i8::MAX as i64).contains(&value),
+        Type::Int16 => (i16::MIN as i64..=i16::MAX as i64).contains(&value),
+        Type::Int32 => (i32::MIN as i64..=i32::MAX as i64).contains(&value),
+        Type::Int64 => true,
+        Type::Uint8 => (0..=u8::MAX as i64).contains(&value),
+        Type::Uint16 => (0..=u16::MAX as i64).contains(&value),
+        Type::Uint32 => (0..=u32::MAX as i64).contains(&value),
+        Type::Uint64 => value >= 0,
+        _ => false,
+    }
 }
 
 pub fn infer_expr_type(
@@ -283,28 +392,41 @@ pub fn infer_expr_type(
     node: &NodeDef,
     diags: &mut Vec<Diagnostic>,
     ctx: &str,
+    tctx: &TypeContext,
+    hint: Option<&Type>,
 ) -> Option<Type> {
     match expr {
         Expr::Const { lit } => Some(match lit {
             Literal::Bool { .. } => Type::Bool,
-            Literal::Int { .. } => Type::Int32,
-            Literal::Float { .. } => Type::Float64,
+            Literal::Int { value } => integer_literal_type(*value, hint, tctx),
+            Literal::Float { .. } => match hint.map(|h| tctx.resolve(h)) {
+                Some(t) if t.is_float() => t,
+                _ => Type::Float64,
+            },
         }),
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
-            None => {
-                diags.push(
-                    Diagnostic::error("E0080", format!("unknown identifier `{name}`"))
-                        .with_context(ctx.to_string()),
-                );
-                None
-            }
+            None => match tctx.enum_for_variant(name) {
+                Some(enum_name) => Some(Type::Named(enum_name.to_string())),
+                None => {
+                    diags.push(
+                        Diagnostic::error("E0080", format!("unknown identifier `{name}`"))
+                            .with_context(ctx.to_string()),
+                    );
+                    None
+                }
+            },
         },
         Expr::Unary { op, arg } => {
-            let a = infer_expr_type(arg, env, sigs, node, diags, ctx)?;
+            // -Const{n} is a signed integer literal; type it directly so the
+            // hint applies to the signed value rather than the unsigned magnitude.
+            if let (UnaryOp::Neg, Expr::Const { lit: Literal::Int { value } }) = (op, arg.as_ref()) {
+                return Some(integer_literal_type(-*value, hint, tctx));
+            }
+            let a = infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, hint)?;
             match op {
                 UnaryOp::Not => {
-                    if !a.is_bool() {
+                    if !tctx.resolve(&a).is_bool() {
                         diags.push(
                             Diagnostic::error("E0081", format!("`not` requires bool, got {a:?}"))
                                 .with_context(ctx.to_string()),
@@ -315,7 +437,7 @@ pub fn infer_expr_type(
                     }
                 }
                 UnaryOp::Neg => {
-                    if !a.is_numeric() {
+                    if !tctx.resolve(&a).is_numeric() {
                         diags.push(
                             Diagnostic::error(
                                 "E0082",
@@ -331,11 +453,27 @@ pub fn infer_expr_type(
             }
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = infer_expr_type(lhs, env, sigs, node, diags, ctx)?;
-            let r = infer_expr_type(rhs, env, sigs, node, diags, ctx)?;
+            // Logical and equality ops use a bool hint for sub-terms only
+            // when the op preserves bool; arithmetic/comparison ops forward
+            // the surrounding hint so integer literals adopt the target type.
+            let sub_hint = match op {
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => hint,
+                BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq => None,
+                BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies => None,
+            };
+            let l = infer_expr_type(lhs, env, sigs, node, diags, ctx, tctx, sub_hint)?;
+            // If LHS is a typed integer, pass it as a hint so a literal RHS
+            // takes the same width.
+            let rhs_hint = match (&l, sub_hint) {
+                (lt, _) if lt.is_integer() => Some(lt.clone()),
+                _ => sub_hint.cloned(),
+            };
+            let r = infer_expr_type(rhs, env, sigs, node, diags, ctx, tctx, rhs_hint.as_ref())?;
+            let lr = tctx.resolve(&l);
+            let rr = tctx.resolve(&r);
             match op {
                 BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies => {
-                    if !(l.is_bool() && r.is_bool()) {
+                    if !(lr.is_bool() && rr.is_bool()) {
                         diags.push(
                             Diagnostic::error(
                                 "E0083",
@@ -350,7 +488,7 @@ pub fn infer_expr_type(
                     Some(Type::Bool)
                 }
                 BinOp::Eq | BinOp::Neq => {
-                    if l != r {
+                    if !types_compatible(tctx, &l, &r) {
                         diags.push(
                             Diagnostic::error(
                                 "E0084",
@@ -363,7 +501,7 @@ pub fn infer_expr_type(
                     Some(Type::Bool)
                 }
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                    if !(l.is_numeric() && r.is_numeric() && l == r) {
+                    if !(lr.is_numeric() && rr.is_numeric() && types_compatible(tctx, &l, &r)) {
                         diags.push(
                             Diagnostic::error(
                                 "E0085",
@@ -378,7 +516,7 @@ pub fn infer_expr_type(
                     Some(Type::Bool)
                 }
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
-                    if !(l.is_numeric() && r.is_numeric() && l == r) {
+                    if !(lr.is_numeric() && rr.is_numeric() && types_compatible(tctx, &l, &r)) {
                         diags.push(
                             Diagnostic::error(
                                 "E0086",
@@ -399,17 +537,20 @@ pub fn infer_expr_type(
             then_branch,
             else_branch,
         } => {
-            let c = infer_expr_type(cond, env, sigs, node, diags, ctx)?;
-            if !c.is_bool() {
+            let c = infer_expr_type(cond, env, sigs, node, diags, ctx, tctx, Some(&Type::Bool))?;
+            if !tctx.resolve(&c).is_bool() {
                 diags.push(
                     Diagnostic::error("E0090", format!("if-condition must be bool, got {c:?}"))
                         .with_context(ctx.to_string()),
                 );
                 return None;
             }
-            let t = infer_expr_type(then_branch, env, sigs, node, diags, ctx)?;
-            let e = infer_expr_type(else_branch, env, sigs, node, diags, ctx)?;
-            if t != e {
+            let t = infer_expr_type(then_branch, env, sigs, node, diags, ctx, tctx, hint)?;
+            // Hint the else branch with the then-branch's type so literals on
+            // one side match a typed value on the other.
+            let else_hint = if hint.is_some() { hint } else { Some(&t) };
+            let e = infer_expr_type(else_branch, env, sigs, node, diags, ctx, tctx, else_hint)?;
+            if !types_compatible(tctx, &t, &e) {
                 diags.push(
                     Diagnostic::error(
                         "E0091",
@@ -421,11 +562,12 @@ pub fn infer_expr_type(
             }
             Some(t)
         }
-        Expr::Pre { arg } => infer_expr_type(arg, env, sigs, node, diags, ctx),
+        Expr::Pre { arg } => infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, hint),
         Expr::Arrow { init, body } => {
-            let i = infer_expr_type(init, env, sigs, node, diags, ctx)?;
-            let b = infer_expr_type(body, env, sigs, node, diags, ctx)?;
-            if i != b {
+            let i = infer_expr_type(init, env, sigs, node, diags, ctx, tctx, hint)?;
+            let body_hint = if hint.is_some() { hint } else { Some(&i) };
+            let b = infer_expr_type(body, env, sigs, node, diags, ctx, tctx, body_hint)?;
+            if !types_compatible(tctx, &i, &b) {
                 diags.push(
                     Diagnostic::error(
                         "E0092",
@@ -473,8 +615,10 @@ pub fn infer_expr_type(
                 return None;
             }
             for (i, (a, p)) in args.iter().zip(inputs.iter()).enumerate() {
-                if let Some(t) = infer_expr_type(a, env, sigs, node, diags, ctx) {
-                    if !types_compatible(&p.ty, &t) {
+                if let Some(t) =
+                    infer_expr_type(a, env, sigs, node, diags, ctx, tctx, Some(&p.ty))
+                {
+                    if !types_compatible(tctx, &p.ty, &t) {
                         diags.push(
                             Diagnostic::error(
                                 "E0103",
@@ -495,24 +639,100 @@ pub fn infer_expr_type(
             }
         }
         Expr::Field { base, field } => {
-            let _ = infer_expr_type(base, env, sigs, node, diags, ctx)?;
-            Some(Type::Named(field.clone()))
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
+            let resolved = tctx.resolve(&bt);
+            match resolved {
+                Type::Named(ref rec_name) => match tctx.record_fields(rec_name) {
+                    Some(fields) => match fields.iter().find(|f| f.name == *field) {
+                        Some(f) => Some(f.ty.clone()),
+                        None => {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0120",
+                                    format!(
+                                        "record `{rec_name}` has no field `{field}`"
+                                    ),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                            None
+                        }
+                    },
+                    None => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0121",
+                                format!(
+                                    "cannot access field `{field}`: `{rec_name}` is not a record type"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        None
+                    }
+                },
+                other => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0122",
+                            format!("cannot access field `{field}` on non-record type {other:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    None
+                }
+            }
         }
         Expr::Index { base, index } => {
-            let bt = infer_expr_type(base, env, sigs, node, diags, ctx)?;
-            let _it = infer_expr_type(index, env, sigs, node, diags, ctx)?;
-            if let Type::Array { elem, .. } = bt {
-                Some(*elem)
-            } else {
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
+            // Array index must be an integer expression; default-hint Int32
+            // so literal indices like `xs[3]` type correctly without
+            // forcing the user to annotate.
+            let it = infer_expr_type(
+                index,
+                env,
+                sigs,
+                node,
+                diags,
+                ctx,
+                tctx,
+                Some(&Type::Int32),
+            )?;
+            if !tctx.resolve(&it).is_integer() {
                 diags.push(
-                    Diagnostic::error("E0110", format!("indexing a non-array of type {bt:?}"))
-                        .with_context(ctx.to_string()),
+                    Diagnostic::error(
+                        "E0111",
+                        format!("array index must be an integer, got {it:?}"),
+                    )
+                    .with_context(ctx.to_string()),
                 );
-                None
+            }
+            match tctx.resolve(&bt) {
+                Type::Array { elem, .. } => Some(*elem),
+                other => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0110",
+                            format!("indexing a non-array of type {other:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    None
+                }
             }
         }
         Expr::Tuple { .. } => Some(Type::Named("__tuple__".into())),
     }
+}
+
+fn integer_literal_type(value: i64, hint: Option<&Type>, tctx: &TypeContext) -> Type {
+    if let Some(h) = hint {
+        let resolved = tctx.resolve(h);
+        if resolved.is_integer() && fits_in_integer(value, &resolved) {
+            return resolved;
+        }
+    }
+    Type::Int32
 }
 
 /// Build a per-variable dependency graph that ignores edges through `pre` /
