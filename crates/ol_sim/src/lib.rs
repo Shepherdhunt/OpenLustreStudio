@@ -4,11 +4,17 @@
 //! produces a CSV output trace plus contract-monitor results. Each cycle is
 //! a single read-eval-write step over the IR — the same semantics the C-Lite
 //! emitter targets.
+//!
+//! Stateful subnode calls are supported: every `Expr::Call` to a stateful
+//! operator gets its own [`State`] keyed by the call expression's address in
+//! the IR. This is sound because the [`Sim`] holds an immutable borrow of the
+//! [`Project`] for its entire lifetime, so the expression pointers it stores
+//! cannot be invalidated.
 
 use std::collections::{BTreeMap, HashMap};
 
 use ol_contract_ir::{parse_contracts, ContractDef};
-use ol_ir::{BinOp, Expr, Literal, NodeDef, Project, Type, UnaryOp};
+use ol_ir::{BinOp, Expr, Literal, NodeDef, NodeKind, Project, Type, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -97,7 +103,7 @@ pub enum SimError {
     EvalError(String),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct State {
     cycle: usize,
     prev: HashMap<String, Value>,
@@ -108,6 +114,9 @@ pub struct Sim<'a> {
     pub node: &'a NodeDef,
     state: State,
     contract: Option<ContractDef>,
+    /// Per-call-site state, keyed by the address of the `Expr::Call` in the IR.
+    /// Populated lazily on first invocation.
+    call_states: HashMap<usize, State>,
 }
 
 impl<'a> Sim<'a> {
@@ -130,13 +139,15 @@ impl<'a> Sim<'a> {
             node,
             state: State::default(),
             contract,
+            call_states: HashMap::new(),
         })
     }
 
-    pub fn step(&mut self, inputs: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, SimError> {
+    pub fn step(
+        &mut self,
+        inputs: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, SimError> {
         let mut env: BTreeMap<String, Value> = inputs.clone();
-        // Provide defaults for outputs/locals so referencing them before
-        // assignment yields a deterministic zero rather than panicking.
         for p in &self.node.outputs {
             env.entry(p.name.clone())
                 .or_insert_with(|| default_value(&p.ty));
@@ -146,11 +157,16 @@ impl<'a> Sim<'a> {
                 .or_insert_with(|| default_value(&l.ty));
         }
 
-        // We iterate equations in declaration order. Combinational cycles
-        // have been ruled out at typecheck time, so a single pass suffices for
-        // the Phase 0 profile.
+        // Combinational cycles have been ruled out at typecheck time, so a
+        // single pass in declaration order suffices for the Phase 0 profile.
         for eq in &self.node.equations {
-            let value = eval(&eq.rhs, &env, &self.state, self.project)?;
+            let value = eval(
+                &eq.rhs,
+                &env,
+                &mut self.state,
+                &mut self.call_states,
+                self.project,
+            )?;
             if eq.lhs.len() == 1 {
                 env.insert(eq.lhs[0].clone(), value);
             } else if let Value::Tuple(items) = value {
@@ -164,7 +180,6 @@ impl<'a> Sim<'a> {
             }
         }
 
-        // Snapshot current bindings into `prev` for the next cycle.
         for (k, v) in &env {
             self.state.prev.insert(k.clone(), v.clone());
         }
@@ -228,11 +243,8 @@ impl<'a> Sim<'a> {
                     modes.join("|")
                 };
                 trace.active_modes.push(modes);
-                // CSV-safe representation of the active mode list.
                 let escaped = label.replace(',', ";");
-                out_row.push(Value::Float(0.0));
-                let last = out_row.len() - 1;
-                out_row[last] = Value::ModeLabel(escaped);
+                out_row.push(Value::ModeLabel(escaped));
             }
             trace.rows.push(out_row);
         }
@@ -270,13 +282,14 @@ fn evaluate_active_modes(
     let mut env: BTreeMap<String, Value> = BTreeMap::new();
     env.extend(inputs.clone());
     env.extend(outputs.clone());
-    let state = State::default();
+    let mut state = State::default();
+    let mut call_states: HashMap<usize, State> = HashMap::new();
     let project = Project::default();
     let mut active = Vec::new();
     for m in &c.modes {
         let mut hit = true;
         for r in &m.requires {
-            match eval(r, &env, &state, &project) {
+            match eval(r, &env, &mut state, &mut call_states, &project) {
                 Ok(Value::Bool(true)) => {}
                 _ => {
                     hit = false;
@@ -294,7 +307,8 @@ fn evaluate_active_modes(
 fn eval(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
-    state: &State,
+    state: &mut State,
+    call_states: &mut HashMap<usize, State>,
     project: &Project,
 ) -> Result<Value, SimError> {
     match expr {
@@ -308,7 +322,7 @@ fn eval(
             .cloned()
             .ok_or_else(|| SimError::EvalError(format!("unbound variable `{name}`"))),
         Expr::Unary { op, arg } => {
-            let v = eval(arg, env, state, project)?;
+            let v = eval(arg, env, state, call_states, project)?;
             Ok(match (op, v) {
                 (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
                 (UnaryOp::Neg, Value::Int(i)) => Value::Int(-i),
@@ -321,8 +335,8 @@ fn eval(
             })
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = eval(lhs, env, state, project)?;
-            let r = eval(rhs, env, state, project)?;
+            let l = eval(lhs, env, state, call_states, project)?;
+            let r = eval(rhs, env, state, call_states, project)?;
             eval_binary(*op, l, r)
         }
         Expr::IfThenElse {
@@ -330,10 +344,10 @@ fn eval(
             then_branch,
             else_branch,
         } => {
-            let c = eval(cond, env, state, project)?;
+            let c = eval(cond, env, state, call_states, project)?;
             match c {
-                Value::Bool(true) => eval(then_branch, env, state, project),
-                Value::Bool(false) => eval(else_branch, env, state, project),
+                Value::Bool(true) => eval(then_branch, env, state, call_states, project),
+                Value::Bool(false) => eval(else_branch, env, state, call_states, project),
                 other => Err(SimError::EvalError(format!(
                     "if-condition is not bool: {other:?}"
                 ))),
@@ -356,65 +370,123 @@ fn eval(
         }
         Expr::Arrow { init, body } => {
             if state.cycle == 0 {
-                eval(init, env, state, project)
+                eval(init, env, state, call_states, project)
             } else {
-                eval(body, env, state, project)
+                eval(body, env, state, call_states, project)
             }
         }
-        Expr::Call { node, args } => {
-            // Function calls only — operator calls require nested state, which
-            // is out of scope for this MVP simulator. Functions are stateless
-            // so we can evaluate them as a fresh expression substitution.
-            let callee = project
-                .find_node(node)
-                .ok_or_else(|| SimError::EvalError(format!("unknown callee `{node}`")))?;
-            if !callee.is_function() {
-                return Err(SimError::EvalError(format!(
-                    "Phase 0 simulator only inlines function calls; `{node}` is stateful"
-                )));
-            }
-            if args.len() != callee.inputs.len() {
-                return Err(SimError::EvalError(format!(
-                    "call to `{}` arity mismatch: expected {}, got {}",
-                    node,
-                    callee.inputs.len(),
-                    args.len()
-                )));
-            }
-            let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
-            for (p, a) in callee.inputs.iter().zip(args.iter()) {
-                callee_env.insert(p.name.clone(), eval(a, env, state, project)?);
-            }
-            for p in &callee.outputs {
-                callee_env.insert(p.name.clone(), default_value(&p.ty));
-            }
-            for l in &callee.locals {
-                callee_env.insert(l.name.clone(), default_value(&l.ty));
-            }
-            let local_state = State::default();
-            for eq in &callee.equations {
-                let v = eval(&eq.rhs, &callee_env, &local_state, project)?;
-                if eq.lhs.len() == 1 {
-                    callee_env.insert(eq.lhs[0].clone(), v);
-                }
-            }
-            if callee.outputs.len() == 1 {
-                Ok(callee_env
-                    .remove(&callee.outputs[0].name)
-                    .unwrap_or(Value::Bool(false)))
-            } else {
-                Ok(Value::Tuple(
-                    callee
-                        .outputs
-                        .iter()
-                        .map(|p| callee_env.remove(&p.name).unwrap_or(Value::Bool(false)))
-                        .collect(),
-                ))
-            }
-        }
+        Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project),
         Expr::Field { .. } | Expr::Index { .. } | Expr::Tuple { .. } => Err(SimError::EvalError(
             "records, arrays, and tuple literals are not supported in the Phase 0 simulator".into(),
         )),
+    }
+}
+
+fn eval_call(
+    call_expr: &Expr,
+    node: &str,
+    args: &[Expr],
+    env: &BTreeMap<String, Value>,
+    state: &mut State,
+    call_states: &mut HashMap<usize, State>,
+    project: &Project,
+) -> Result<Value, SimError> {
+    let callee = project
+        .find_node(node)
+        .ok_or_else(|| SimError::EvalError(format!("unknown callee `{node}`")))?;
+    if args.len() != callee.inputs.len() {
+        return Err(SimError::EvalError(format!(
+            "call to `{}` arity mismatch: expected {}, got {}",
+            node,
+            callee.inputs.len(),
+            args.len()
+        )));
+    }
+    if matches!(callee.kind, NodeKind::Imported) {
+        return Err(SimError::EvalError(format!(
+            "imported operator `{node}` cannot be simulated; provide a model or stub"
+        )));
+    }
+
+    // Evaluate arguments in the OUTER scope (caller's state).
+    let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
+    for a in args {
+        arg_values.push(eval(a, env, state, call_states, project)?);
+    }
+
+    let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
+    for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
+        callee_env.insert(p.name.clone(), v);
+    }
+    for p in &callee.outputs {
+        callee_env.insert(p.name.clone(), default_value(&p.ty));
+    }
+    for l in &callee.locals {
+        callee_env.insert(l.name.clone(), default_value(&l.ty));
+    }
+
+    match callee.kind {
+        NodeKind::Function => {
+            // Stateless: a single pass over the body with a throwaway state.
+            let mut throwaway = State::default();
+            for eq in &callee.equations {
+                let v = eval(&eq.rhs, &callee_env, &mut throwaway, call_states, project)?;
+                bind_lhs(&mut callee_env, eq, v)?;
+            }
+            extract_output(callee, &mut callee_env)
+        }
+        NodeKind::Operator => {
+            // Stateful: take this call site's State, evaluate the body in its
+            // scope, snapshot, and put it back. The call-site key is the
+            // address of the `Expr::Call` node — stable for Sim's lifetime.
+            let key = call_expr as *const Expr as usize;
+            let mut sub_state = call_states.remove(&key).unwrap_or_default();
+            for eq in &callee.equations {
+                let v = eval(&eq.rhs, &callee_env, &mut sub_state, call_states, project)?;
+                bind_lhs(&mut callee_env, eq, v)?;
+            }
+            for (k, v) in &callee_env {
+                sub_state.prev.insert(k.clone(), v.clone());
+            }
+            sub_state.cycle += 1;
+            call_states.insert(key, sub_state);
+            extract_output(callee, &mut callee_env)
+        }
+        NodeKind::Imported => unreachable!(),
+    }
+}
+
+fn bind_lhs(
+    env: &mut BTreeMap<String, Value>,
+    eq: &ol_ir::Equation,
+    value: Value,
+) -> Result<(), SimError> {
+    if eq.lhs.len() == 1 {
+        env.insert(eq.lhs[0].clone(), value);
+        Ok(())
+    } else if let Value::Tuple(items) = value {
+        for (n, v) in eq.lhs.iter().zip(items.into_iter()) {
+            env.insert(n.clone(), v);
+        }
+        Ok(())
+    } else {
+        Err(SimError::EvalError(format!(
+            "multi-output equation produced a non-tuple value: {value:?}"
+        )))
+    }
+}
+
+fn extract_output(callee: &NodeDef, env: &mut BTreeMap<String, Value>) -> Result<Value, SimError> {
+    if callee.outputs.len() == 1 {
+        Ok(env.remove(&callee.outputs[0].name).unwrap_or(Value::Bool(false)))
+    } else {
+        Ok(Value::Tuple(
+            callee
+                .outputs
+                .iter()
+                .map(|p| env.remove(&p.name).unwrap_or(Value::Bool(false)))
+                .collect(),
+        ))
     }
 }
 

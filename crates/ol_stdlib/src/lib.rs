@@ -83,6 +83,38 @@ impl Library {
         diags.extend(ol_contract_check::check_project(&project).diagnostics);
         diags
     }
+
+    /// Append every library block and contract into `project` as an additional
+    /// package named `package_name`. Node names that already exist in the
+    /// project are skipped, so user definitions always win over the stdlib.
+    pub fn merge_into(&self, project: &mut Project, package_name: &str) {
+        let existing: std::collections::HashSet<String> = project
+            .all_nodes()
+            .map(|n| n.name.clone())
+            .collect();
+        let nodes: Vec<NodeDef> = self
+            .nodes()
+            .filter(|n| !existing.contains(&n.name))
+            .cloned()
+            .collect();
+        let kept_contract_names: std::collections::HashSet<String> = nodes
+            .iter()
+            .filter_map(|n| n.contract.clone())
+            .collect();
+        let contracts: Vec<serde_json::Value> = self
+            .contracts()
+            .filter(|c| kept_contract_names.contains(&c.name))
+            .map(|c| serde_json::to_value(c).expect("ContractDef serializes"))
+            .collect();
+        project.packages.push(Package {
+            name: package_name.to_string(),
+            types: vec![],
+            constants: vec![],
+            nodes,
+            contracts,
+            imported_operators: vec![],
+        });
+    }
 }
 
 /// Parse one library YAML document into one or more blocks. A document may be a

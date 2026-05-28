@@ -30,3 +30,7 @@ path = "typecheck_rules.rs"
 [[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
+
+[[test]]
+name = "stdlib_subnode_calls"
+path = "stdlib_subnode_calls.rs"

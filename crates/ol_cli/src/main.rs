@@ -28,6 +28,9 @@ enum Cmd {
         /// Also load imported-operator manifests from this directory.
         #[arg(long)]
         imports: Option<PathBuf>,
+        /// Fold the standard block library at this path into the project.
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
     /// Emit Lustre + CoCoSpec to a directory.
     EmitLustre {
@@ -37,12 +40,16 @@ enum Cmd {
         /// Use legacy `(*@contract ... @*)` syntax instead of modern `con/noc`.
         #[arg(long)]
         legacy: bool,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
     /// Emit Directional C-Lite + contract monitors to a directory.
     EmitClite {
         model: PathBuf,
         #[arg(short, long)]
         out: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
     /// Run the IR simulator against a CSV input vector.
     Simulate {
@@ -53,6 +60,8 @@ enum Cmd {
         inputs: PathBuf,
         #[arg(long)]
         out: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
     /// Invoke Kind 2 against the generated Lustre.
     Prove {
@@ -67,9 +76,15 @@ enum Cmd {
         /// Directory to keep generated artifacts in.
         #[arg(long)]
         workdir: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
     /// Contract-check only.
-    ContractCheck { model: PathBuf },
+    ContractCheck {
+        model: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+    },
     /// Load the standard block library and type/contract-check every block.
     LibCheck {
         /// Directory of library YAML files (e.g. `libraries`).
@@ -87,23 +102,53 @@ enum ProveMode {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Check { model, imports } => cmd_check(&model, imports.as_deref()),
-        Cmd::EmitLustre { model, out, legacy } => cmd_emit_lustre(&model, &out, legacy),
-        Cmd::EmitClite { model, out } => cmd_emit_clite(&model, &out),
+        Cmd::Check {
+            model,
+            imports,
+            with_stdlib,
+        } => cmd_check(&model, imports.as_deref(), with_stdlib.as_deref()),
+        Cmd::EmitLustre {
+            model,
+            out,
+            legacy,
+            with_stdlib,
+        } => cmd_emit_lustre(&model, &out, legacy, with_stdlib.as_deref()),
+        Cmd::EmitClite {
+            model,
+            out,
+            with_stdlib,
+        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref()),
         Cmd::Simulate {
             model,
             node,
             inputs,
             out,
-        } => cmd_simulate(&model, node.as_deref(), &inputs, out.as_deref()),
+            with_stdlib,
+        } => cmd_simulate(
+            &model,
+            node.as_deref(),
+            &inputs,
+            out.as_deref(),
+            with_stdlib.as_deref(),
+        ),
         Cmd::Prove {
             model,
             node,
             mode,
             kind2,
             workdir,
-        } => cmd_prove(&model, node.as_deref(), mode, &kind2, workdir.as_deref()),
-        Cmd::ContractCheck { model } => cmd_contract_check(&model),
+            with_stdlib,
+        } => cmd_prove(
+            &model,
+            node.as_deref(),
+            mode,
+            &kind2,
+            workdir.as_deref(),
+            with_stdlib.as_deref(),
+        ),
+        Cmd::ContractCheck { model, with_stdlib } => {
+            cmd_contract_check(&model, with_stdlib.as_deref())
+        }
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
     }
 }
@@ -112,8 +157,31 @@ fn load(model: &Path) -> Result<ol_ir::Project> {
     ol_ir::load_project(model).with_context(|| format!("loading model {}", model.display()))
 }
 
-fn cmd_check(model: &Path, imports: Option<&Path>) -> Result<()> {
-    let project = load(model)?;
+fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol_ir::Project> {
+    let mut project = load(model)?;
+    if let Some(dir) = stdlib {
+        let lib = ol_stdlib::load_dir(dir)
+            .with_context(|| format!("loading stdlib from {}", dir.display()))?;
+        let errors: Vec<String> = lib
+            .check()
+            .into_iter()
+            .filter(|d| matches!(d.severity, ol_ir::Severity::Error))
+            .map(|d| d.render())
+            .collect();
+        if !errors.is_empty() {
+            anyhow::bail!("stdlib failed validation:\n{}", errors.join("\n"));
+        }
+        lib.merge_into(&mut project, "stdlib");
+    }
+    Ok(project)
+}
+
+fn cmd_check(
+    model: &Path,
+    imports: Option<&Path>,
+    with_stdlib: Option<&Path>,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
     let report = ol_typecheck::check_project(&project);
     for d in &report.diagnostics {
         println!("{}", d.render());
@@ -143,8 +211,8 @@ fn cmd_check(model: &Path, imports: Option<&Path>) -> Result<()> {
     Ok(())
 }
 
-fn cmd_contract_check(model: &Path) -> Result<()> {
-    let project = load(model)?;
+fn cmd_contract_check(model: &Path, with_stdlib: Option<&Path>) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
     let creport = ol_contract_check::check_project(&project);
     for d in &creport.diagnostics {
         println!("{}", d.render());
@@ -178,8 +246,13 @@ fn cmd_lib_check(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_emit_lustre(model: &Path, out: &Path, legacy: bool) -> Result<()> {
-    let project = load(model)?;
+fn cmd_emit_lustre(
+    model: &Path,
+    out: &Path,
+    legacy: bool,
+    with_stdlib: Option<&Path>,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let lus = ol_lustre_emit::emit_project(&project);
     std::fs::write(out.join("model.lus"), &lus)?;
@@ -194,8 +267,8 @@ fn cmd_emit_lustre(model: &Path, out: &Path, legacy: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_emit_clite(model: &Path, out: &Path) -> Result<()> {
-    let project = load(model)?;
+fn cmd_emit_clite(model: &Path, out: &Path, with_stdlib: Option<&Path>) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let clite_dir = out.join("clite");
     let mon_dir = out.join("monitors");
@@ -222,8 +295,9 @@ fn cmd_simulate(
     node: Option<&str>,
     inputs: &Path,
     out: Option<&Path>,
+    with_stdlib: Option<&Path>,
 ) -> Result<()> {
-    let project = load(model)?;
+    let project = load_with_stdlib(model, with_stdlib)?;
     let node_name = node
         .map(|s| s.to_string())
         .or_else(|| project.main.clone())
@@ -250,8 +324,9 @@ fn cmd_prove(
     mode: ProveMode,
     kind2: &str,
     workdir: Option<&Path>,
+    with_stdlib: Option<&Path>,
 ) -> Result<()> {
-    let project = load(model)?;
+    let project = load_with_stdlib(model, with_stdlib)?;
     let work = match workdir {
         Some(p) => p.to_path_buf(),
         None => std::env::temp_dir().join("openlustre_prove"),
