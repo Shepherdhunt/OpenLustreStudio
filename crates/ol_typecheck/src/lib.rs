@@ -54,6 +54,10 @@ pub struct TypeContext {
     records: HashMap<String, Vec<RecordField>>,
     enums: HashMap<String, Vec<String>>,
     enum_variant_to_name: HashMap<String, String>,
+    /// Names of project-wide constants, with their declared types. Looked up
+    /// after the local env so a local always shadows a const of the same
+    /// name.
+    constants: HashMap<String, Type>,
 }
 
 impl TypeContext {
@@ -76,6 +80,9 @@ impl TypeContext {
                         }
                     }
                 }
+            }
+            for c in &pkg.constants {
+                ctx.constants.insert(c.name.clone(), c.ty.clone());
             }
         }
         ctx
@@ -112,11 +119,17 @@ impl TypeContext {
     pub fn enum_for_variant(&self, variant: &str) -> Option<&str> {
         self.enum_variant_to_name.get(variant).map(|s| s.as_str())
     }
+
+    pub fn const_type(&self, name: &str) -> Option<&Type> {
+        self.constants.get(name)
+    }
 }
 
 pub fn check_project(project: &Project) -> CheckReport {
     let mut diags = Vec::new();
     let tctx = TypeContext::from_project(project);
+
+    check_constants(project, &tctx, &mut diags);
 
     let mut signatures: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
     for n in project.all_nodes() {
@@ -139,6 +152,70 @@ pub fn check_project(project: &Project) -> CheckReport {
     }
 
     CheckReport { diagnostics: diags }
+}
+
+fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagnostic>) {
+    // Synthesize a tiny anonymous node that lets us reuse infer_expr_type for
+    // constant-value typechecking. Const RHS can reference other constants
+    // and enum variants but nothing in `env`.
+    let dummy_node = NodeDef {
+        name: "<consts>".into(),
+        kind: NodeKind::Function,
+        inputs: vec![],
+        outputs: vec![],
+        locals: vec![],
+        equations: vec![],
+        contract: None,
+        diagram: Default::default(),
+    };
+    let empty_env: BTreeMap<String, Type> = BTreeMap::new();
+    let empty_sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            let ctx = format!("constant {}", c.name);
+            if !seen.insert(c.name.clone()) {
+                diags.push(
+                    Diagnostic::error("E0003", format!("duplicate constant `{}`", c.name))
+                        .with_context(ctx.clone()),
+                );
+                continue;
+            }
+            if c.value.contains_temporal() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0004",
+                        "constant values may not use temporal operators (`pre`, `->`)",
+                    )
+                    .with_context(ctx.clone()),
+                );
+            }
+            if let Some(inferred) = infer_expr_type(
+                &c.value,
+                &empty_env,
+                &empty_sigs,
+                &dummy_node,
+                diags,
+                &ctx,
+                tctx,
+                Some(&c.ty),
+            ) {
+                if !types_compatible(tctx, &c.ty, &inferred) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0005",
+                            format!(
+                                "constant `{}` declared as {:?} but value has type {:?}",
+                                c.name, c.ty, inferred
+                            ),
+                        )
+                        .with_context(ctx),
+                    );
+                }
+            }
+        }
+    }
 }
 
 fn check_node(
@@ -406,15 +483,18 @@ pub fn infer_expr_type(
         }),
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
-            None => match tctx.enum_for_variant(name) {
-                Some(enum_name) => Some(Type::Named(enum_name.to_string())),
-                None => {
-                    diags.push(
-                        Diagnostic::error("E0080", format!("unknown identifier `{name}`"))
-                            .with_context(ctx.to_string()),
-                    );
-                    None
-                }
+            None => match tctx.const_type(name) {
+                Some(t) => Some(t.clone()),
+                None => match tctx.enum_for_variant(name) {
+                    Some(enum_name) => Some(Type::Named(enum_name.to_string())),
+                    None => {
+                        diags.push(
+                            Diagnostic::error("E0080", format!("unknown identifier `{name}`"))
+                                .with_context(ctx.to_string()),
+                        );
+                        None
+                    }
+                },
             },
         },
         Expr::Unary { op, arg } => {

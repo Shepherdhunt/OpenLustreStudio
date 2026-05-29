@@ -32,6 +32,19 @@ pub fn emit_package(pkg: &Package, out: &mut String) {
         }
         out.push('\n');
     }
+    if !pkg.constants.is_empty() {
+        let _ = writeln!(out, "-- package: {} (constants)", pkg.name);
+        for c in &pkg.constants {
+            let _ = writeln!(
+                out,
+                "const {} : {} = {};",
+                c.name,
+                c.ty.lustre_name(),
+                format_expr(&c.value)
+            );
+        }
+        out.push('\n');
+    }
     for n in &pkg.nodes {
         emit_node(n, out);
         out.push('\n');

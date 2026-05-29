@@ -52,6 +52,10 @@ name = "state_machine_codegen"
 path = "state_machine_codegen.rs"
 
 [[test]]
+name = "constants"
+path = "constants.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

@@ -136,6 +136,9 @@ pub struct Sim<'a> {
     /// Per-call-site state, keyed by the address of the `Expr::Call` in the IR.
     /// Populated lazily on first invocation.
     call_states: HashMap<usize, State>,
+    /// Project-wide constants, pre-evaluated once at construction time. Seeded
+    /// into every step's env so equations can name them directly.
+    consts: BTreeMap<String, Value>,
 }
 
 impl<'a> Sim<'a> {
@@ -153,12 +156,33 @@ impl<'a> Sim<'a> {
                 }
             }
         }
+
+        // Evaluate constants in declaration order. Later constants may
+        // reference earlier ones because we extend the env as we go.
+        let mut consts: BTreeMap<String, Value> = BTreeMap::new();
+        for pkg in &project.packages {
+            for c in &pkg.constants {
+                let mut throwaway_state = State::default();
+                let mut throwaway_calls: HashMap<usize, State> = HashMap::new();
+                let v = eval(
+                    &c.value,
+                    &consts,
+                    &mut throwaway_state,
+                    &mut throwaway_calls,
+                    project,
+                )
+                .map_err(|e| SimError::EvalError(format!("constant `{}`: {e}", c.name)))?;
+                consts.insert(c.name.clone(), v);
+            }
+        }
+
         Ok(Sim {
             project,
             node,
             state: State::default(),
             contract,
             call_states: HashMap::new(),
+            consts,
         })
     }
 
@@ -166,7 +190,13 @@ impl<'a> Sim<'a> {
         &mut self,
         inputs: &BTreeMap<String, Value>,
     ) -> Result<BTreeMap<String, Value>, SimError> {
-        let mut env: BTreeMap<String, Value> = inputs.clone();
+        // Constants are visible everywhere in a node's body; seed them first
+        // so inputs/outputs/locals with the same name (which shouldn't exist
+        // anyway — typecheck rejects collisions) would override them.
+        let mut env: BTreeMap<String, Value> = self.consts.clone();
+        for (k, v) in inputs {
+            env.insert(k.clone(), v.clone());
+        }
         for p in &self.node.outputs {
             env.entry(p.name.clone())
                 .or_insert_with(|| default_value(&p.ty, self.project));
@@ -563,7 +593,26 @@ fn eval_call(
         arg_values.push(eval(a, env, state, call_states, project)?);
     }
 
+    // Project-wide constants are visible inside every callee body. We
+    // re-evaluate them here rather than threading a state through every eval
+    // — constants don't use temporal operators or calls, so the throwaway
+    // state/call_states never matter.
     let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            let mut throw_state = State::default();
+            let mut throw_calls: HashMap<usize, State> = HashMap::new();
+            if let Ok(v) = eval(
+                &c.value,
+                &callee_env,
+                &mut throw_state,
+                &mut throw_calls,
+                project,
+            ) {
+                callee_env.insert(c.name.clone(), v);
+            }
+        }
+    }
     for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
         callee_env.insert(p.name.clone(), v);
     }

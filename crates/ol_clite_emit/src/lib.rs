@@ -64,6 +64,17 @@ pub fn emit_project(project: &Project) -> EmittedClite {
         }
     }
 
+    // Constants render as `#define` so they're usable in C initializers and
+    // freely referenced from node bodies as bare identifiers.
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            emit_const(c, &mut header);
+        }
+        if !pkg.constants.is_empty() {
+            header.push('\n');
+        }
+    }
+
     // Topologically sort nodes so each callee's struct/function is declared
     // before any caller that embeds or invokes it.
     let ordered = topo_sort_nodes(project);
@@ -74,6 +85,60 @@ pub fn emit_project(project: &Project) -> EmittedClite {
 
     let _ = writeln!(header, "#endif /* OL_GENERATED_H */");
     EmittedClite { header, source }
+}
+
+fn emit_const(c: &ol_ir::ConstDef, out: &mut String) {
+    let _ = writeln!(out, "#define {} ({})", c.name, format_const_expr(&c.value));
+}
+
+/// Render a constant's Expr in C syntax. Handles the subset of Expr that can
+/// appear in a well-formed const value: literals, var references (to other
+/// consts / enum variants), unary, binary, and if/then/else.
+fn format_const_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Const { lit } => match lit {
+            Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
+            Literal::Int { value } => format!("({value})"),
+            Literal::Float { value } => format!("({value})"),
+        },
+        Expr::Var { name } => name.clone(),
+        Expr::Unary { op, arg } => {
+            let a = format_const_expr(arg);
+            match op {
+                UnaryOp::Not => format!("(!{a})"),
+                UnaryOp::Neg => format!("(-{a})"),
+            }
+        }
+        Expr::Binary { op, lhs, rhs } => {
+            let l = format_const_expr(lhs);
+            let r = format_const_expr(rhs);
+            let sym = match op {
+                BinOp::And => "&&",
+                BinOp::Or => "||",
+                BinOp::Xor => "^",
+                BinOp::Implies => return format!("((!{l}) || ({r}))"),
+                BinOp::Eq => "==",
+                BinOp::Neq => "!=",
+                BinOp::Lt => "<",
+                BinOp::Le => "<=",
+                BinOp::Gt => ">",
+                BinOp::Ge => ">=",
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+            };
+            format!("({l} {sym} {r})")
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => format!(
+            "({} ? {} : {})",
+            format_const_expr(cond),
+            format_const_expr(then_branch),
+            format_const_expr(else_branch)
+        ),
+        _ => "/* unsupported in const */ 0".into(),
+    }
 }
 
 fn emit_typedef(t: &TypeDef, out: &mut String) {
