@@ -69,13 +69,13 @@ fn lowering_emits_a_state_enum_and_a_node() {
     let ty = pkg
         .types
         .iter()
-        .find(|t| t.name() == "Toggle_State")
+        .find(|t| t.name() == "Toggle_StateEnum")
         .expect("state enum present");
     match &ty.body {
         ol_ir::TypeBody::Enum(e) => {
             assert_eq!(e.variants, vec!["OFF".to_string(), "ON".to_string()]);
         }
-        _ => panic!("Toggle_State should be an enum"),
+        _ => panic!("Toggle_StateEnum should be an enum"),
     }
 
     let node = pkg.find_node("Toggle").expect("Toggle node lowered");

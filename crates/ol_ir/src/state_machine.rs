@@ -13,9 +13,9 @@
 //! initial state `S0`:
 //!
 //! ```text
-//! type M_State = enum { S1, S2, ... };
+//! type M_StateEnum = enum { S1, S2, ... };
 //! operator M(in...) returns (out...);
-//! var __sm_state, __sm_next_state: M_State;
+//! var __sm_state, __sm_next_state: M_StateEnum;
 //! let
 //!   __sm_state = S0 -> pre __sm_next_state;
 //!   __sm_next_state =
@@ -131,7 +131,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         }
     }
 
-    let state_type_name = format!("{}_State", sm.name);
+    let state_type_name = format!("{}_StateEnum", sm.name);
     let state_ty = Type::Named(state_type_name.clone());
 
     let state_type = TypeDef {
