@@ -21,6 +21,7 @@
 //! initialized in the parent's `_init`.
 
 pub mod harness;
+pub mod imported;
 pub mod manifest;
 pub mod monitor;
 
@@ -31,6 +32,7 @@ use ol_ir::{
     BinOp, Equation, Expr, Literal, NodeDef, NodeKind, Project, Type, TypeBody, TypeDef, UnaryOp,
 };
 
+pub use imported::{emit_wrapper, expected_prototype, BuildPlan, ImportedWrapper};
 pub use manifest::{load_manifest_dir, ImportedOperator};
 
 #[derive(Debug, Clone)]

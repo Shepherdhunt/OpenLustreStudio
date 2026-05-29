@@ -55,6 +55,10 @@ enum Cmd {
         /// on stdin in the same shape as `openlustre simulate`.
         #[arg(long)]
         driver: bool,
+        /// Generate C wrappers for imported-operator manifests in this
+        /// directory, plus a build manifest listing external sources to link.
+        #[arg(long, value_name = "DIR")]
+        imports: Option<PathBuf>,
     },
     /// Run the IR simulator against a CSV input vector.
     Simulate {
@@ -123,7 +127,8 @@ fn main() -> Result<()> {
             out,
             with_stdlib,
             driver,
-        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref(), driver),
+            imports,
+        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref(), driver, imports.as_deref()),
         Cmd::Simulate {
             model,
             node,
@@ -278,6 +283,7 @@ fn cmd_emit_clite(
     out: &Path,
     with_stdlib: Option<&Path>,
     driver: bool,
+    imports: Option<&Path>,
 ) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
@@ -305,10 +311,52 @@ fn cmd_emit_clite(
         std::fs::write(clite_dir.join("driver.c"), driver_src)?;
     }
 
+    let mut wrapper_count = 0usize;
+    if let Some(dir) = imports {
+        let imp_dir = out.join("imported");
+        std::fs::create_dir_all(&imp_dir)?;
+        let mut build_lines: Vec<String> = Vec::new();
+        for (p, m) in load_manifest_dir(dir) {
+            let op = match m {
+                Ok(op) => op,
+                Err(e) => {
+                    println!("error[I0003]: {e}");
+                    continue;
+                }
+            };
+            if let Err(e) = op.validate() {
+                anyhow::bail!("imported operator `{}` ({}): {e}", op.name, p.display());
+            }
+            let w = ol_clite_emit::emit_wrapper(&op);
+            std::fs::write(imp_dir.join(format!("{}_wrapper.h", op.name)), &w.header)?;
+            std::fs::write(imp_dir.join(&w.build.wrapper_source), &w.source)?;
+            build_lines.push(format!(
+                "# {name}: link {ext} + {wrap} (header: {hdr})\n{wrap}\n{ext}",
+                name = op.name,
+                ext = w.build.external_source,
+                wrap = w.build.wrapper_source,
+                hdr = w.build.external_header,
+            ));
+            wrapper_count += 1;
+        }
+        let build_manifest = format!(
+            "# OpenLustre imported-operator build manifest.\n\
+             # Compile each wrapper alongside its external C source, with the\n\
+             # imported manifest directory on the include path.\n\n{}\n",
+            build_lines.join("\n\n")
+        );
+        std::fs::write(imp_dir.join("BUILD.txt"), build_manifest)?;
+    }
+
     println!(
-        "emit-clite: wrote {} (sources){} and {} (monitors)",
+        "emit-clite: wrote {} (sources){}{} and {} (monitors)",
         clite_dir.display(),
         if driver { " + driver.c" } else { "" },
+        if wrapper_count > 0 {
+            format!(" + {wrapper_count} imported wrapper(s)")
+        } else {
+            String::new()
+        },
         mon_dir.display()
     );
     Ok(())

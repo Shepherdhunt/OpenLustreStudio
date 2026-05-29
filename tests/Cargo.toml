@@ -40,6 +40,10 @@ name = "runtime_monitor"
 path = "runtime_monitor.rs"
 
 [[test]]
+name = "imported_operator"
+path = "imported_operator.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 
