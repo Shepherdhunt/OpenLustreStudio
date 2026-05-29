@@ -36,6 +36,10 @@ name = "compound_types"
 path = "compound_types.rs"
 
 [[test]]
+name = "runtime_monitor"
+path = "runtime_monitor.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

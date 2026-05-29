@@ -10,11 +10,25 @@ use std::fmt::Write as _;
 use ol_ir::{NodeDef, NodeKind, Type};
 
 pub fn emit_csv_driver(node: &NodeDef) -> String {
+    emit_csv_driver_with_monitor(node, None)
+}
+
+/// Generate a CSV driver. If `monitor_contract_name` is `Some(name)`, the
+/// driver also wires in the matching contract monitor and emits
+/// `active_mode` and `violations` columns after the outputs — the same shape
+/// the IR simulator writes when the node has a contract.
+pub fn emit_csv_driver_with_monitor(
+    node: &NodeDef,
+    monitor_contract_name: Option<&str>,
+) -> String {
     let mut s = String::new();
     let prefix = &node.name;
 
     let _ = writeln!(s, "/* CSV driver for {prefix}. */");
     let _ = writeln!(s, "#include \"openlustre_generated.h\"");
+    if monitor_contract_name.is_some() {
+        let _ = writeln!(s, "#include \"openlustre_monitors.h\"");
+    }
     let _ = writeln!(s, "#include <stdio.h>");
     let _ = writeln!(s, "#include <stdlib.h>");
     let _ = writeln!(s, "#include <string.h>");
@@ -26,13 +40,23 @@ pub fn emit_csv_driver(node: &NodeDef) -> String {
     }
     let _ = writeln!(s, "  {prefix}_Input in;");
     let _ = writeln!(s, "  {prefix}_Output out;");
+    if let Some(contract_name) = monitor_contract_name {
+        let _ = writeln!(s, "  {contract_name}_monitor_State mon;");
+        let _ = writeln!(s, "  {contract_name}_monitor_reset(&mon);");
+        let _ = writeln!(s, "  char mode_buf[256];");
+        let _ = writeln!(s, "  char viol_buf[1024];");
+    }
     let _ = writeln!(s, "  char line[4096];");
     let _ = writeln!(s, "  /* drop the header row */");
     let _ = writeln!(s, "  if (!fgets(line, sizeof(line), stdin)) return 0;");
 
-    let header_parts: Vec<String> = std::iter::once("cycle".to_string())
+    let mut header_parts: Vec<String> = std::iter::once("cycle".to_string())
         .chain(node.outputs.iter().map(|p| p.name.clone()))
         .collect();
+    if monitor_contract_name.is_some() {
+        header_parts.push("active_mode".into());
+        header_parts.push("violations".into());
+    }
     let _ = writeln!(s, "  printf(\"{}\\n\");", header_parts.join(","));
 
     let _ = writeln!(s, "  int cycle = 0;");
@@ -50,10 +74,19 @@ pub fn emit_csv_driver(node: &NodeDef) -> String {
     } else {
         let _ = writeln!(s, "    {prefix}_step(&in, &out);");
     }
+    if let Some(contract_name) = monitor_contract_name {
+        let _ = writeln!(
+            s,
+            "    {contract_name}_monitor_check(&mon, &in, &out, mode_buf, sizeof(mode_buf), viol_buf, sizeof(viol_buf));"
+        );
+    }
     let _ = writeln!(s, "    printf(\"%d\", cycle);");
     for p in &node.outputs {
         let _ = writeln!(s, "    printf(\",\");");
         let _ = writeln!(s, "    {}", print_stmt(&p.ty, &format!("out.{}", p.name)));
+    }
+    if monitor_contract_name.is_some() {
+        let _ = writeln!(s, "    printf(\",%s,%s\", mode_buf, viol_buf);");
     }
     let _ = writeln!(s, "    printf(\"\\n\");");
     let _ = writeln!(s, "    cycle++;");

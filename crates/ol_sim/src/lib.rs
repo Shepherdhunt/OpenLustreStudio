@@ -227,12 +227,13 @@ impl<'a> Sim<'a> {
         }
 
         let mut trace = Trace::default();
-        let mut out_headers: Vec<String> = vec!["cycle".into()];
-        out_headers.extend(self.node.outputs.iter().map(|p| p.name.clone()));
+        trace.headers = vec!["cycle".into()];
+        trace.headers
+            .extend(self.node.outputs.iter().map(|p| p.name.clone()));
         if self.contract.is_some() {
-            out_headers.push("active_mode".into());
+            trace.headers.push("active_mode".into());
+            trace.headers.push("violations".into());
         }
-        trace.headers = out_headers;
 
         for (cycle, row) in lines.enumerate() {
             let fields: Vec<&str> = row.split(',').collect();
@@ -255,15 +256,23 @@ impl<'a> Sim<'a> {
                 out_row.push(out.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
             }
             if let Some(c) = &self.contract {
-                let modes = evaluate_active_modes(c, &inputs, &out);
-                let label = if modes.is_empty() {
+                let step = evaluate_monitor(c, &inputs, &out);
+                let mode_label = if step.active_modes.is_empty() {
                     "<none>".to_string()
                 } else {
-                    modes.join("|")
+                    step.active_modes.join("|")
                 };
-                trace.active_modes.push(modes);
-                let escaped = label.replace(',', ";");
-                out_row.push(Value::ModeLabel(escaped));
+                let viol_label = if step.violations.is_empty() {
+                    "<none>".to_string()
+                } else {
+                    step.violations.join("|")
+                };
+                for v in &step.violations {
+                    trace.violations.push((v.clone(), cycle));
+                }
+                trace.active_modes.push(step.active_modes);
+                out_row.push(Value::ModeLabel(mode_label.replace(',', ";")));
+                out_row.push(Value::ModeLabel(viol_label.replace(',', ";")));
             }
             trace.rows.push(out_row);
         }
@@ -344,18 +353,39 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
     }
 }
 
-fn evaluate_active_modes(
+/// Per-cycle monitor result: which modes were active, and which contract
+/// clauses failed.
+struct MonitorStep {
+    active_modes: Vec<String>,
+    violations: Vec<String>,
+}
+
+fn evaluate_monitor(
     c: &ContractDef,
     inputs: &BTreeMap<String, Value>,
     outputs: &BTreeMap<String, Value>,
-) -> Vec<String> {
+) -> MonitorStep {
     let mut env: BTreeMap<String, Value> = BTreeMap::new();
     env.extend(inputs.clone());
     env.extend(outputs.clone());
     let mut state = State::default();
     let mut call_states: HashMap<usize, State> = HashMap::new();
     let project = Project::default();
+
     let mut active = Vec::new();
+    let mut violations = Vec::new();
+
+    // Guarantees are always required to hold.
+    for (i, g) in c.guarantees.iter().enumerate() {
+        let label = g.name.clone().unwrap_or_else(|| format!("guarantee#{i}"));
+        match eval(&g.expr, &env, &mut state, &mut call_states, &project) {
+            Ok(Value::Bool(true)) => {}
+            _ => violations.push(label),
+        }
+    }
+
+    // A mode is active when all of its `require` clauses hold; when active,
+    // its `ensure` clauses must hold too.
     for m in &c.modes {
         let mut hit = true;
         for r in &m.requires {
@@ -369,9 +399,20 @@ fn evaluate_active_modes(
         }
         if hit {
             active.push(m.name.clone());
+            for (j, e) in m.ensures.iter().enumerate() {
+                let label = format!("{}::ensure#{j}", m.name);
+                match eval(e, &env, &mut state, &mut call_states, &project) {
+                    Ok(Value::Bool(true)) => {}
+                    _ => violations.push(label),
+                }
+            }
         }
     }
-    active
+
+    MonitorStep {
+        active_modes: active,
+        violations,
+    }
 }
 
 fn eval(
