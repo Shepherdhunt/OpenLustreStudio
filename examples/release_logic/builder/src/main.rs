@@ -122,11 +122,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let pkg = Package {
         name: "release".into(),
-        types: vec![],
-        constants: vec![],
         nodes: vec![release_logic, armed_and_consented],
         contracts: vec![contract],
-        imported_operators: vec![],
+        ..Default::default()
     };
 
     let project = Project {

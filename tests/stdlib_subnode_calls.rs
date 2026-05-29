@@ -58,11 +58,8 @@ fn build_edge_counter_project() -> Project {
         name: "edge_counter".into(),
         packages: vec![Package {
             name: "user".into(),
-            types: vec![],
-            constants: vec![],
             nodes: vec![node],
-            contracts: vec![],
-            imported_operators: vec![],
+            ..Default::default()
         }],
         main: Some("EdgeCounter".into()),
     }

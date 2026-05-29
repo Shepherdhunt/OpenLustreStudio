@@ -108,11 +108,9 @@ pub fn build_release_logic_project() -> Project {
 
     let pkg = Package {
         name: "release".into(),
-        types: vec![],
-        constants: vec![],
         nodes: vec![node, helper],
         contracts: vec![contract],
-        imported_operators: vec![],
+        ..Default::default()
     };
     Project {
         name: "release_authorization_test".into(),

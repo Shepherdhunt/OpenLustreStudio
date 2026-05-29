@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::expr::Expr;
 use crate::node::NodeDef;
+use crate::state_machine::{lower, LowerError, StateMachineDef};
 use crate::types::Type;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -65,6 +66,11 @@ pub struct Package {
     /// Imported operator manifests; parsed by `ol_clite_emit`.
     #[serde(default)]
     pub imported_operators: Vec<serde_json::Value>,
+    /// Finite state machines. They are lowered to dataflow nodes (and an
+    /// auto-generated state-enum type) by [`Project::lower_state_machines`]
+    /// before any downstream tool runs.
+    #[serde(default)]
+    pub state_machines: Vec<StateMachineDef>,
 }
 
 impl Package {
@@ -99,5 +105,30 @@ impl Project {
 
     pub fn all_nodes(&self) -> impl Iterator<Item = &NodeDef> {
         self.packages.iter().flat_map(|p| p.nodes.iter())
+    }
+
+    /// Replace each [`StateMachineDef`] in every package with the dataflow
+    /// node and state-enum type it lowers to. After this call, downstream
+    /// tools see only ordinary nodes and types and need no per-tool
+    /// awareness of state machines.
+    pub fn lower_state_machines(&mut self) -> Result<(), Vec<LowerError>> {
+        let mut errors = Vec::new();
+        for pkg in &mut self.packages {
+            let machines = std::mem::take(&mut pkg.state_machines);
+            for sm in machines {
+                match lower(&sm) {
+                    Ok(low) => {
+                        pkg.types.push(low.state_type);
+                        pkg.nodes.push(low.node);
+                    }
+                    Err(e) => errors.push(e),
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
     }
 }

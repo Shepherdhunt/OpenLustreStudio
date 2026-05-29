@@ -62,11 +62,9 @@ impl Library {
             .collect();
         let pkg = Package {
             name: package_name.to_string(),
-            types: vec![],
-            constants: vec![],
             nodes,
             contracts,
-            imported_operators: vec![],
+            ..Default::default()
         };
         Project {
             name: package_name.to_string(),
@@ -108,11 +106,9 @@ impl Library {
             .collect();
         project.packages.push(Package {
             name: package_name.to_string(),
-            types: vec![],
-            constants: vec![],
             nodes,
             contracts,
-            imported_operators: vec![],
+            ..Default::default()
         });
     }
 }

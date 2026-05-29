@@ -17,6 +17,7 @@ pub mod types;
 pub mod expr;
 pub mod node;
 pub mod project;
+pub mod state_machine;
 pub mod diag;
 pub mod loader;
 
@@ -24,5 +25,6 @@ pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, Literal, UnaryOp};
 pub use node::{Equation, Local, NodeDef, NodeKind, Port};
 pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
+pub use state_machine::{lower as lower_state_machine, LoweredMachine, StateDef, StateMachineDef, Transition};
 pub use types::Type;
 pub use loader::load_project;

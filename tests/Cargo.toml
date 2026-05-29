@@ -44,6 +44,10 @@ name = "imported_operator"
 path = "imported_operator.rs"
 
 [[test]]
+name = "state_machines"
+path = "state_machines.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 
