@@ -56,6 +56,10 @@ name = "constants"
 path = "constants.rs"
 
 [[test]]
+name = "contract_check_polish"
+path = "contract_check_polish.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

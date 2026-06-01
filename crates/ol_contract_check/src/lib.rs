@@ -7,8 +7,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use ol_contract_ir::{parse_contracts, Assumption, ContractDef, Guarantee, Mode};
-use ol_ir::{Diagnostic, Expr, NodeDef, Project, Severity, Type};
+use ol_contract_ir::{parse_contracts, Assumption, ContractDef, ContractImport, Guarantee, Mode};
+use ol_ir::{Diagnostic, Expr, Literal, NodeDef, Project, Severity, Type, UnaryOp};
 
 #[derive(Debug, Clone)]
 pub struct ContractReport {
@@ -78,7 +78,7 @@ pub fn check_project(project: &Project) -> ContractReport {
 
 fn check_contract(
     contract: &ContractDef,
-    _by_name: &HashMap<String, &ContractDef>,
+    by_name: &HashMap<String, &ContractDef>,
     diags: &mut Vec<Diagnostic>,
 ) {
     let ctx = format!("contract {}", contract.name);
@@ -106,6 +106,10 @@ fn check_contract(
     }
     for m in &contract.modes {
         check_mode(m, &ctx, diags);
+    }
+    check_mode_overlap(&contract.modes, &ctx, diags);
+    for imp in &contract.imports {
+        check_contract_import(imp, by_name, &ctx, diags);
     }
 
     if !contract.modes.is_empty() {
@@ -156,6 +160,17 @@ fn check_assumption(
             );
         }
     }
+    if static_truth(&a.expr) == Some(false) {
+        diags.push(
+            Diagnostic::warning(
+                "C0063",
+                format!(
+                    "assumption `{label}` is statically false — the contract can never be entered"
+                ),
+            )
+            .with_context(ctx.to_string()),
+        );
+    }
 }
 
 fn check_guarantee(g: &Guarantee, idx: usize, ctx: &str, diags: &mut Vec<Diagnostic>) {
@@ -165,6 +180,17 @@ fn check_guarantee(g: &Guarantee, idx: usize, ctx: &str, diags: &mut Vec<Diagnos
             Diagnostic::warning(
                 "C0030",
                 format!("guarantee `{label}` does not appear to be a Boolean expression"),
+            )
+            .with_context(ctx.to_string()),
+        );
+    }
+    if static_truth(&g.expr) == Some(true) || is_tautology(&g.expr) {
+        diags.push(
+            Diagnostic::warning(
+                "C0062",
+                format!(
+                    "guarantee `{label}` is statically true and therefore vacuous"
+                ),
             )
             .with_context(ctx.to_string()),
         );
@@ -182,6 +208,35 @@ fn check_mode(mode: &Mode, ctx: &str, diags: &mut Vec<Diagnostic>) {
                 .with_context(ctx.to_string()),
             );
         }
+        if static_truth(r) == Some(false) {
+            diags.push(
+                Diagnostic::warning(
+                    "C0060",
+                    format!(
+                        "mode `{}` require #{i} is statically false — mode is unreachable",
+                        mode.name
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
+        }
+    }
+    // A mode whose requires contain `e` AND `not e` can never be active.
+    for (i, r1) in mode.requires.iter().enumerate() {
+        for r2 in mode.requires.iter().skip(i + 1) {
+            if is_negation_of(r1, r2) {
+                diags.push(
+                    Diagnostic::warning(
+                        "C0060",
+                        format!(
+                            "mode `{}` is unreachable: its requires contain an expression and its negation",
+                            mode.name
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+            }
+        }
     }
     for (i, e) in mode.ensures.iter().enumerate() {
         if !is_boolean_shape(e) {
@@ -189,6 +244,18 @@ fn check_mode(mode: &Mode, ctx: &str, diags: &mut Vec<Diagnostic>) {
                 Diagnostic::warning(
                     "C0041",
                     format!("mode `{}` ensure #{i} is not Boolean-shaped", mode.name),
+                )
+                .with_context(ctx.to_string()),
+            );
+        }
+        if static_truth(e) == Some(true) || is_tautology(e) {
+            diags.push(
+                Diagnostic::warning(
+                    "C0061",
+                    format!(
+                        "mode `{}` ensure #{i} is statically true and therefore vacuous",
+                        mode.name
+                    ),
                 )
                 .with_context(ctx.to_string()),
             );
@@ -202,6 +269,110 @@ fn check_mode(mode: &Mode, ctx: &str, diags: &mut Vec<Diagnostic>) {
             )
             .with_context(ctx.to_string()),
         );
+    }
+}
+
+/// Two modes with identical requires can never be distinguished — the later
+/// one is dead in any execution where the earlier already fired.
+fn check_mode_overlap(modes: &[Mode], ctx: &str, diags: &mut Vec<Diagnostic>) {
+    for (i, m1) in modes.iter().enumerate() {
+        for m2 in modes.iter().skip(i + 1) {
+            if m1.requires == m2.requires && !m1.requires.is_empty() {
+                diags.push(
+                    Diagnostic::warning(
+                        "C0064",
+                        format!(
+                            "modes `{}` and `{}` share identical requires — one shadows the other",
+                            m1.name, m2.name
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+            }
+        }
+    }
+}
+
+fn check_contract_import(
+    imp: &ContractImport,
+    by_name: &HashMap<String, &ContractDef>,
+    ctx: &str,
+    diags: &mut Vec<Diagnostic>,
+) {
+    let target = match by_name.get(imp.contract.as_str()) {
+        Some(c) => *c,
+        None => {
+            diags.push(
+                Diagnostic::error(
+                    "C0070",
+                    format!("contract import references unknown contract `{}`", imp.contract),
+                )
+                .with_context(ctx.to_string()),
+            );
+            return;
+        }
+    };
+
+    let mapped_inputs: std::collections::HashSet<&str> =
+        imp.input_map.iter().map(|(n, _)| n.as_str()).collect();
+    let expected_inputs: std::collections::HashSet<&str> =
+        target.inputs.iter().map(|p| p.name.as_str()).collect();
+    for name in expected_inputs.difference(&mapped_inputs) {
+        diags.push(
+            Diagnostic::error(
+                "C0071",
+                format!(
+                    "contract import of `{}` does not map input `{name}`",
+                    imp.contract
+                ),
+            )
+            .with_context(ctx.to_string()),
+        );
+    }
+    for (n, _) in &imp.input_map {
+        if !expected_inputs.contains(n.as_str()) {
+            diags.push(
+                Diagnostic::error(
+                    "C0071",
+                    format!(
+                        "contract import of `{}` maps unknown input `{n}`",
+                        imp.contract
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
+        }
+    }
+
+    let mapped_outputs: std::collections::HashSet<&str> =
+        imp.output_map.iter().map(|(n, _)| n.as_str()).collect();
+    let expected_outputs: std::collections::HashSet<&str> =
+        target.outputs.iter().map(|p| p.name.as_str()).collect();
+    for name in expected_outputs.difference(&mapped_outputs) {
+        diags.push(
+            Diagnostic::error(
+                "C0072",
+                format!(
+                    "contract import of `{}` does not map output `{name}`",
+                    imp.contract
+                ),
+            )
+            .with_context(ctx.to_string()),
+        );
+    }
+    for (n, _) in &imp.output_map {
+        if !expected_outputs.contains(n.as_str()) {
+            diags.push(
+                Diagnostic::error(
+                    "C0072",
+                    format!(
+                        "contract import of `{}` maps unknown output `{n}`",
+                        imp.contract
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
+        }
     }
 }
 
@@ -295,6 +466,89 @@ fn is_boolean_shape(e: &Expr) -> bool {
                 | BinOp::Ge
         ),
         Expr::Var { .. } | Expr::IfThenElse { .. } | Expr::Call { .. } | Expr::Field { .. } => true,
+        _ => false,
+    }
+}
+
+/// Conservative compile-time evaluation of a Boolean expression. Returns
+/// `Some(true)`/`Some(false)` only when the value is structurally determined;
+/// any reference to a variable or anything more complex returns `None`.
+fn static_truth(expr: &Expr) -> Option<bool> {
+    use ol_ir::BinOp;
+    match expr {
+        Expr::Const { lit: Literal::Bool { value } } => Some(*value),
+        Expr::Unary { op: UnaryOp::Not, arg } => static_truth(arg).map(|b| !b),
+        Expr::Binary { op, lhs, rhs } => {
+            let l = static_truth(lhs);
+            let r = static_truth(rhs);
+            match op {
+                BinOp::And => match (l, r) {
+                    (Some(false), _) | (_, Some(false)) => Some(false),
+                    (Some(true), Some(true)) => Some(true),
+                    _ => None,
+                },
+                BinOp::Or => match (l, r) {
+                    (Some(true), _) | (_, Some(true)) => Some(true),
+                    (Some(false), Some(false)) => Some(false),
+                    _ => None,
+                },
+                BinOp::Implies => match (l, r) {
+                    (Some(false), _) | (_, Some(true)) => Some(true),
+                    (Some(true), Some(false)) => Some(false),
+                    _ => None,
+                },
+                BinOp::Eq => {
+                    if lhs == rhs {
+                        Some(true)
+                    } else {
+                        match (l, r) {
+                            (Some(a), Some(b)) => Some(a == b),
+                            _ => None,
+                        }
+                    }
+                }
+                BinOp::Neq => {
+                    if lhs == rhs {
+                        Some(false)
+                    } else {
+                        match (l, r) {
+                            (Some(a), Some(b)) => Some(a != b),
+                            _ => None,
+                        }
+                    }
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// True if `a` is `not b` (or vice versa), structurally.
+fn is_negation_of(a: &Expr, b: &Expr) -> bool {
+    if let Expr::Unary { op: UnaryOp::Not, arg } = a {
+        if arg.as_ref() == b {
+            return true;
+        }
+    }
+    if let Expr::Unary { op: UnaryOp::Not, arg } = b {
+        if arg.as_ref() == a {
+            return true;
+        }
+    }
+    false
+}
+
+/// Recognize a handful of common tautology shapes: `e or not e`, `e implies
+/// e`, `e = e`. Everything else returns false (no false positives).
+fn is_tautology(expr: &Expr) -> bool {
+    use ol_ir::BinOp;
+    match expr {
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => {
+            is_negation_of(lhs, rhs) || lhs == rhs && static_truth(lhs) == Some(true)
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => lhs == rhs,
+        Expr::Binary { op: BinOp::Eq, lhs, rhs } => lhs == rhs,
         _ => false,
     }
 }
