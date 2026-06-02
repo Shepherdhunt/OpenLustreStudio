@@ -131,6 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "release_authorization".into(),
         packages: vec![pkg],
         main: Some("ReleaseLogic".into()),
+        ..Default::default()
     };
 
     let json = serde_json::to_string_pretty(&project)?;

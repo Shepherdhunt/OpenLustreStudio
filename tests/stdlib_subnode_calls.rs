@@ -62,6 +62,7 @@ fn build_edge_counter_project() -> Project {
             ..Default::default()
         }],
         main: Some("EdgeCounter".into()),
+        ..Default::default()
     }
 }
 
@@ -179,6 +180,7 @@ fn merge_into_does_not_clobber_existing_node() {
             ..Default::default()
         }],
         main: None,
+        ..Default::default()
     };
     let lib = ol_stdlib::load_dir(&libraries_dir()).unwrap();
     lib.merge_into(&mut project, "stdlib");

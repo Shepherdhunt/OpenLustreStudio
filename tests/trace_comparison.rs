@@ -63,6 +63,7 @@ fn build_edge_counter_project() -> Project {
             ..Default::default()
         }],
         main: Some("EdgeCounter".into()),
+        ..Default::default()
     }
 }
 

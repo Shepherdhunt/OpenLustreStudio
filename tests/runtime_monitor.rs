@@ -71,6 +71,7 @@ fn build_faulty_latch_project() -> Project {
             ..Default::default()
         }],
         main: Some("FaultyLatch".into()),
+        ..Default::default()
     }
 }
 

@@ -66,6 +66,7 @@ fn gate_project() -> Project {
             ..Default::default()
         }],
         main: Some("Gate".into()),
+        ..Default::default()
     }
 }
 

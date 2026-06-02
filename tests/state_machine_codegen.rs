@@ -60,6 +60,7 @@ fn traffic_light_project() -> Project {
             ..Default::default()
         }],
         main: Some("TrafficLight".into()),
+        ..Default::default()
     }
 }
 

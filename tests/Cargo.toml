@@ -60,6 +60,10 @@ name = "contract_check_polish"
 path = "contract_check_polish.rs"
 
 [[test]]
+name = "multi_file_project"
+path = "multi_file_project.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

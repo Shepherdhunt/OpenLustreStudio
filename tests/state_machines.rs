@@ -56,6 +56,7 @@ fn project_with(sm: StateMachineDef) -> Project {
             ..Default::default()
         }],
         main: Some("Toggle".into()),
+        ..Default::default()
     }
 }
 
@@ -226,6 +227,7 @@ fn three_state_traffic_light_simulates_correctly() {
             ..Default::default()
         }],
         main: Some("TrafficLight".into()),
+        ..Default::default()
     };
     project.lower_state_machines().unwrap();
     assert!(!ol_typecheck::check_project(&project).has_errors());

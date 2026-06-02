@@ -16,6 +16,7 @@ fn project_with(node: NodeDef, types: Vec<TypeDef>) -> Project {
             ..Default::default()
         }],
         main: None,
+        ..Default::default()
     }
 }
 

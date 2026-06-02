@@ -116,5 +116,6 @@ pub fn build_release_logic_project() -> Project {
         name: "release_authorization_test".into(),
         packages: vec![pkg],
         main: Some("ReleaseLogic".into()),
+        ..Default::default()
     }
 }

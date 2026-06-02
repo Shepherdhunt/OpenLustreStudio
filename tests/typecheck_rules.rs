@@ -15,6 +15,7 @@ fn project_with(node: NodeDef) -> Project {
             ..Default::default()
         }],
         main: None,
+        ..Default::default()
     }
 }
 

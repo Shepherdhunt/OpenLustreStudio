@@ -91,6 +91,10 @@ pub struct Project {
     /// Optional default entry point; used by simulator and Kind 2 adapter.
     #[serde(default)]
     pub main: Option<String>,
+    /// Relative paths to other project files to merge into this one. The
+    /// loader follows these recursively and concatenates packages by name.
+    #[serde(default)]
+    pub includes: Vec<String>,
 }
 
 impl Project {
@@ -105,6 +109,29 @@ impl Project {
 
     pub fn all_nodes(&self) -> impl Iterator<Item = &NodeDef> {
         self.packages.iter().flat_map(|p| p.nodes.iter())
+    }
+
+    /// Merge `other` into `self`. Packages with the same name combine their
+    /// types/constants/nodes/contracts/imports/state-machines; packages whose
+    /// names do not yet exist are appended. `main` is inherited from `other`
+    /// only if `self.main` is unset. Detection of duplicate definitions is
+    /// left to the type and contract checkers.
+    pub fn merge(&mut self, other: Project) {
+        for src_pkg in other.packages {
+            if let Some(dst_pkg) = self.packages.iter_mut().find(|p| p.name == src_pkg.name) {
+                dst_pkg.types.extend(src_pkg.types);
+                dst_pkg.constants.extend(src_pkg.constants);
+                dst_pkg.nodes.extend(src_pkg.nodes);
+                dst_pkg.contracts.extend(src_pkg.contracts);
+                dst_pkg.imported_operators.extend(src_pkg.imported_operators);
+                dst_pkg.state_machines.extend(src_pkg.state_machines);
+            } else {
+                self.packages.push(src_pkg);
+            }
+        }
+        if self.main.is_none() {
+            self.main = other.main;
+        }
     }
 
     /// Replace each [`StateMachineDef`] in every package with the dataflow

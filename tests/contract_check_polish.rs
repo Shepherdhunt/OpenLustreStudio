@@ -16,6 +16,7 @@ fn project_with(
             ..Default::default()
         }],
         main: None,
+        ..Default::default()
     }
 }
 
