@@ -290,6 +290,7 @@ dependencies = [
  "ol_contract_check",
  "ol_contract_ir",
  "ol_ir",
+ "ol_kind2",
  "ol_lustre_emit",
  "ol_sim",
  "ol_stdlib",

@@ -87,6 +87,17 @@ enum Cmd {
         workdir: Option<PathBuf>,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+        /// Wall-clock seconds before Kind 2 gives up on a property.
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u32>,
+        /// Restrict the prover to these named properties. Repeat the flag
+        /// or pass a comma-separated list.
+        #[arg(long, value_name = "NAME", value_delimiter = ',')]
+        property: Vec<String>,
+        /// For each falsifiable property, render its counterexample as a
+        /// per-cycle waveform table instead of raw JSON.
+        #[arg(long)]
+        waveform: bool,
     },
     /// Contract-check only.
     ContractCheck {
@@ -149,6 +160,9 @@ fn main() -> Result<()> {
             kind2,
             workdir,
             with_stdlib,
+            timeout,
+            property,
+            waveform,
         } => cmd_prove(
             &model,
             node.as_deref(),
@@ -156,6 +170,9 @@ fn main() -> Result<()> {
             &kind2,
             workdir.as_deref(),
             with_stdlib.as_deref(),
+            timeout,
+            &property,
+            waveform,
         ),
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
@@ -407,6 +424,9 @@ fn cmd_prove(
     kind2: &str,
     workdir: Option<&Path>,
     with_stdlib: Option<&Path>,
+    timeout: Option<u32>,
+    properties: &[String],
+    waveform: bool,
 ) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
     let work = match workdir {
@@ -428,6 +448,8 @@ fn cmd_prove(
         },
         main_node: node.map(|s| s.to_string()).or_else(|| project.main.clone()),
         extra_args: vec![],
+        timeout_seconds: timeout,
+        properties: properties.to_vec(),
     };
     let result = ol_kind2::run_kind2(&lus_path, &opts)?;
     println!("prove: invoked {}", result.invocation.join(" "));
@@ -441,6 +463,21 @@ fn cmd_prove(
     } else {
         for p in &result.properties {
             println!("  {}: {}", p.name, p.status);
+            if let Some(cex) = &p.counterexample {
+                if waveform {
+                    if let Some(table) = ol_kind2::render_counterexample_waveform(cex) {
+                        println!("    counterexample:");
+                        for line in table.lines() {
+                            println!("      {line}");
+                        }
+                        continue;
+                    }
+                }
+                println!(
+                    "    counterexample (raw): {}",
+                    serde_json::to_string(cex).unwrap_or_default()
+                );
+            }
         }
     }
     Ok(())

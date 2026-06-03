@@ -23,6 +23,14 @@ pub struct Kind2Options {
     pub mode: SerMode,
     pub main_node: Option<String>,
     pub extra_args: Vec<String>,
+    /// Wall-clock timeout for the prover, in seconds. `None` lets Kind 2
+    /// run with its default (unlimited).
+    #[serde(default)]
+    pub timeout_seconds: Option<u32>,
+    /// If non-empty, restrict the prover to these named properties via
+    /// `--lus_props`. Empty means "all properties" (Kind 2's default).
+    #[serde(default)]
+    pub properties: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -39,6 +47,8 @@ impl Default for Kind2Options {
             mode: SerMode::BmcInd,
             main_node: None,
             extra_args: vec![],
+            timeout_seconds: None,
+            properties: vec![],
         }
     }
 }
@@ -84,6 +94,14 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
     if let Some(main) = &opts.main_node {
         args.push("--lus_main".into());
         args.push(main.clone());
+    }
+    if let Some(t) = opts.timeout_seconds {
+        args.push("--timeout_wall".into());
+        args.push(t.to_string());
+    }
+    if !opts.properties.is_empty() {
+        args.push("--lus_props".into());
+        args.push(opts.properties.join(","));
     }
     for a in &opts.extra_args {
         args.push(a.clone());
@@ -190,3 +208,108 @@ fn json_to_property(v: &serde_json::Value) -> Option<PropertyResult> {
         counterexample,
     })
 }
+
+/// Render a Kind 2 counterexample as a fixed-width per-cycle waveform table.
+///
+/// The expected shape (Kind 2 v1+ `-json` output) is an array of scopes, each
+/// with a `streams` list; each stream has a `name`, a `type`, and an
+/// `instantValues` list of `[step, value]` pairs. Returns `None` if the JSON
+/// does not match this shape (unparseable counterexamples are surfaced as
+/// raw JSON by the caller).
+pub fn render_counterexample_waveform(cex: &serde_json::Value) -> Option<String> {
+    let scopes = cex.as_array()?;
+    if scopes.is_empty() {
+        return None;
+    }
+
+    // Collect (name, values_indexed_by_cycle) across every stream of every
+    // scope so a multi-scope counterexample renders as one wide table.
+    let mut columns: Vec<(String, Vec<String>)> = Vec::new();
+    let mut max_cycle: usize = 0;
+    for scope in scopes {
+        let streams = match scope.get("streams").and_then(|s| s.as_array()) {
+            Some(s) => s,
+            None => continue,
+        };
+        for s in streams {
+            let name = s
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("?")
+                .to_string();
+            let mut vals: Vec<String> = Vec::new();
+            if let Some(iv) = s.get("instantValues").and_then(|v| v.as_array()) {
+                for entry in iv {
+                    if let Some(pair) = entry.as_array() {
+                        if pair.len() >= 2 {
+                            let step = pair[0].as_u64().unwrap_or(0) as usize;
+                            let v = pair[1]
+                                .as_str()
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| pair[1].to_string());
+                            while vals.len() <= step {
+                                vals.push(String::new());
+                            }
+                            vals[step] = v;
+                            if step > max_cycle {
+                                max_cycle = step;
+                            }
+                        }
+                    }
+                }
+            }
+            columns.push((name, vals));
+        }
+    }
+    if columns.is_empty() {
+        return None;
+    }
+
+    // Compute column widths so the table aligns.
+    let widths: Vec<usize> = columns
+        .iter()
+        .map(|(name, vals)| {
+            let v_max = vals.iter().map(|v| v.len()).max().unwrap_or(0);
+            name.len().max(v_max).max(1)
+        })
+        .collect();
+    let cycle_w = format!("{max_cycle}").len().max(5);
+
+    let pad = |s: &str, w: usize| -> String {
+        if s.len() >= w {
+            s.to_string()
+        } else {
+            let mut out = s.to_string();
+            for _ in s.len()..w {
+                out.push(' ');
+            }
+            out
+        }
+    };
+
+    let mut out = String::new();
+    out.push_str(&pad("cycle", cycle_w));
+    for (i, (name, _)) in columns.iter().enumerate() {
+        out.push_str(" | ");
+        out.push_str(&pad(name, widths[i]));
+    }
+    out.push('\n');
+    out.push_str(&"-".repeat(cycle_w));
+    for (i, _) in columns.iter().enumerate() {
+        out.push_str("-+-");
+        out.push_str(&"-".repeat(widths[i]));
+    }
+    out.push('\n');
+    for cycle in 0..=max_cycle {
+        let c = format!("{cycle}");
+        out.push_str(&pad(&c, cycle_w));
+        for (i, (_, vals)) in columns.iter().enumerate() {
+            out.push_str(" | ");
+            let v = vals.get(cycle).cloned().unwrap_or_default();
+            out.push_str(&pad(&v, widths[i]));
+        }
+        out.push('\n');
+    }
+    Some(out)
+}
+
