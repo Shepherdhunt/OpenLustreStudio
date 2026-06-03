@@ -128,6 +128,11 @@ fn format_const_expr(expr: &Expr) -> String {
                 BinOp::Mul => "*",
                 BinOp::Div => "/",
                 BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
             };
             format!("({l} {sym} {r})")
         }
@@ -610,6 +615,11 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
                 BinOp::Mul => "*",
                 BinOp::Div => "/",
                 BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
             };
             (s, format!("({l} {sym} {r})"))
         }

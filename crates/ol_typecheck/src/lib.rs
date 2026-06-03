@@ -538,6 +538,7 @@ pub fn infer_expr_type(
             // the surrounding hint so integer literals adopt the target type.
             let sub_hint = match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => hint,
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => hint,
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq => None,
                 BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies => None,
             };
@@ -602,6 +603,21 @@ pub fn infer_expr_type(
                                 "E0086",
                                 format!(
                                     "arithmetic requires matching numeric types, got {l:?} and {r:?}"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                    Some(l)
+                }
+                BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                    if !(lr.is_integer() && rr.is_integer() && types_compatible(tctx, &l, &r)) {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0087",
+                                format!(
+                                    "bitwise operator requires matching integer operands, got {l:?} and {r:?}"
                                 ),
                             )
                             .with_context(ctx.to_string()),

@@ -25,6 +25,16 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
+    /// Bitwise AND on integer operands.
+    BitAnd,
+    /// Bitwise OR on integer operands.
+    BitOr,
+    /// Bitwise XOR on integer operands.
+    BitXor,
+    /// Left shift; operands must be integers.
+    Shl,
+    /// Right shift (logical for unsigned, arithmetic for signed).
+    Shr,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

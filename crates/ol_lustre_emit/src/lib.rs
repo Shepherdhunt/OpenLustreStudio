@@ -135,10 +135,19 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
             (t, 90)
         }
         Expr::Binary { op, lhs, rhs } => {
-            let (sym, prec) = bin_op_syntax(*op);
-            let l = format_expr_prec(lhs, prec);
-            let r = format_expr_prec(rhs, prec + 1);
-            (format!("{l} {sym} {r}"), prec)
+            // Bit operators are not part of standard Lustre. We emit them as
+            // function calls (`bit_and`, `bit_or`, ...) so a user can supply
+            // matching imported Lustre functions for Kind 2.
+            if let Some(fname) = bit_op_name(*op) {
+                let l = format_expr_prec(lhs, 0);
+                let r = format_expr_prec(rhs, 0);
+                (format!("{fname}({l}, {r})"), 100)
+            } else {
+                let (sym, prec) = bin_op_syntax(*op);
+                let l = format_expr_prec(lhs, prec);
+                let r = format_expr_prec(rhs, prec + 1);
+                (format!("{l} {sym} {r}"), prec)
+            }
         }
         Expr::IfThenElse {
             cond,
@@ -204,7 +213,20 @@ fn bin_op_syntax(op: BinOp) -> (&'static str, u8) {
         BinOp::Mul => ("*", 50),
         BinOp::Div => ("/", 50),
         BinOp::Mod => ("mod", 50),
+        // Bit ops never reach here — they are rendered as function calls.
+        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => ("?bit?", 0),
     }
+}
+
+fn bit_op_name(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::BitAnd => "bit_and",
+        BinOp::BitOr => "bit_or",
+        BinOp::BitXor => "bit_xor",
+        BinOp::Shl => "shift_left",
+        BinOp::Shr => "shift_right",
+        _ => return None,
+    })
 }
 
 fn format_literal(lit: &Literal) -> String {

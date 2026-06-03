@@ -198,6 +198,11 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
                 BinOp::Mul => "*",
                 BinOp::Div => "/",
                 BinOp::Mod => "%",
+                BinOp::BitAnd => "&",
+                BinOp::BitOr => "|",
+                BinOp::BitXor => "^",
+                BinOp::Shl => "<<",
+                BinOp::Shr => ">>",
             };
             format!("({l} {sym} {r})")
         }

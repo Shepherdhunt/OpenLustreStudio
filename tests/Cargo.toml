@@ -73,6 +73,10 @@ name = "safety_blocks"
 path = "safety_blocks.rs"
 
 [[test]]
+name = "bit_ops"
+path = "bit_ops.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

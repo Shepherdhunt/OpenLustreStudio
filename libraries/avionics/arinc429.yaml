@@ -1,0 +1,60 @@
+# ARINC-429 word helpers. A 32-bit data word is laid out as:
+#   bits 0-7  : label (octal address, transmitted LSB-first on the wire)
+#   bits 8-9  : SDI (source/destination identifier)
+#   bits 10-28: payload (BNR / BCD)
+#   bits 29-30: SSM (sign / status matrix)
+#   bit 31    : odd parity
+# These blocks are stateless functions; they assume the user already
+# performed any wire-side bit-reversal of the label field.
+
+- name: Arinc429Label
+  kind: function
+  category: avionics
+  inputs:  [{ name: word, type: uint32 }]
+  outputs: [{ name: label, type: uint32 }]
+  equations:
+    - lhs: [label]
+      body: "word & 0xFF"
+  contract:
+    guarantees:
+      - "label = (word & 0xFF)"
+      - "label <= 0xFF"
+
+- name: Arinc429SDI
+  kind: function
+  category: avionics
+  inputs:  [{ name: word, type: uint32 }]
+  outputs: [{ name: sdi, type: uint32 }]
+  equations:
+    - lhs: [sdi]
+      body: "(word >> 8) & 0x3"
+  contract:
+    guarantees:
+      - "sdi = ((word >> 8) & 0x3)"
+      - "sdi <= 0x3"
+
+- name: Arinc429Payload
+  kind: function
+  category: avionics
+  inputs:  [{ name: word, type: uint32 }]
+  outputs: [{ name: payload, type: uint32 }]
+  equations:
+    - lhs: [payload]
+      body: "(word >> 10) & 0x7FFFF"
+  contract:
+    guarantees:
+      - "payload = ((word >> 10) & 0x7FFFF)"
+      - "payload <= 0x7FFFF"
+
+- name: Arinc429SSM
+  kind: function
+  category: avionics
+  inputs:  [{ name: word, type: uint32 }]
+  outputs: [{ name: ssm, type: uint32 }]
+  equations:
+    - lhs: [ssm]
+      body: "(word >> 29) & 0x3"
+  contract:
+    guarantees:
+      - "ssm = ((word >> 29) & 0x3)"
+      - "ssm <= 0x3"

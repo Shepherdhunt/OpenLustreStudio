@@ -54,6 +54,11 @@ enum Tok {
     Minus,
     Star,
     Slash,
+    Amp,      // &
+    Pipe,     // |
+    Caret,    // ^
+    Shl,      // <<
+    Shr,      // >>
     LParen,
     RParen,
     LBracket,
@@ -80,6 +85,11 @@ impl Tok {
             Tok::Minus => "-".into(),
             Tok::Star => "*".into(),
             Tok::Slash => "/".into(),
+            Tok::Amp => "&".into(),
+            Tok::Pipe => "|".into(),
+            Tok::Caret => "^".into(),
+            Tok::Shl => "<<".into(),
+            Tok::Shr => ">>".into(),
             Tok::LParen => "(".into(),
             Tok::RParen => ")".into(),
             Tok::LBracket => "[".into(),
@@ -131,19 +141,33 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             '<' => match bytes.get(i + 1) {
                 Some(&b'=') => { out.push(Tok::Le); i += 2; }
                 Some(&b'>') => { out.push(Tok::Ne); i += 2; }
+                Some(&b'<') => { out.push(Tok::Shl); i += 2; }
                 _ => { out.push(Tok::Lt); i += 1; }
             },
-            '>' => {
-                if bytes.get(i + 1) == Some(&b'=') {
-                    out.push(Tok::Ge);
-                    i += 2;
-                } else {
-                    out.push(Tok::Gt);
-                    i += 1;
-                }
-            }
+            '>' => match bytes.get(i + 1) {
+                Some(&b'=') => { out.push(Tok::Ge); i += 2; }
+                Some(&b'>') => { out.push(Tok::Shr); i += 2; }
+                _ => { out.push(Tok::Gt); i += 1; }
+            },
+            '&' => { out.push(Tok::Amp); i += 1; }
+            '|' => { out.push(Tok::Pipe); i += 1; }
+            '^' => { out.push(Tok::Caret); i += 1; }
             _ if c.is_ascii_digit() => {
                 let start = i;
+                // 0x... hex literal.
+                if c == '0'
+                    && matches!(bytes.get(i + 1), Some(b'x') | Some(b'X'))
+                {
+                    i += 2;
+                    let hex_start = i;
+                    while i < bytes.len() && (bytes[i] as char).is_ascii_hexdigit() {
+                        i += 1;
+                    }
+                    let n = i64::from_str_radix(&src[hex_start..i], 16)
+                        .map_err(|_| ParseError::BadChar(c, start))?;
+                    out.push(Tok::Int(n));
+                    continue;
+                }
                 while i < bytes.len() && (bytes[i] as char).is_ascii_digit() {
                     i += 1;
                 }
@@ -275,17 +299,47 @@ impl Parser {
     }
 
     fn parse_and(&mut self) -> Result<Expr, ParseError> {
-        let mut lhs = self.parse_cmp()?;
+        let mut lhs = self.parse_bit_or()?;
         while self.is_kw("and") {
             self.bump();
-            let rhs = self.parse_cmp()?;
+            let rhs = self.parse_bit_or()?;
             lhs = Expr::bin(BinOp::And, lhs, rhs);
         }
         Ok(lhs)
     }
 
+    fn parse_bit_or(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bit_xor()?;
+        while matches!(self.peek(), Some(Tok::Pipe)) {
+            self.bump();
+            let rhs = self.parse_bit_xor()?;
+            lhs = Expr::bin(BinOp::BitOr, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bit_xor(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_bit_and()?;
+        while matches!(self.peek(), Some(Tok::Caret)) {
+            self.bump();
+            let rhs = self.parse_bit_and()?;
+            lhs = Expr::bin(BinOp::BitXor, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
+    fn parse_bit_and(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_cmp()?;
+        while matches!(self.peek(), Some(Tok::Amp)) {
+            self.bump();
+            let rhs = self.parse_cmp()?;
+            lhs = Expr::bin(BinOp::BitAnd, lhs, rhs);
+        }
+        Ok(lhs)
+    }
+
     fn parse_cmp(&mut self) -> Result<Expr, ParseError> {
-        let lhs = self.parse_add()?;
+        let lhs = self.parse_shift()?;
         let op = match self.peek() {
             Some(Tok::Eq) => BinOp::Eq,
             Some(Tok::Ne) => BinOp::Neq,
@@ -296,8 +350,23 @@ impl Parser {
             _ => return Ok(lhs),
         };
         self.bump();
-        let rhs = self.parse_add()?;
+        let rhs = self.parse_shift()?;
         Ok(Expr::bin(op, lhs, rhs))
+    }
+
+    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
+        let mut lhs = self.parse_add()?;
+        loop {
+            let op = match self.peek() {
+                Some(Tok::Shl) => BinOp::Shl,
+                Some(Tok::Shr) => BinOp::Shr,
+                _ => break,
+            };
+            self.bump();
+            let rhs = self.parse_add()?;
+            lhs = Expr::bin(op, lhs, rhs);
+        }
+        Ok(lhs)
     }
 
     fn parse_add(&mut self) -> Result<Expr, ParseError> {

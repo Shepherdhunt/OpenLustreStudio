@@ -1,0 +1,51 @@
+# Bit-manipulation primitives on uint32. These rely on the new BitAnd /
+# BitOr / BitXor / Shl / Shr binops in the IR; the C-Lite emitter lowers
+# them to `& | ^ << >>` and the Lustre emitter to `bit_and(a, b)` etc. so
+# users can supply matching imported Lustre functions for Kind 2.
+
+- name: BitAnd
+  kind: function
+  category: bits
+  inputs:  [{ name: a, type: uint32 }, { name: b, type: uint32 }]
+  outputs: [{ name: y, type: uint32 }]
+  equations: [{ lhs: [y], body: "a & b" }]
+  contract:
+    guarantees: ["y = (a & b)"]
+
+- name: BitOr
+  kind: function
+  category: bits
+  inputs:  [{ name: a, type: uint32 }, { name: b, type: uint32 }]
+  outputs: [{ name: y, type: uint32 }]
+  equations: [{ lhs: [y], body: "a | b" }]
+  contract:
+    guarantees: ["y = (a | b)"]
+
+- name: BitXor
+  kind: function
+  category: bits
+  inputs:  [{ name: a, type: uint32 }, { name: b, type: uint32 }]
+  outputs: [{ name: y, type: uint32 }]
+  equations: [{ lhs: [y], body: "a ^ b" }]
+  contract:
+    guarantees: ["y = (a ^ b)"]
+
+- name: ShiftLeft
+  kind: function
+  category: bits
+  inputs:  [{ name: a, type: uint32 }, { name: n, type: uint32 }]
+  outputs: [{ name: y, type: uint32 }]
+  equations: [{ lhs: [y], body: "a << n" }]
+  contract:
+    assumptions: ["n < 32"]
+    guarantees: ["y = (a << n)"]
+
+- name: ShiftRight
+  kind: function
+  category: bits
+  inputs:  [{ name: a, type: uint32 }, { name: n, type: uint32 }]
+  outputs: [{ name: y, type: uint32 }]
+  equations: [{ lhs: [y], body: "a >> n" }]
+  contract:
+    assumptions: ["n < 32"]
+    guarantees: ["y = (a >> n)"]
