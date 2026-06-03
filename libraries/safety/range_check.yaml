@@ -1,0 +1,18 @@
+# Stateless range membership check: `in_range` is true iff `lo <= x <= hi`.
+name: RangeCheck
+kind: function
+category: safety
+inputs:
+  - { name: x,  type: int32 }
+  - { name: lo, type: int32 }
+  - { name: hi, type: int32 }
+outputs:
+  - { name: in_range, type: bool }
+equations:
+  - lhs: [in_range]
+    body: "x >= lo and x <= hi"
+contract:
+  assumptions:
+    - "lo <= hi"
+  guarantees:
+    - "in_range = (x >= lo and x <= hi)"

@@ -1,0 +1,24 @@
+# Watchdog timer: trips `fault` if `feed` does not pulse within `limit`
+# cycles. Common safety-monitor pattern for liveness checks.
+name: Watchdog
+kind: operator
+category: safety
+inputs:
+  - { name: feed,  type: bool }
+  - { name: limit, type: int32 }
+outputs:
+  - { name: fault, type: bool }
+  - { name: count, type: int32 }
+equations:
+  - lhs: [count]
+    body: "if feed then 0 else (0 -> pre count) + 1"
+  - lhs: [fault]
+    body: "count >= limit"
+contract:
+  assumptions:
+    - "limit > 0"
+  guarantees:
+    - "count >= 0"
+  modes:
+    - { name: Fed,     requires: ["feed"],            ensures: ["count = 0", "not fault"] }
+    - { name: Tripped, requires: ["count >= limit"], ensures: ["fault"] }

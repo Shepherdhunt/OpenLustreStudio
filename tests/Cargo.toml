@@ -69,6 +69,10 @@ name = "kind2_adapter"
 path = "kind2_adapter.rs"
 
 [[test]]
+name = "safety_blocks"
+path = "safety_blocks.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

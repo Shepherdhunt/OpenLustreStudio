@@ -1,0 +1,24 @@
+# Cycle-counting timer. `count` advances every cycle from zero, resetting on
+# `reset`; `elapsed` goes high once `count` reaches `limit`.
+name: Timer
+kind: operator
+category: temporal
+inputs:
+  - { name: reset, type: bool }
+  - { name: limit, type: int32 }
+outputs:
+  - { name: elapsed, type: bool }
+  - { name: count,   type: int32 }
+equations:
+  - lhs: [count]
+    body: "if reset then 0 else (0 -> pre count) + 1"
+  - lhs: [elapsed]
+    body: "count >= limit"
+contract:
+  assumptions:
+    - "limit > 0"
+  guarantees:
+    - "count >= 0"
+  modes:
+    - { name: Reset,   requires: ["reset"],            ensures: ["count = 0", "not elapsed"] }
+    - { name: Tripped, requires: ["count >= limit"],   ensures: ["elapsed"] }

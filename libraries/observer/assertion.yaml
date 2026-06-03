@@ -1,0 +1,32 @@
+# Observer blocks: contract carriers that pass their input through and
+# attach an assumption (Assume) or guarantee (Assert) so Kind 2 picks them
+# up as proof obligations. Implementation is intentionally a pass-through —
+# the contract is the entire point of the block.
+
+- name: Assert
+  kind: operator
+  category: observer
+  inputs:
+    - { name: cond, type: bool }
+  outputs:
+    - { name: ok, type: bool }
+  equations:
+    - lhs: [ok]
+      body: "cond"
+  contract:
+    guarantees:
+      - "cond"
+
+- name: Assume
+  kind: operator
+  category: observer
+  inputs:
+    - { name: cond, type: bool }
+  outputs:
+    - { name: ok, type: bool }
+  equations:
+    - lhs: [ok]
+      body: "cond"
+  contract:
+    assumptions:
+      - "cond"

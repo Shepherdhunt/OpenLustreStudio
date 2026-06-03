@@ -1,0 +1,16 @@
+# First-difference monitor: rate = current sample - previous sample.
+# Useful for catching impossible deltas in physical-quantity inputs.
+name: RateMonitor
+kind: operator
+category: math
+inputs:
+  - { name: x, type: int32 }
+outputs:
+  - { name: rate, type: int32 }
+equations:
+  - lhs: [rate]
+    body: "x - (0 -> pre x)"
+contract:
+  modes:
+    - { name: FirstCycle, requires: ["first_cycle"],     ensures: ["rate = x"] }
+    - { name: Steady,     requires: ["not first_cycle"], ensures: ["rate = x - pre_x"] }
