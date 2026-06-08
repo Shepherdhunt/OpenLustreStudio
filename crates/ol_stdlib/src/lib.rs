@@ -60,8 +60,15 @@ impl Library {
             .contracts()
             .map(|c| serde_json::to_value(c).expect("ContractDef serializes"))
             .collect();
+        // Auto-generated types from state-machine blocks (their state enums).
+        let types: Vec<ol_ir::TypeDef> = self
+            .entries
+            .iter()
+            .flat_map(|e| e.block.extra_types.iter().cloned())
+            .collect();
         let pkg = Package {
             name: package_name.to_string(),
+            types,
             nodes,
             contracts,
             ..Default::default()
@@ -91,10 +98,15 @@ impl Library {
             .all_nodes()
             .map(|n| n.name.clone())
             .collect();
-        let nodes: Vec<NodeDef> = self
-            .nodes()
-            .filter(|n| !existing.contains(&n.name))
-            .cloned()
+        let kept: Vec<&LibraryEntry> = self
+            .entries
+            .iter()
+            .filter(|e| !existing.contains(&e.block.node.name))
+            .collect();
+        let nodes: Vec<NodeDef> = kept.iter().map(|e| e.block.node.clone()).collect();
+        let types: Vec<ol_ir::TypeDef> = kept
+            .iter()
+            .flat_map(|e| e.block.extra_types.iter().cloned())
             .collect();
         let kept_contract_names: std::collections::HashSet<String> = nodes
             .iter()
@@ -107,6 +119,7 @@ impl Library {
             .collect();
         project.packages.push(Package {
             name: package_name.to_string(),
+            types,
             nodes,
             contracts,
             ..Default::default()

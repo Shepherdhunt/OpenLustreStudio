@@ -20,7 +20,10 @@
 use serde::Deserialize;
 
 use ol_contract_ir::{Assumption, ContractDef, Guarantee, Mode};
-use ol_ir::{Equation, Local, NodeDef, NodeKind, Port};
+use ol_ir::{
+    state_machine::{lower as lower_state_machine, LowerError as SmLowerError},
+    Equation, Local, NodeDef, NodeKind, Port, StateDef, StateMachineDef, Transition, TypeDef,
+};
 
 use crate::parser::{self, ParseError};
 
@@ -33,8 +36,14 @@ pub enum LowerError {
         #[source]
         source: ParseError,
     },
-    #[error("block `{block}`: unknown kind `{kind}` (expected function, operator, or imported)")]
+    #[error("block `{block}`: unknown kind `{kind}` (expected function, operator, imported, or state_machine)")]
     BadKind { block: String, kind: String },
+    #[error("block `{block}`: state-machine lowering: {source}")]
+    StateMachine {
+        block: String,
+        #[source]
+        source: SmLowerError,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +85,21 @@ pub struct RawContract {
     pub modes: Vec<RawMode>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawTransition {
+    pub guard: String,
+    pub target: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct RawState {
+    pub name: String,
+    #[serde(default)]
+    pub equations: Vec<RawEquation>,
+    #[serde(default)]
+    pub transitions: Vec<RawTransition>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct LibBlock {
     pub name: String,
@@ -92,6 +116,12 @@ pub struct LibBlock {
     pub equations: Vec<RawEquation>,
     #[serde(default)]
     pub contract: Option<RawContract>,
+    /// Only set when `kind: state_machine`. Names the start state.
+    #[serde(default)]
+    pub initial_state: Option<String>,
+    /// Only set when `kind: state_machine`.
+    #[serde(default)]
+    pub states: Vec<RawState>,
 }
 
 /// Lowering result for one block.
@@ -99,6 +129,9 @@ pub struct LoweredBlock {
     pub node: NodeDef,
     pub contract: Option<ContractDef>,
     pub category: Option<String>,
+    /// Auxiliary types the block introduces — currently only the auto-generated
+    /// `{Name}_StateEnum` from state-machine lowering.
+    pub extra_types: Vec<TypeDef>,
 }
 
 impl LibBlock {
@@ -107,6 +140,9 @@ impl LibBlock {
     }
 
     pub fn lower(&self) -> Result<LoweredBlock, LowerError> {
+        if self.kind == "state_machine" {
+            return self.lower_state_machine();
+        }
         let kind = match self.kind.as_str() {
             "function" => NodeKind::Function,
             "operator" => NodeKind::Operator,
@@ -158,6 +194,79 @@ impl LibBlock {
             node,
             contract,
             category: self.category.clone(),
+            extra_types: vec![],
+        })
+    }
+
+    fn lower_state_machine(&self) -> Result<LoweredBlock, LowerError> {
+        let inputs = self.lower_ports(&self.inputs, "inputs")?;
+        let outputs = self.lower_ports(&self.outputs, "outputs")?;
+        let locals = self
+            .locals
+            .iter()
+            .map(|l| {
+                Ok(Local {
+                    name: l.name.clone(),
+                    ty: self.parse_ty(&l.ty, "locals")?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let initial_state = self
+            .initial_state
+            .clone()
+            .ok_or_else(|| LowerError::Parse {
+                block: self.name.clone(),
+                field: "initial_state".into(),
+                source: ParseError::UnexpectedEof,
+            })?;
+
+        let mut states = Vec::new();
+        for s in &self.states {
+            let mut eqs = Vec::new();
+            for eq in &s.equations {
+                let rhs = self.parse_body(&eq.body, "states[].equations")?;
+                eqs.push(Equation {
+                    lhs: eq.lhs.clone(),
+                    rhs,
+                });
+            }
+            let mut transitions = Vec::new();
+            for t in &s.transitions {
+                let guard = self.parse_body(&t.guard, "states[].transitions.guard")?;
+                transitions.push(Transition {
+                    guard,
+                    target: t.target.clone(),
+                });
+            }
+            states.push(StateDef {
+                name: s.name.clone(),
+                equations: eqs,
+                transitions,
+            });
+        }
+
+        let contract = self.lower_contract(&inputs, &outputs)?;
+
+        let sm = StateMachineDef {
+            name: self.name.clone(),
+            inputs,
+            outputs,
+            locals,
+            initial_state,
+            states,
+            contract: contract.as_ref().map(|_| self.contract_name()),
+        };
+        let lowered = lower_state_machine(&sm).map_err(|e| LowerError::StateMachine {
+            block: self.name.clone(),
+            source: e,
+        })?;
+
+        Ok(LoweredBlock {
+            node: lowered.node,
+            contract,
+            category: self.category.clone(),
+            extra_types: vec![lowered.state_type],
         })
     }
 

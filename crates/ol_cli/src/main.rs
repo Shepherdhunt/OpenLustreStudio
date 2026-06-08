@@ -110,6 +110,29 @@ enum Cmd {
         /// Directory of library YAML files (e.g. `libraries`).
         dir: PathBuf,
     },
+    /// GUI / IDE integration commands. Emit stable JSON describing the loaded
+    /// project so a future Tauri / web / VS Code front end can drive every
+    /// headless tool through a single language-agnostic IPC surface.
+    Studio {
+        #[command(subcommand)]
+        cmd: StudioCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum StudioCmd {
+    /// Print a structured JSON inspection of the model — packages, nodes,
+    /// types, constants, contract summaries, and diagnostics. Stable schema
+    /// versioned via the top-level `schema_version` field.
+    Inspect {
+        model: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Pretty-print the JSON for human inspection. Without this the output
+        /// is compact, the form a programmatic consumer wants.
+        #[arg(long)]
+        pretty: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -178,6 +201,13 @@ fn main() -> Result<()> {
             cmd_contract_check(&model, with_stdlib.as_deref())
         }
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
+        Cmd::Studio { cmd } => match cmd {
+            StudioCmd::Inspect {
+                model,
+                with_stdlib,
+                pretty,
+            } => cmd_studio_inspect(&model, with_stdlib.as_deref(), pretty),
+        },
     }
 }
 
@@ -282,6 +312,139 @@ fn cmd_lib_check(dir: &Path) -> Result<()> {
         lib.contracts().count()
     );
     Ok(())
+}
+
+/// Emit a stable JSON inspection of the loaded project — what a GUI Project
+/// Explorer + diagnostics panel needs in one round-trip. The schema is
+/// versioned via the top-level `schema_version` field so future additions
+/// stay backward-compatible.
+fn cmd_studio_inspect(
+    model: &Path,
+    with_stdlib: Option<&Path>,
+    pretty: bool,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let typecheck = ol_typecheck::check_project(&project);
+    let contract = ol_contract_check::check_project(&project);
+
+    let mut diagnostics: Vec<serde_json::Value> = Vec::new();
+    for d in &typecheck.diagnostics {
+        diagnostics.push(diag_to_json(d, "typecheck"));
+    }
+    for d in &contract.diagnostics {
+        diagnostics.push(diag_to_json(d, "contract"));
+    }
+
+    let packages: Vec<serde_json::Value> = project
+        .packages
+        .iter()
+        .map(package_to_json)
+        .collect();
+
+    let report = serde_json::json!({
+        "schema_version": 1,
+        "tool": "openlustre studio inspect",
+        "project": {
+            "name": project.name,
+            "main": project.main,
+            "package_count": project.packages.len(),
+            "node_count": project.all_nodes().count(),
+            "packages": packages,
+        },
+        "diagnostics": diagnostics,
+        "summary": {
+            "errors": diagnostics.iter()
+                .filter(|d| d.get("severity").and_then(|s| s.as_str()) == Some("Error"))
+                .count(),
+            "warnings": diagnostics.iter()
+                .filter(|d| d.get("severity").and_then(|s| s.as_str()) == Some("Warning"))
+                .count(),
+        }
+    });
+
+    let text = if pretty {
+        serde_json::to_string_pretty(&report)?
+    } else {
+        serde_json::to_string(&report)?
+    };
+    println!("{text}");
+    Ok(())
+}
+
+fn diag_to_json(d: &ol_ir::Diagnostic, source: &str) -> serde_json::Value {
+    let severity = match d.severity {
+        ol_ir::Severity::Error => "Error",
+        ol_ir::Severity::Warning => "Warning",
+        ol_ir::Severity::Info => "Info",
+    };
+    serde_json::json!({
+        "severity": severity,
+        "code": d.code,
+        "message": d.message,
+        "context": d.context,
+        "source": source,
+    })
+}
+
+fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
+    let nodes: Vec<serde_json::Value> = pkg
+        .nodes
+        .iter()
+        .map(|n| {
+            let kind = match n.kind {
+                ol_ir::NodeKind::Function => "Function",
+                ol_ir::NodeKind::Operator => "Operator",
+                ol_ir::NodeKind::Imported => "Imported",
+            };
+            serde_json::json!({
+                "name": n.name,
+                "kind": kind,
+                "inputs": n.inputs.iter().map(port_to_json).collect::<Vec<_>>(),
+                "outputs": n.outputs.iter().map(port_to_json).collect::<Vec<_>>(),
+                "locals": n.locals.iter().map(|l| serde_json::json!({
+                    "name": l.name,
+                    "type": l.ty,
+                })).collect::<Vec<_>>(),
+                "equation_count": n.equations.len(),
+                "contract": n.contract,
+            })
+        })
+        .collect();
+    let (contracts, _) = ol_contract_ir::parse_contracts(&pkg.contracts);
+    let contract_summary: Vec<serde_json::Value> = contracts
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "assumption_count": c.assumptions.len(),
+                "guarantee_count": c.guarantees.len(),
+                "mode_count": c.modes.len(),
+                "modes": c.modes.iter().map(|m| &m.name).collect::<Vec<_>>(),
+                "import_count": c.imports.len(),
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "name": pkg.name,
+        "types": pkg.types.iter().map(|t| serde_json::json!({
+            "name": t.name(),
+            "body": t.body,
+        })).collect::<Vec<_>>(),
+        "constants": pkg.constants.iter().map(|c| serde_json::json!({
+            "name": c.name,
+            "type": c.ty,
+        })).collect::<Vec<_>>(),
+        "nodes": nodes,
+        "contracts": contract_summary,
+        "state_machine_count": pkg.state_machines.len(),
+    })
+}
+
+fn port_to_json(p: &ol_ir::Port) -> serde_json::Value {
+    serde_json::json!({
+        "name": p.name,
+        "type": p.ty,
+    })
 }
 
 fn cmd_emit_lustre(

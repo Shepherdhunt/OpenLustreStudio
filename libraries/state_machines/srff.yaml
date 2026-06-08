@@ -1,0 +1,29 @@
+# SR flip-flop with priority for `reset`. Encoded as a finite-state machine
+# so it lowers to the same dataflow form Phase 9 state-machine support
+# already covers and so contributors have a textbook example of a library
+# block authored as an FSM rather than equations.
+name: SRFlipFlop
+kind: state_machine
+category: state_machine
+inputs:
+  - { name: set,   type: bool }
+  - { name: reset, type: bool }
+outputs:
+  - { name: q, type: bool }
+initial_state: Reset
+states:
+  - name: Reset
+    equations:
+      - { lhs: [q], body: "false" }
+    transitions:
+      - { guard: "reset",            target: "Reset" }
+      - { guard: "set",              target: "Set" }
+  - name: Set
+    equations:
+      - { lhs: [q], body: "true" }
+    transitions:
+      - { guard: "reset",            target: "Reset" }
+      - { guard: "not set",          target: "Set" }
+contract:
+  guarantees:
+    - "reset => not q"
