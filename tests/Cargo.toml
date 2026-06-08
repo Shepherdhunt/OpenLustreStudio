@@ -81,6 +81,10 @@ name = "library_state_machines_and_studio_api"
 path = "library_state_machines_and_studio_api.rs"
 
 [[test]]
+name = "studio_server"
+path = "studio_server.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

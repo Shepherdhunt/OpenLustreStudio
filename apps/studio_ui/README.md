@@ -1,12 +1,24 @@
-# OpenLustre Studio UI (Phase 8 scaffold)
+# OpenLustre Studio UI
 
-This directory is the home of the OpenLustre Studio graphical editor — the
-last piece of the implementation plan still to be built. Phases 0 through 7
-plus the cross-cutting infrastructure (state machines, constants, multi-file
-projects, runtime monitors, imported wrappers, IR-↔-C trace equivalence,
-Kind 2 counterexample waveforms) are complete and tested end to end. The
-front end is the remaining engineering, and this document is the contract
-between it and the headless toolchain that has already shipped.
+This directory documents the OpenLustre Studio graphical editor.
+
+A first browser-based front end ships **inside the `openlustre` binary**:
+
+```bash
+openlustre studio serve path/to/model.ols --with-stdlib libraries --port 8181
+# studio: serving http://127.0.0.1:8181 (model: path/to/model.ols)
+```
+
+Open the printed URL in any browser to get the Project Explorer, the
+diagnostics panel, the generated Lustre and C-Lite views, and a
+simulation runner — no JS toolchain, no separate install, no Node, no
+Tauri build step. The page re-fetches the JSON inspection every five
+seconds so external edits to the model are picked up on the fly.
+
+The Tauri shell described below is still the longer-term target (it
+gives native desktop windows, file-pickers, and a block-diagram
+ReactFlow canvas), but the back-end contract is what was actually
+missing — and the SPA shipping in `studio serve` proves it.
 
 ## Target stack
 

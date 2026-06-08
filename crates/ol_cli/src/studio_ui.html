@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>OpenLustre Studio</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace; }
+  body { display: grid; grid-template-columns: 320px 1fr; grid-template-rows: 36px 1fr; height: 100vh; background: #1f2329; color: #d6d9de; }
+  header { grid-column: 1 / -1; background: #14171c; border-bottom: 1px solid #2a2f37; padding: 8px 14px; display: flex; align-items: center; gap: 16px; font-size: 13px; }
+  header .project { font-weight: 600; color: #b8c2cc; }
+  header .main-node { color: #7a8794; }
+  header .summary { margin-left: auto; }
+  header .err { color: #e06c75; }
+  header .warn { color: #d19a66; }
+  #left { background: #14171c; border-right: 1px solid #2a2f37; overflow: auto; padding: 8px 0; font-size: 12px; }
+  #right { overflow: auto; padding: 12px 16px; font-size: 12px; }
+  h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #7a8794; margin: 12px 8px 4px; }
+  .node { cursor: pointer; padding: 3px 14px; color: #d6d9de; }
+  .node:hover { background: #1c2128; }
+  .node.selected { background: #2c3242; color: #e6e9ed; }
+  .node .kind { display: inline-block; width: 12px; color: #7a8794; }
+  .diag { padding: 4px 14px; font-size: 11px; line-height: 1.4; }
+  .severity-Error   { color: #e06c75; }
+  .severity-Warning { color: #d19a66; }
+  .severity-Info    { color: #7a8794; }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid #2a2f37; margin: -12px -16px 12px; padding: 0 16px; }
+  .tab { padding: 8px 14px; cursor: pointer; border-bottom: 2px solid transparent; color: #7a8794; }
+  .tab.active { color: #e6e9ed; border-bottom-color: #5cb6e5; }
+  pre { background: #14171c; border: 1px solid #2a2f37; padding: 10px; overflow: auto; color: #d6d9de; font-size: 12px; line-height: 1.45; }
+  h4 { margin: 12px 0 4px; color: #b8c2cc; font-size: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table th, table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #2a2f37; }
+  table th { color: #7a8794; font-weight: 500; }
+  textarea { width: 100%; background: #14171c; border: 1px solid #2a2f37; color: #d6d9de; font-family: inherit; font-size: 12px; padding: 8px; }
+  button { background: #2c3242; color: #e6e9ed; border: 1px solid #3a4150; padding: 6px 14px; cursor: pointer; margin: 8px 0; font-family: inherit; }
+  button:hover { background: #3a4150; }
+  .badge { display: inline-block; padding: 1px 6px; background: #2c3242; color: #b8c2cc; border-radius: 8px; font-size: 10px; margin-left: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="project" id="project-name">loading…</span>
+  <span class="main-node" id="main-node"></span>
+  <span class="summary">
+    <span class="err" id="err-count">0 errors</span>
+    &nbsp;·&nbsp;
+    <span class="warn" id="warn-count">0 warnings</span>
+  </span>
+</header>
+<div id="left">
+  <div id="packages"></div>
+  <h3>Diagnostics</h3>
+  <div id="diagnostics"></div>
+</div>
+<div id="right">
+  <div class="tabs">
+    <span class="tab active" data-tab="node">Node</span>
+    <span class="tab" data-tab="lustre">Lustre</span>
+    <span class="tab" data-tab="clite">C-Lite</span>
+    <span class="tab" data-tab="simulate">Simulate</span>
+  </div>
+  <div id="panel-node">Select a node from the left pane.</div>
+  <div id="panel-lustre" style="display:none"><pre id="lustre-text">loading…</pre></div>
+  <div id="panel-clite" style="display:none">
+    <h4>openlustre_generated.h</h4><pre id="clite-header">loading…</pre>
+    <h4>openlustre_generated.c</h4><pre id="clite-source">loading…</pre>
+  </div>
+  <div id="panel-simulate" style="display:none">
+    <p>CSV input — first row is the header (one column per main-node input):</p>
+    <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
+    <button onclick="runSim()">Simulate</button>
+    <pre id="sim-output"></pre>
+  </div>
+</div>
+<script>
+"use strict";
+
+const state = { inspect: null, selectedNode: null };
+
+async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
+async function fetchText(p) { const r = await fetch(p); return r.text(); }
+
+function typeName(t) {
+  if (!t || typeof t !== "object") return String(t);
+  if (t.kind && t.kind !== "Array" && t.kind !== "Named") return t.kind.toLowerCase();
+  if (t.kind === "Named") return t.name || t["0"] || JSON.stringify(t);
+  if (t.kind === "Array") return typeName(t.elem) + "[" + t.len + "]";
+  return JSON.stringify(t);
+}
+
+async function refresh() {
+  try {
+    state.inspect = await fetchJSON("/api/inspect");
+  } catch (e) {
+    document.getElementById("project-name").textContent = "load failed";
+    document.getElementById("diagnostics").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
+    return;
+  }
+  const ins = state.inspect;
+  document.getElementById("project-name").textContent = ins.project.name;
+  document.getElementById("main-node").textContent = ins.project.main ? "main: " + ins.project.main : "no main";
+  document.getElementById("err-count").textContent = ins.summary.errors + " error" + (ins.summary.errors === 1 ? "" : "s");
+  document.getElementById("warn-count").textContent = ins.summary.warnings + " warning" + (ins.summary.warnings === 1 ? "" : "s");
+
+  const pkgs = document.getElementById("packages");
+  pkgs.innerHTML = "";
+  for (const pkg of ins.project.packages) {
+    const h = document.createElement("h3");
+    h.textContent = pkg.name + " ";
+    const b = document.createElement("span"); b.className = "badge"; b.textContent = pkg.nodes.length + " nodes";
+    h.appendChild(b);
+    pkgs.appendChild(h);
+    for (const n of pkg.nodes) {
+      const d = document.createElement("div");
+      d.className = "node";
+      d.dataset.name = n.name;
+      d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
+      d.onclick = () => selectNode(n);
+      pkgs.appendChild(d);
+    }
+    if (pkg.contracts && pkg.contracts.length) {
+      const h2 = document.createElement("h3"); h2.textContent = "contracts (" + pkg.name + ")";
+      pkgs.appendChild(h2);
+      for (const c of pkg.contracts) {
+        const d = document.createElement("div");
+        d.className = "diag";
+        d.textContent = c.name + "  modes: " + c.mode_count + " · g: " + c.guarantee_count;
+        pkgs.appendChild(d);
+      }
+    }
+  }
+  const diag = document.getElementById("diagnostics");
+  diag.innerHTML = "";
+  for (const d of ins.diagnostics) {
+    const x = document.createElement("div");
+    x.className = "diag severity-" + d.severity;
+    x.innerHTML = "<strong>[" + d.code + "]</strong> " + d.message + '<div style="color:#7a8794;font-size:10px">' + (d.context || []).join(" · ") + "</div>";
+    diag.appendChild(x);
+  }
+  if (state.selectedNode) {
+    const still = findNode(state.selectedNode.name);
+    if (still) selectNode(still);
+  } else {
+    const first = ins.project.packages.find(p => p.nodes.length)?.nodes[0];
+    if (first) selectNode(first);
+  }
+}
+
+function findNode(name) {
+  for (const pkg of state.inspect.project.packages) {
+    for (const n of pkg.nodes) if (n.name === name) return n;
+  }
+  return null;
+}
+
+function selectNode(n) {
+  state.selectedNode = n;
+  document.querySelectorAll(".node").forEach(el => el.classList.toggle("selected", el.dataset.name === n.name));
+  let html = "<h3>" + n.name + "</h3>";
+  html += "<p><strong>" + n.kind + "</strong> — " + n.equation_count + " equation" + (n.equation_count === 1 ? "" : "s");
+  if (n.contract) html += " — contract <code>" + n.contract + "</code>";
+  html += "</p>";
+  function table(title, ports) {
+    if (!ports.length) return "";
+    let h = "<h4>" + title + "</h4><table><thead><tr><th>name</th><th>type</th></tr></thead><tbody>";
+    for (const p of ports) h += "<tr><td>" + p.name + "</td><td><code>" + typeName(p.type) + "</code></td></tr>";
+    return h + "</tbody></table>";
+  }
+  html += table("inputs",  n.inputs);
+  html += table("outputs", n.outputs);
+  html += table("locals",  n.locals);
+  document.getElementById("panel-node").innerHTML = html;
+}
+
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  document.querySelectorAll("[id^='panel-']").forEach(p => p.style.display = "none");
+  document.getElementById("panel-" + name).style.display = "";
+  if (name === "lustre") fetchText("/api/lustre").then(t => document.getElementById("lustre-text").textContent = t);
+  if (name === "clite") {
+    fetchText("/api/clite/header").then(t => document.getElementById("clite-header").textContent = t);
+    fetchText("/api/clite/source").then(t => document.getElementById("clite-source").textContent = t);
+  }
+}
+document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
+
+async function runSim() {
+  const body = document.getElementById("sim-input").value;
+  const r = await fetch("/api/simulate", { method: "POST", body });
+  document.getElementById("sim-output").textContent = await r.text();
+}
+
+refresh();
+// Live-reload — the model file may be edited externally.
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

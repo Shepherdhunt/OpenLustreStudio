@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod studio_server;
+
 use ol_clite_emit::{load_manifest_dir, monitor};
 use ol_cocospec_emit::Target;
 use ol_kind2::{Kind2Options, SerMode};
@@ -133,6 +135,17 @@ enum StudioCmd {
         #[arg(long)]
         pretty: bool,
     },
+    /// Serve the Studio web UI on http://127.0.0.1:<port>. The page hits the
+    /// same `inspect` / `lustre` / `clite` / `simulate` JSON endpoints the
+    /// rest of the CLI exposes; the model is re-loaded on every request so
+    /// external edits are picked up by a page refresh.
+    Serve {
+        model: PathBuf,
+        #[arg(long, default_value_t = 8181)]
+        port: u16,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -207,6 +220,11 @@ fn main() -> Result<()> {
                 with_stdlib,
                 pretty,
             } => cmd_studio_inspect(&model, with_stdlib.as_deref(), pretty),
+            StudioCmd::Serve {
+                model,
+                port,
+                with_stdlib,
+            } => cmd_studio_serve(&model, port, with_stdlib),
         },
     }
 }
@@ -215,7 +233,7 @@ fn load(model: &Path) -> Result<ol_ir::Project> {
     ol_ir::load_project(model).with_context(|| format!("loading model {}", model.display()))
 }
 
-fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol_ir::Project> {
+pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol_ir::Project> {
     let mut project = load(model)?;
     if let Some(dir) = stdlib {
         let lib = ol_stdlib::load_dir(dir)
@@ -371,7 +389,7 @@ fn cmd_studio_inspect(
     Ok(())
 }
 
-fn diag_to_json(d: &ol_ir::Diagnostic, source: &str) -> serde_json::Value {
+pub(crate) fn diag_to_json(d: &ol_ir::Diagnostic, source: &str) -> serde_json::Value {
     let severity = match d.severity {
         ol_ir::Severity::Error => "Error",
         ol_ir::Severity::Warning => "Warning",
@@ -386,7 +404,7 @@ fn diag_to_json(d: &ol_ir::Diagnostic, source: &str) -> serde_json::Value {
     })
 }
 
-fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
+pub(crate) fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
     let nodes: Vec<serde_json::Value> = pkg
         .nodes
         .iter()
@@ -643,5 +661,25 @@ fn cmd_prove(
             }
         }
     }
+    Ok(())
+}
+
+fn cmd_studio_serve(model: &Path, port: u16, with_stdlib: Option<PathBuf>) -> Result<()> {
+    // Eagerly load once to surface configuration errors before starting the
+    // server — better to fail fast than to spin up a UI that only ever shows
+    // errors.
+    let _ = load_with_stdlib(model, with_stdlib.as_deref())
+        .with_context(|| format!("loading model {}", model.display()))?;
+
+    let listener = studio_server::bind(studio_server::loopback(port))
+        .with_context(|| format!("binding 127.0.0.1:{port}"))?;
+    let local = listener.local_addr()?;
+    println!("studio: serving http://{local} (model: {})", model.display());
+    println!("studio: ctrl-c to stop.");
+    let ctx = studio_server::ServerCtx {
+        model: model.to_path_buf(),
+        with_stdlib,
+    };
+    studio_server::serve(listener, ctx)?;
     Ok(())
 }
