@@ -124,6 +124,14 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok((_, s)) => (200, "text/plain; charset=utf-8", s.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
         },
+        ("GET", "/api/clite/driver") => match build_driver(ctx) {
+            Ok(s) => (200, "text/plain; charset=utf-8", s.into_bytes()),
+            Err(e) => (400, "text/plain", e.into_bytes()),
+        },
+        ("GET", "/api/clite/makefile") => match build_makefile(ctx) {
+            Ok(s) => (200, "text/plain; charset=utf-8", s.into_bytes()),
+            Err(e) => (400, "text/plain", e.into_bytes()),
+        },
         ("POST", "/api/simulate") => {
             let csv = std::str::from_utf8(body).unwrap_or("");
             match run_sim(ctx, csv) {
@@ -255,6 +263,27 @@ fn build_clite(ctx: &ServerCtx) -> Result<(String, String), String> {
     let project = load(ctx)?;
     let bundle = ol_clite_emit::emit_project(&project);
     Ok((bundle.header, bundle.source))
+}
+
+fn build_driver(ctx: &ServerCtx) -> Result<String, String> {
+    let project = load(ctx)?;
+    let entry_name = project
+        .main
+        .clone()
+        .ok_or_else(|| "project has no `main` operator; nothing to drive".to_string())?;
+    let entry = project
+        .find_node(&entry_name)
+        .ok_or_else(|| format!("main operator `{entry_name}` not found"))?;
+    Ok(ol_clite_emit::harness::emit_csv_driver(entry))
+}
+
+fn build_makefile(ctx: &ServerCtx) -> Result<String, String> {
+    let project = load(ctx)?;
+    let entry = project
+        .main
+        .clone()
+        .ok_or_else(|| "project has no `main` operator".to_string())?;
+    Ok(crate::makefile_for_entry(&entry))
 }
 
 fn run_sim(ctx: &ServerCtx, csv: &str) -> Result<String, String> {

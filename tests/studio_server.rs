@@ -167,4 +167,23 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     // 404 on unknown paths.
     let (s, _, _) = http_get(port, "/does/not/exist").expect("404");
     assert_eq!(s, 404);
+
+    // The Build tab needs a driver + Makefile so the user-defined main
+    // operator becomes a standalone executable in one `make`.
+    let (s, _, body) = http_get(port, "/api/clite/driver").expect("driver");
+    assert_eq!(s, 200);
+    assert!(body.contains("ReleaseLogic_step"), "driver text: {body}");
+    assert!(body.contains("int main"));
+
+    let (s, _, body) = http_get(port, "/api/clite/makefile").expect("makefile");
+    assert_eq!(s, 200);
+    assert!(body.contains("TARGET ?= ReleaseLogic"));
+    assert!(body.contains("$(CC)"));
+    assert!(body.contains("openlustre_generated.c driver.c"));
+
+    // The SPA must include the new Step + Build tabs so the GUI panels we
+    // built are actually reachable.
+    let (_, _, html) = http_get(port, "/").expect("root");
+    assert!(html.contains("data-tab=\"step\""), "Step tab missing");
+    assert!(html.contains("data-tab=\"build\""), "Build tab missing");
 }

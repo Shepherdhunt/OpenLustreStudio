@@ -32,10 +32,17 @@
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   table th, table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #2a2f37; }
   table th { color: #7a8794; font-weight: 500; }
-  textarea { width: 100%; background: #14171c; border: 1px solid #2a2f37; color: #d6d9de; font-family: inherit; font-size: 12px; padding: 8px; }
-  button { background: #2c3242; color: #e6e9ed; border: 1px solid #3a4150; padding: 6px 14px; cursor: pointer; margin: 8px 0; font-family: inherit; }
+  textarea, input { background: #14171c; border: 1px solid #2a2f37; color: #d6d9de; font-family: inherit; font-size: 12px; padding: 4px 8px; }
+  textarea { width: 100%; padding: 8px; }
+  button { background: #2c3242; color: #e6e9ed; border: 1px solid #3a4150; padding: 6px 14px; cursor: pointer; margin: 4px 4px 4px 0; font-family: inherit; }
   button:hover { background: #3a4150; }
+  button.primary { background: #2d4a6b; border-color: #3d6a8b; }
+  button.primary:hover { background: #3d5a7b; }
   .badge { display: inline-block; padding: 1px 6px; background: #2c3242; color: #b8c2cc; border-radius: 8px; font-size: 10px; margin-left: 4px; }
+  .step-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; align-items: center; margin: 8px 0; }
+  .step-grid label { color: #b8c2cc; }
+  .build-note { color: #7a8794; font-size: 11px; margin-top: 4px; }
+  code.inline { background: #14171c; padding: 1px 6px; border-radius: 3px; }
 </style>
 </head>
 <body>
@@ -56,27 +63,54 @@
 <div id="right">
   <div class="tabs">
     <span class="tab active" data-tab="node">Node</span>
+    <span class="tab" data-tab="step">Step</span>
+    <span class="tab" data-tab="simulate">Simulate (CSV)</span>
     <span class="tab" data-tab="lustre">Lustre</span>
     <span class="tab" data-tab="clite">C-Lite</span>
-    <span class="tab" data-tab="simulate">Simulate</span>
+    <span class="tab" data-tab="build">Build</span>
   </div>
   <div id="panel-node">Select a node from the left pane.</div>
+
+  <div id="panel-step" style="display:none">
+    <p>Step the project's <strong id="step-entry-name">main operator</strong> one cycle at a time. Inputs are taken from the form below; the trace accumulates until you Reset.</p>
+    <div id="step-inputs" class="step-grid"></div>
+    <div>
+      <button class="primary" onclick="stepOnce()">Step</button>
+      <button onclick="stepReset()">Reset</button>
+      <span class="build-note">cycle <span id="step-cycle">0</span></span>
+    </div>
+    <h4>Trace</h4>
+    <div id="step-trace"></div>
+  </div>
+
+  <div id="panel-simulate" style="display:none">
+    <p>CSV input — first row is the header (one column per main-node input). Useful for batch traces.</p>
+    <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
+    <button onclick="runSim()">Simulate</button>
+    <pre id="sim-output"></pre>
+  </div>
+
   <div id="panel-lustre" style="display:none"><pre id="lustre-text">loading…</pre></div>
+
   <div id="panel-clite" style="display:none">
     <h4>openlustre_generated.h</h4><pre id="clite-header">loading…</pre>
     <h4>openlustre_generated.c</h4><pre id="clite-source">loading…</pre>
   </div>
-  <div id="panel-simulate" style="display:none">
-    <p>CSV input — first row is the header (one column per main-node input):</p>
-    <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
-    <button onclick="runSim()">Simulate</button>
-    <pre id="sim-output"></pre>
+
+  <div id="panel-build" style="display:none">
+    <p>One-command standalone build. The project's user-designated <code class="inline" id="build-entry">main</code> operator becomes the entry point of the executable — drop these files in a directory and run <code class="inline">make</code>.</p>
+    <button onclick="downloadBuild()">Save all files</button>
+    <h4>Makefile</h4><pre id="build-makefile">loading…</pre>
+    <h4>driver.c</h4><pre id="build-driver">loading…</pre>
+    <h4>openlustre_generated.h</h4><pre id="build-header">loading…</pre>
+    <h4>openlustre_generated.c</h4><pre id="build-source">loading…</pre>
+    <p class="build-note">After saving these four files into one directory, run <code class="inline">make</code>; you get an executable named after the entry operator. It reads CSV from stdin (header row first, columns matching the operator's inputs) and writes the per-cycle trace on stdout in the same shape as <code class="inline">openlustre simulate</code>.</p>
   </div>
 </div>
 <script>
 "use strict";
 
-const state = { inspect: null, selectedNode: null };
+const state = { inspect: null, selectedNode: null, stepHistory: "" };
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
 async function fetchText(p) { const r = await fetch(p); return r.text(); }
@@ -88,6 +122,8 @@ function typeName(t) {
   if (t.kind === "Array") return typeName(t.elem) + "[" + t.len + "]";
   return JSON.stringify(t);
 }
+
+function typeKind(t) { return (t && typeof t === "object" ? t.kind : null) || "Bool"; }
 
 async function refresh() {
   try {
@@ -145,6 +181,10 @@ async function refresh() {
     const first = ins.project.packages.find(p => p.nodes.length)?.nodes[0];
     if (first) selectNode(first);
   }
+  populateStepInputs();
+  const e = entryNode();
+  document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
+  document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
 }
 
 function findNode(name) {
@@ -154,17 +194,22 @@ function findNode(name) {
   return null;
 }
 
+function entryNode() {
+  const m = state.inspect?.project?.main;
+  return m ? findNode(m) : null;
+}
+
 function selectNode(n) {
   state.selectedNode = n;
   document.querySelectorAll(".node").forEach(el => el.classList.toggle("selected", el.dataset.name === n.name));
   let html = "<h3>" + n.name + "</h3>";
   html += "<p><strong>" + n.kind + "</strong> — " + n.equation_count + " equation" + (n.equation_count === 1 ? "" : "s");
-  if (n.contract) html += " — contract <code>" + n.contract + "</code>";
+  if (n.contract) html += " — contract <code class='inline'>" + n.contract + "</code>";
   html += "</p>";
   function table(title, ports) {
     if (!ports.length) return "";
     let h = "<h4>" + title + "</h4><table><thead><tr><th>name</th><th>type</th></tr></thead><tbody>";
-    for (const p of ports) h += "<tr><td>" + p.name + "</td><td><code>" + typeName(p.type) + "</code></td></tr>";
+    for (const p of ports) h += "<tr><td>" + p.name + "</td><td><code class='inline'>" + typeName(p.type) + "</code></td></tr>";
     return h + "</tbody></table>";
   }
   html += table("inputs",  n.inputs);
@@ -182,6 +227,12 @@ function showTab(name) {
     fetchText("/api/clite/header").then(t => document.getElementById("clite-header").textContent = t);
     fetchText("/api/clite/source").then(t => document.getElementById("clite-source").textContent = t);
   }
+  if (name === "build") {
+    fetchText("/api/clite/makefile").then(t => document.getElementById("build-makefile").textContent = t);
+    fetchText("/api/clite/driver").then(t => document.getElementById("build-driver").textContent = t);
+    fetchText("/api/clite/header").then(t => document.getElementById("build-header").textContent = t);
+    fetchText("/api/clite/source").then(t => document.getElementById("build-source").textContent = t);
+  }
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
@@ -189,6 +240,102 @@ async function runSim() {
   const body = document.getElementById("sim-input").value;
   const r = await fetch("/api/simulate", { method: "POST", body });
   document.getElementById("sim-output").textContent = await r.text();
+}
+
+// --- Stepped simulation ---
+
+function populateStepInputs() {
+  const e = entryNode();
+  const host = document.getElementById("step-inputs");
+  host.innerHTML = "";
+  if (!e) return;
+  for (const p of e.inputs) {
+    const lbl = document.createElement("label");
+    lbl.textContent = p.name + " : " + typeName(p.type);
+    const inp = document.createElement("input");
+    inp.dataset.port = p.name;
+    inp.dataset.tk = typeKind(p.type);
+    if (inp.dataset.tk === "Bool") {
+      inp.type = "checkbox";
+    } else if (inp.dataset.tk.startsWith("Float")) {
+      inp.type = "number"; inp.step = "any"; inp.value = "0";
+    } else {
+      inp.type = "number"; inp.value = "0";
+    }
+    host.appendChild(lbl);
+    host.appendChild(inp);
+  }
+}
+
+function currentInputRow() {
+  const inputs = document.querySelectorAll("#step-inputs input");
+  return Array.from(inputs).map(i => {
+    if (i.dataset.tk === "Bool") return i.checked ? "true" : "false";
+    return i.value || "0";
+  }).join(",");
+}
+
+function currentHeaderRow() {
+  const e = entryNode();
+  return e ? e.inputs.map(p => p.name).join(",") : "";
+}
+
+async function stepOnce() {
+  const e = entryNode();
+  if (!e) return;
+  if (!state.stepHistory) {
+    state.stepHistory = currentHeaderRow() + "\n";
+  }
+  state.stepHistory += currentInputRow() + "\n";
+  const r = await fetch("/api/simulate", { method: "POST", body: state.stepHistory });
+  const trace = await r.text();
+  renderStepTrace(trace);
+}
+
+function stepReset() {
+  state.stepHistory = "";
+  document.getElementById("step-trace").innerHTML = "";
+  document.getElementById("step-cycle").textContent = "0";
+}
+
+function renderStepTrace(csv) {
+  const lines = csv.trim().split("\n");
+  if (!lines.length) return;
+  const hdr = lines[0].split(",");
+  const rows = lines.slice(1).map(l => l.split(","));
+  document.getElementById("step-cycle").textContent = rows.length;
+  let html = "<table><thead><tr>" + hdr.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
+  for (const r of rows) {
+    html += "<tr>" + r.map(c => "<td>" + escapeHTML(c) + "</td>").join("") + "</tr>";
+  }
+  html += "</tbody></table>";
+  document.getElementById("step-trace").innerHTML = html;
+}
+
+function escapeHTML(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// --- Build: download all files as a zip-like bundle (a single .tar would
+// require binary handling; instead we save each file individually via a
+// data: download link). ---
+
+async function downloadBuild() {
+  const files = [
+    { name: "Makefile",                 url: "/api/clite/makefile" },
+    { name: "driver.c",                 url: "/api/clite/driver"   },
+    { name: "openlustre_generated.h",   url: "/api/clite/header"   },
+    { name: "openlustre_generated.c",   url: "/api/clite/source"   },
+  ];
+  for (const f of files) {
+    const text = await fetchText(f.url);
+    const a = document.createElement("a");
+    a.href = "data:text/plain;charset=utf-8," + encodeURIComponent(text);
+    a.download = f.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
 }
 
 refresh();
