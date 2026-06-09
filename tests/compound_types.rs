@@ -80,7 +80,7 @@ fn record_node() -> NodeDef {
         kind: NodeKind::Function,
         inputs: vec![Port {
             name: "msg".into(),
-            ty: Type::Named("AdsbMsg".into()),
+            ty: Type::named("AdsbMsg"),
         }],
         outputs: vec![
             Port { name: "alt".into(), ty: Type::Int32 },
@@ -118,7 +118,7 @@ fn enum_node() -> NodeDef {
             Port { name: "fault".into(), ty: Type::Bool },
             Port { name: "armed".into(), ty: Type::Bool },
         ],
-        outputs: vec![Port { name: "m".into(), ty: Type::Named("Mode".into()) }],
+        outputs: vec![Port { name: "m".into(), ty: Type::named("Mode") }],
         locals: vec![],
         equations: vec![Equation {
             lhs: vec!["m".into()],

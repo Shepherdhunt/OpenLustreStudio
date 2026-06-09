@@ -20,8 +20,16 @@ pub enum Type {
     Float64,
     /// Fixed-size array of `elem` with `len` elements.
     Array { elem: Box<Type>, len: u32 },
-    /// Reference to a user-declared record or enum type.
-    Named(String),
+    /// Reference to a user-declared record or enum type. A struct variant —
+    /// not a newtype — because `#[serde(tag = "kind")]` cannot serialize a
+    /// tagged newtype wrapping a bare string.
+    Named { name: String },
+}
+
+impl Type {
+    pub fn named(name: impl Into<String>) -> Self {
+        Type::Named { name: name.into() }
+    }
 }
 
 impl Type {
@@ -71,7 +79,7 @@ impl Type {
             Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 => "int".into(),
             Type::Float32 | Type::Float64 => "real".into(),
             Type::Array { elem, len } => format!("{}^{}", elem.lustre_name(), len),
-            Type::Named(name) => name.clone(),
+            Type::Named { name } => name.clone(),
         }
     }
 
@@ -89,7 +97,7 @@ impl Type {
             Type::Float32 => "float".into(),
             Type::Float64 => "double".into(),
             Type::Array { elem, .. } => elem.c_name(),
-            Type::Named(name) => name.clone(),
+            Type::Named { name } => name.clone(),
         }
     }
 }

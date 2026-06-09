@@ -103,7 +103,13 @@ fn handle_connection(mut stream: TcpStream, ctx: &ServerCtx) -> std::io::Result<
 }
 
 fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
-    match (method, path) {
+    // Split path?query — every endpoint just sees the path; query parameters
+    // are routed to the handlers that ask for them.
+    let (raw_path, query) = match path.split_once('?') {
+        Some((p, q)) => (p, q),
+        None => (path, ""),
+    };
+    match (method, raw_path) {
         ("GET", "/") | ("GET", "/index.html") => {
             (200, "text/html; charset=utf-8", STUDIO_UI_HTML.as_bytes().to_vec())
         }
@@ -111,6 +117,10 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("GET", "/api/inspect") => match build_inspect(ctx) {
             Ok(body) => (200, "application/json", body.into_bytes()),
             Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+        },
+        ("GET", "/api/diagram") => match build_diagram(ctx, &parse_query(query)) {
+            Ok(body) => (200, "application/json", body.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
         ("GET", "/api/lustre") => match build_lustre(ctx) {
             Ok(body) => (200, "text/plain; charset=utf-8", body.into_bytes()),
@@ -134,12 +144,70 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         },
         ("POST", "/api/simulate") => {
             let csv = std::str::from_utf8(body).unwrap_or("");
-            match run_sim(ctx, csv) {
+            let full = parse_query(query).get("full").map(|v| v == "1").unwrap_or(false);
+            match run_sim(ctx, csv, full) {
                 Ok(trace) => (200, "text/csv; charset=utf-8", trace.into_bytes()),
                 Err(e) => (400, "text/plain", e.into_bytes()),
             }
         }
+        ("POST", "/api/edit/add_port") => {
+            apply_edit_response(ctx, body, edit_add_port)
+        }
+        ("POST", "/api/edit/add_local") => {
+            apply_edit_response(ctx, body, edit_add_local)
+        }
+        ("POST", "/api/edit/add_equation") => {
+            apply_edit_response(ctx, body, edit_add_equation)
+        }
+        ("POST", "/api/edit/set_main") => {
+            apply_edit_response(ctx, body, edit_set_main)
+        }
+        ("POST", "/api/edit/add_node") => {
+            apply_edit_response(ctx, body, edit_add_node)
+        }
         _ => (404, "text/plain", b"not found".to_vec()),
+    }
+}
+
+fn parse_query(q: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    for kv in q.split('&').filter(|s| !s.is_empty()) {
+        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
+        out.insert(url_decode(k), url_decode(v));
+    }
+    out
+}
+
+fn url_decode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.bytes();
+    while let Some(b) = it.next() {
+        match b {
+            b'+' => out.push(' '),
+            b'%' => {
+                let h1 = it.next();
+                let h2 = it.next();
+                match (h1.and_then(hex), h2.and_then(hex)) {
+                    (Some(a), Some(c)) => out.push(((a << 4) | c) as char),
+                    _ => {
+                        out.push('%');
+                        if let Some(c) = h1 { out.push(c as char); }
+                        if let Some(c) = h2 { out.push(c as char); }
+                    }
+                }
+            }
+            other => out.push(other as char),
+        }
+    }
+    out
+}
+
+fn hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -286,15 +354,305 @@ fn build_makefile(ctx: &ServerCtx) -> Result<String, String> {
     Ok(crate::makefile_for_entry(&entry))
 }
 
-fn run_sim(ctx: &ServerCtx, csv: &str) -> Result<String, String> {
+fn run_sim(ctx: &ServerCtx, csv: &str, full: bool) -> Result<String, String> {
     let project = load(ctx)?;
     let entry = project
         .main
         .clone()
         .ok_or_else(|| "project has no `main` node".to_string())?;
     let mut sim = ol_sim::Sim::new(&project, &entry).map_err(|e| format!("{e}"))?;
-    let trace = sim.run_csv(csv).map_err(|e| format!("{e}"))?;
+    let trace = if full {
+        sim.run_csv_full(csv).map_err(|e| format!("{e}"))?
+    } else {
+        sim.run_csv(csv).map_err(|e| format!("{e}"))?
+    };
     Ok(trace.to_csv())
+}
+
+// --- Diagram: a renderable dataflow view of one node ---
+
+/// Build a diagram JSON for the requested node (or `main`). Inputs, locals,
+/// equations, and outputs become boxes; wires are derived from each
+/// equation's free variables (reads) and its lhs (writes). The front end
+/// lays these out in columns and draws SVG lines — no layout engine needed.
+fn build_diagram(
+    ctx: &ServerCtx,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let project = load(ctx)?;
+    let node_name = query
+        .get("node")
+        .cloned()
+        .or_else(|| project.main.clone())
+        .ok_or_else(|| "no node specified and project has no main".to_string())?;
+    let node = project
+        .find_node(&node_name)
+        .ok_or_else(|| format!("node `{node_name}` not found"))?;
+
+    let known: std::collections::HashSet<&str> = node
+        .inputs
+        .iter()
+        .map(|p| p.name.as_str())
+        .chain(node.outputs.iter().map(|p| p.name.as_str()))
+        .chain(node.locals.iter().map(|l| l.name.as_str()))
+        .collect();
+
+    let mut equations = Vec::new();
+    let mut wires = Vec::new();
+    for (i, eq) in node.equations.iter().enumerate() {
+        let eq_id = format!("eq{i}");
+        let reads: Vec<String> = eq
+            .rhs
+            .free_vars()
+            .into_iter()
+            .filter(|v| known.contains(v.as_str()))
+            .collect();
+        let mut calls: Vec<String> = Vec::new();
+        eq.rhs.visit(|e| {
+            if let ol_ir::Expr::Call { node: callee, .. } = e {
+                if !calls.contains(callee) {
+                    calls.push(callee.clone());
+                }
+            }
+        });
+        for r in &reads {
+            wires.push(serde_json::json!({ "from": r, "to": eq_id }));
+        }
+        for l in &eq.lhs {
+            wires.push(serde_json::json!({ "from": eq_id, "to": l }));
+        }
+        equations.push(serde_json::json!({
+            "id": eq_id,
+            "lhs": eq.lhs,
+            "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
+            "reads": reads,
+            "calls": calls,
+        }));
+    }
+
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "node": node.name,
+        "kind": format!("{:?}", node.kind),
+        "inputs": node.inputs.iter().map(|p| serde_json::json!({
+            "name": p.name, "type": p.ty,
+        })).collect::<Vec<_>>(),
+        "outputs": node.outputs.iter().map(|p| serde_json::json!({
+            "name": p.name, "type": p.ty,
+        })).collect::<Vec<_>>(),
+        "locals": node.locals.iter().map(|l| serde_json::json!({
+            "name": l.name, "type": l.ty,
+        })).collect::<Vec<_>>(),
+        "equations": equations,
+        "wires": wires,
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+// --- Editing: parse, mutate, save back, return refreshed inspect ---
+
+/// Parse the model file directly (single file, includes left untouched) so a
+/// save-back writes only what the user authored. The full pipeline —
+/// includes, stdlib merge, state-machine lowering — still runs on the *read*
+/// path (`load`), so diagnostics reflect the complete picture.
+fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
+    let data = std::fs::read_to_string(&ctx.model)
+        .map_err(|e| format!("reading {}: {e}", ctx.model.display()))?;
+    match ctx
+        .model
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("json") => serde_json::from_str(&data).map_err(|e| format!("JSON: {e}")),
+        Some("ols") | Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&data).map_err(|e| format!("YAML: {e}"))
+        }
+        other => Err(format!("unsupported model extension: {other:?}")),
+    }
+}
+
+fn save_raw(ctx: &ServerCtx, project: &ol_ir::Project) -> Result<(), String> {
+    let text = match ctx
+        .model
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("json") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
+        _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
+    };
+    std::fs::write(&ctx.model, text).map_err(|e| format!("writing {}: {e}", ctx.model.display()))
+}
+
+type EditFn = fn(&mut ol_ir::Project, &serde_json::Value) -> Result<(), String>;
+
+fn apply_edit_response(ctx: &ServerCtx, body: &[u8], f: EditFn) -> (u16, &'static str, Vec<u8>) {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return (400, "application/json", json_error(&format!("bad JSON: {e}")).into_bytes()),
+    };
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if let Err(e) = f(&mut project, &req) {
+        return (400, "application/json", json_error(&e).into_bytes());
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+fn req_str<'a>(req: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+    req.get(key)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| format!("missing string field `{key}`"))
+}
+
+fn find_node_mut<'a>(
+    project: &'a mut ol_ir::Project,
+    name: &str,
+) -> Result<&'a mut ol_ir::NodeDef, String> {
+    for pkg in &mut project.packages {
+        if let Some(n) = pkg.nodes.iter_mut().find(|n| n.name == name) {
+            return Ok(n);
+        }
+    }
+    Err(format!(
+        "node `{name}` not found in {} (nodes in included files or the stdlib cannot be edited here)",
+        "the model file"
+    ))
+}
+
+fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let name = req_str(req, "name")?;
+    if !is_identifier(name) {
+        return Err(format!("`{name}` is not a valid identifier"));
+    }
+    if project.find_node(name).is_some() {
+        return Err(format!("node `{name}` already exists"));
+    }
+    let kind = match req.get("kind").and_then(|v| v.as_str()).unwrap_or("operator") {
+        "function" => ol_ir::NodeKind::Function,
+        "operator" => ol_ir::NodeKind::Operator,
+        other => return Err(format!("unknown kind `{other}` (function|operator)")),
+    };
+    let node = ol_ir::NodeDef {
+        name: name.to_string(),
+        kind,
+        inputs: vec![],
+        outputs: vec![],
+        locals: vec![],
+        equations: vec![],
+        contract: None,
+        diagram: Default::default(),
+    };
+    if project.packages.is_empty() {
+        project.packages.push(ol_ir::Package {
+            name: "user".into(),
+            ..Default::default()
+        });
+    }
+    let pkg_name = req.get("package").and_then(|v| v.as_str());
+    let pkg = match pkg_name {
+        Some(p) => project
+            .packages
+            .iter_mut()
+            .find(|x| x.name == p)
+            .ok_or_else(|| format!("package `{p}` not found"))?,
+        None => &mut project.packages[0],
+    };
+    pkg.nodes.push(node);
+    Ok(())
+}
+
+fn edit_add_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let port_name = req_str(req, "name")?.to_string();
+    let side = req_str(req, "side")?;
+    let ty_str = req_str(req, "type")?;
+    if !is_identifier(&port_name) {
+        return Err(format!("`{port_name}` is not a valid identifier"));
+    }
+    let ty = ol_stdlib::parse_type(ty_str).map_err(|e| format!("type `{ty_str}`: {e}"))?;
+    let node = find_node_mut(project, &node_name)?;
+    let exists = node.inputs.iter().any(|p| p.name == port_name)
+        || node.outputs.iter().any(|p| p.name == port_name)
+        || node.locals.iter().any(|l| l.name == port_name);
+    if exists {
+        return Err(format!("`{port_name}` already exists on `{node_name}`"));
+    }
+    let port = ol_ir::Port { name: port_name, ty };
+    match side {
+        "input" => node.inputs.push(port),
+        "output" => node.outputs.push(port),
+        other => return Err(format!("side must be input|output, got `{other}`")),
+    }
+    Ok(())
+}
+
+fn edit_add_local(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let local_name = req_str(req, "name")?.to_string();
+    let ty_str = req_str(req, "type")?;
+    if !is_identifier(&local_name) {
+        return Err(format!("`{local_name}` is not a valid identifier"));
+    }
+    let ty = ol_stdlib::parse_type(ty_str).map_err(|e| format!("type `{ty_str}`: {e}"))?;
+    let node = find_node_mut(project, &node_name)?;
+    let exists = node.inputs.iter().any(|p| p.name == local_name)
+        || node.outputs.iter().any(|p| p.name == local_name)
+        || node.locals.iter().any(|l| l.name == local_name);
+    if exists {
+        return Err(format!("`{local_name}` already exists on `{node_name}`"));
+    }
+    node.locals.push(ol_ir::Local { name: local_name, ty });
+    Ok(())
+}
+
+fn edit_add_equation(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let lhs_str = req_str(req, "lhs")?;
+    let body = req_str(req, "body")?;
+    let lhs: Vec<String> = lhs_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if lhs.is_empty() {
+        return Err("lhs must name at least one variable".into());
+    }
+    for l in &lhs {
+        if !is_identifier(l) {
+            return Err(format!("`{l}` is not a valid identifier"));
+        }
+    }
+    let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("body: {e}"))?;
+    let node = find_node_mut(project, &node_name)?;
+    node.equations.push(ol_ir::Equation { lhs, rhs });
+    Ok(())
+}
+
+fn edit_set_main(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let main = req_str(req, "main")?;
+    if project.find_node(main).is_none() {
+        return Err(format!("node `{main}` not found in the model file"));
+    }
+    project.main = Some(main.to_string());
+    Ok(())
+}
+
+fn is_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        && s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Convenience for the CLI dispatcher. Passing port `0` lets the OS pick an

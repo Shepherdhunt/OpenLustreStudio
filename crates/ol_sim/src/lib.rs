@@ -190,6 +190,46 @@ impl<'a> Sim<'a> {
         &mut self,
         inputs: &BTreeMap<String, Value>,
     ) -> Result<BTreeMap<String, Value>, SimError> {
+        let env = self.step_env(inputs)?;
+        let mut outputs = BTreeMap::new();
+        for p in &self.node.outputs {
+            outputs.insert(
+                p.name.clone(),
+                env.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, self.project)),
+            );
+        }
+        Ok(outputs)
+    }
+
+    /// Step one cycle and return EVERY named item — inputs, locals, and
+    /// outputs — with its deterministic value for the cycle. This is the
+    /// SCADE-style watch view: nothing is hidden, every signal has exactly
+    /// one value per step.
+    pub fn step_full(
+        &mut self,
+        inputs: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, SimError> {
+        let env = self.step_env(inputs)?;
+        let mut all = BTreeMap::new();
+        for p in self.node.inputs.iter().chain(self.node.outputs.iter()) {
+            all.insert(
+                p.name.clone(),
+                env.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, self.project)),
+            );
+        }
+        for l in &self.node.locals {
+            all.insert(
+                l.name.clone(),
+                env.get(&l.name).cloned().unwrap_or_else(|| default_value(&l.ty, self.project)),
+            );
+        }
+        Ok(all)
+    }
+
+    fn step_env(
+        &mut self,
+        inputs: &BTreeMap<String, Value>,
+    ) -> Result<BTreeMap<String, Value>, SimError> {
         // Constants are visible everywhere in a node's body; seed them first
         // so inputs/outputs/locals with the same name (which shouldn't exist
         // anyway — typecheck rejects collisions) would override them.
@@ -233,18 +273,20 @@ impl<'a> Sim<'a> {
             self.state.prev.insert(k.clone(), v.clone());
         }
         self.state.cycle += 1;
-
-        let mut outputs = BTreeMap::new();
-        for p in &self.node.outputs {
-            outputs.insert(
-                p.name.clone(),
-                env.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, self.project)),
-            );
-        }
-        Ok(outputs)
+        Ok(env)
     }
 
     pub fn run_csv(&mut self, csv: &str) -> Result<Trace, SimError> {
+        self.run_csv_impl(csv, false)
+    }
+
+    /// Like [`run_csv`] but every column is present: cycle, inputs, locals,
+    /// outputs, then active_mode/violations when the node has a contract.
+    pub fn run_csv_full(&mut self, csv: &str) -> Result<Trace, SimError> {
+        self.run_csv_impl(csv, true)
+    }
+
+    fn run_csv_impl(&mut self, csv: &str, full: bool) -> Result<Trace, SimError> {
         let mut lines = csv.lines();
         let header_line = lines.next().unwrap_or("");
         let headers: Vec<String> = header_line.split(',').map(|s| s.trim().to_string()).collect();
@@ -258,6 +300,14 @@ impl<'a> Sim<'a> {
 
         let mut trace = Trace::default();
         trace.headers = vec!["cycle".into()];
+        if full {
+            trace
+                .headers
+                .extend(self.node.inputs.iter().map(|p| p.name.clone()));
+            trace
+                .headers
+                .extend(self.node.locals.iter().map(|l| l.name.clone()));
+        }
         trace.headers
             .extend(self.node.outputs.iter().map(|p| p.name.clone()));
         if self.contract.is_some() {
@@ -280,8 +330,25 @@ impl<'a> Sim<'a> {
                 })?;
                 inputs.insert(p.name.clone(), v);
             }
-            let out = self.step(&inputs)?;
+            let env = self.step_env(&inputs)?;
+            let mut out = BTreeMap::new();
+            for p in &self.node.outputs {
+                out.insert(
+                    p.name.clone(),
+                    env.get(&p.name)
+                        .cloned()
+                        .unwrap_or_else(|| default_value(&p.ty, self.project)),
+                );
+            }
             let mut out_row: Vec<Value> = vec![Value::Int(cycle as i64)];
+            if full {
+                for p in &self.node.inputs {
+                    out_row.push(env.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
+                }
+                for l in &self.node.locals {
+                    out_row.push(env.get(&l.name).cloned().unwrap_or(Value::Bool(false)));
+                }
+            }
             for p in &self.node.outputs {
                 out_row.push(out.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
             }
@@ -326,7 +393,7 @@ fn default_value(ty: &Type, project: &Project) -> Value {
         Type::Array { elem, len } => {
             Value::Array((0..*len).map(|_| default_value(elem, project)).collect())
         }
-        Type::Named(name) => default_named(name, project).unwrap_or(Value::Int(0)),
+        Type::Named { name } => default_named(name, project).unwrap_or(Value::Int(0)),
     }
 }
 

@@ -566,7 +566,7 @@ pub fn parse_type(src: &str) -> Result<Type, ParseError> {
         // Anything else is treated as a reference to a named record/enum type;
         // a leading lowercase letter is a strong hint of a typo, but the type
         // checker resolves names, so we defer that judgement to it.
-        other => Type::Named(other.to_string()),
+        other => Type::named(other),
     })
 }
 
@@ -686,6 +686,6 @@ mod tests {
             parse_type("uint8[32]").unwrap(),
             Type::Array { elem: Box::new(Type::Uint8), len: 32 }
         );
-        assert_eq!(parse_type("MyRecord").unwrap(), Type::Named("MyRecord".into()));
+        assert_eq!(parse_type("MyRecord").unwrap(), Type::named("MyRecord"));
     }
 }

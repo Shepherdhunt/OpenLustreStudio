@@ -114,7 +114,7 @@ pub fn parse_type(s: &str) -> Type {
         "uint64" => Type::Uint64,
         "float32" => Type::Float32,
         "float64" => Type::Float64,
-        other => Type::Named(other.into()),
+        other => Type::named(other),
     }
 }
 

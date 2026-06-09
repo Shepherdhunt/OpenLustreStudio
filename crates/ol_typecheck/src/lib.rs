@@ -94,7 +94,7 @@ impl TypeContext {
         let mut cur = ty.clone();
         for _ in 0..64 {
             match cur {
-                Type::Named(ref n) => match self.aliases.get(n) {
+                Type::Named { name: ref n } => match self.aliases.get(n) {
                     Some(target) => {
                         cur = target.clone();
                     }
@@ -321,7 +321,7 @@ fn check_node(
             match eq.lhs.len() {
                 1 => {
                     if let Some(expected) = env.get(&eq.lhs[0]) {
-                        let is_tuple = matches!(&rhs_ty, Type::Named(n) if n == "__tuple__");
+                        let is_tuple = matches!(&rhs_ty, Type::Named { name } if name == "__tuple__");
                         if !types_compatible(tctx, expected, &rhs_ty) && !is_tuple {
                             diags.push(
                                 Diagnostic::error(
@@ -337,7 +337,7 @@ fn check_node(
                     }
                 }
                 _ => {
-                    let is_tuple = matches!(&rhs_ty, Type::Named(n) if n == "__tuple__");
+                    let is_tuple = matches!(&rhs_ty, Type::Named { name } if name == "__tuple__");
                     if !is_tuple {
                         diags.push(
                             Diagnostic::error(
@@ -486,7 +486,7 @@ pub fn infer_expr_type(
             None => match tctx.const_type(name) {
                 Some(t) => Some(t.clone()),
                 None => match tctx.enum_for_variant(name) {
-                    Some(enum_name) => Some(Type::Named(enum_name.to_string())),
+                    Some(enum_name) => Some(Type::named(enum_name)),
                     None => {
                         diags.push(
                             Diagnostic::error("E0080", format!("unknown identifier `{name}`"))
@@ -729,16 +729,16 @@ pub fn infer_expr_type(
                 }
             }
             match outputs.len() {
-                0 => Some(Type::Named("__unit__".into())),
+                0 => Some(Type::named("__unit__")),
                 1 => Some(outputs[0].ty.clone()),
-                _ => Some(Type::Named("__tuple__".into())),
+                _ => Some(Type::named("__tuple__")),
             }
         }
         Expr::Field { base, field } => {
             let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
             let resolved = tctx.resolve(&bt);
             match resolved {
-                Type::Named(ref rec_name) => match tctx.record_fields(rec_name) {
+                Type::Named { name: ref rec_name } => match tctx.record_fields(rec_name) {
                     Some(fields) => match fields.iter().find(|f| f.name == *field) {
                         Some(f) => Some(f.ty.clone()),
                         None => {
@@ -817,7 +817,7 @@ pub fn infer_expr_type(
                 }
             }
         }
-        Expr::Tuple { .. } => Some(Type::Named("__tuple__".into())),
+        Expr::Tuple { .. } => Some(Type::named("__tuple__")),
     }
 }
 

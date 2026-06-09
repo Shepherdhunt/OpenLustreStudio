@@ -32,17 +32,31 @@
   table { border-collapse: collapse; width: 100%; font-size: 12px; }
   table th, table td { padding: 4px 8px; text-align: left; border-bottom: 1px solid #2a2f37; }
   table th { color: #7a8794; font-weight: 500; }
-  textarea, input { background: #14171c; border: 1px solid #2a2f37; color: #d6d9de; font-family: inherit; font-size: 12px; padding: 4px 8px; }
+  textarea, input, select { background: #14171c; border: 1px solid #2a2f37; color: #d6d9de; font-family: inherit; font-size: 12px; padding: 4px 8px; }
   textarea { width: 100%; padding: 8px; }
   button { background: #2c3242; color: #e6e9ed; border: 1px solid #3a4150; padding: 6px 14px; cursor: pointer; margin: 4px 4px 4px 0; font-family: inherit; }
   button:hover { background: #3a4150; }
   button.primary { background: #2d4a6b; border-color: #3d6a8b; }
   button.primary:hover { background: #3d5a7b; }
   .badge { display: inline-block; padding: 1px 6px; background: #2c3242; color: #b8c2cc; border-radius: 8px; font-size: 10px; margin-left: 4px; }
-  .step-grid { display: grid; grid-template-columns: 120px 1fr; gap: 4px 12px; align-items: center; margin: 8px 0; }
+  .step-grid { display: grid; grid-template-columns: 160px 1fr; gap: 4px 12px; align-items: center; margin: 8px 0; }
   .step-grid label { color: #b8c2cc; }
   .build-note { color: #7a8794; font-size: 11px; margin-top: 4px; }
   code.inline { background: #14171c; padding: 1px 6px; border-radius: 3px; }
+  .edit-form { background: #14171c; border: 1px solid #2a2f37; padding: 10px 12px; margin-bottom: 12px; }
+  .edit-form .row { display: flex; gap: 8px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+  .edit-form label { color: #7a8794; min-width: 60px; }
+  #edit-status { padding: 6px 0; min-height: 20px; }
+  #edit-status.ok { color: #98c379; }
+  #edit-status.err { color: #e06c75; }
+  .palette { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+  .chip { background: #2c3242; border: 1px solid #3a4150; border-radius: 10px; padding: 1px 8px; font-size: 10px; cursor: pointer; color: #b8c2cc; }
+  .chip:hover { background: #3a4150; color: #e6e9ed; }
+  svg .box { fill: #14171c; stroke: #3a4150; }
+  svg .box.eq { fill: #1c2433; stroke: #3d6a8b; }
+  svg text { fill: #d6d9de; font-size: 11px; font-family: inherit; }
+  svg .wire { stroke: #5cb6e5; stroke-width: 1.2; fill: none; opacity: 0.65; }
+  svg .label { fill: #7a8794; font-size: 9px; }
 </style>
 </head>
 <body>
@@ -63,6 +77,8 @@
 <div id="right">
   <div class="tabs">
     <span class="tab active" data-tab="node">Node</span>
+    <span class="tab" data-tab="diagram">Diagram</span>
+    <span class="tab" data-tab="edit">Edit</span>
     <span class="tab" data-tab="step">Step</span>
     <span class="tab" data-tab="simulate">Simulate (CSV)</span>
     <span class="tab" data-tab="lustre">Lustre</span>
@@ -71,22 +87,80 @@
   </div>
   <div id="panel-node">Select a node from the left pane.</div>
 
+  <div id="panel-diagram" style="display:none">
+    <p>Dataflow view of <strong id="diagram-node-name">…</strong> — inputs flow left to right through equations to outputs. Click a node in the explorer to change the view.</p>
+    <div id="diagram-host"></div>
+  </div>
+
+  <div id="panel-edit" style="display:none">
+    <p>Build the model: create operators, add ports, then write equations using <code class="inline">if … then … else …</code>, math (<code class="inline">+ - * / mod</code>), comparisons, temporal ops (<code class="inline">-&gt;</code>, <code class="inline">pre</code>), and calls to any library block. Every change saves to the model file and re-checks instantly.</p>
+    <div id="edit-status"></div>
+
+    <div class="edit-form">
+      <h4>New operator</h4>
+      <div class="row">
+        <label>name</label><input id="new-node-name" placeholder="MyOperator">
+        <label>kind</label>
+        <select id="new-node-kind"><option value="operator">operator (stateful)</option><option value="function">function (pure)</option></select>
+        <button class="primary" onclick="editAddNode()">Create</button>
+      </div>
+    </div>
+
+    <div class="edit-form">
+      <h4>Add port / local</h4>
+      <div class="row">
+        <label>node</label><select id="port-node"></select>
+        <label>kind</label>
+        <select id="port-side"><option value="input">input</option><option value="output">output</option><option value="local">local</option></select>
+        <label>name</label><input id="port-name" placeholder="x">
+        <label>type</label><input id="port-type" value="bool" placeholder="bool | int32 | uint8[4]">
+        <button class="primary" onclick="editAddPort()">Add</button>
+      </div>
+    </div>
+
+    <div class="edit-form">
+      <h4>Add equation</h4>
+      <div class="row">
+        <label>node</label><select id="eq-node"></select>
+        <label>lhs</label><input id="eq-lhs" placeholder="y  (or: q, count for multi-output calls)">
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label>body</label>
+        <textarea id="eq-body" rows="2" style="flex:1" placeholder="if reset then 0 else (0 -> pre y) + 1"></textarea>
+      </div>
+      <div class="row"><button class="primary" onclick="editAddEquation()">Add equation</button></div>
+      <h4>Library palette — click to insert a call</h4>
+      <div class="palette" id="palette"></div>
+    </div>
+
+    <div class="edit-form">
+      <h4>Entry point (main operator → standalone executable)</h4>
+      <div class="row">
+        <label>main</label><select id="main-select"></select>
+        <button class="primary" onclick="editSetMain()">Set main</button>
+      </div>
+    </div>
+  </div>
+
   <div id="panel-step" style="display:none">
-    <p>Step the project's <strong id="step-entry-name">main operator</strong> one cycle at a time. Inputs are taken from the form below; the trace accumulates until you Reset.</p>
+    <p>Step the project's <strong id="step-entry-name">main operator</strong> one cycle at a time. Every named item — inputs, locals, outputs, active mode, contract violations — has a deterministic value each step.</p>
     <div id="step-inputs" class="step-grid"></div>
     <div>
       <button class="primary" onclick="stepOnce()">Step</button>
       <button onclick="stepReset()">Reset</button>
       <span class="build-note">cycle <span id="step-cycle">0</span></span>
     </div>
-    <h4>Trace</h4>
+    <h4>Trace — all items, every cycle</h4>
     <div id="step-trace"></div>
   </div>
 
   <div id="panel-simulate" style="display:none">
     <p>CSV input — first row is the header (one column per main-node input). Useful for batch traces.</p>
     <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
-    <button onclick="runSim()">Simulate</button>
+    <div>
+      <button onclick="runSim(false)">Simulate (outputs)</button>
+      <button onclick="runSim(true)">Simulate (all items)</button>
+    </div>
     <pre id="sim-output"></pre>
   </div>
 
@@ -152,7 +226,7 @@ async function refresh() {
       d.className = "node";
       d.dataset.name = n.name;
       d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
-      d.onclick = () => selectNode(n);
+      d.onclick = () => { selectNode(n); if (currentTab() === "diagram") loadDiagram(n.name); };
       pkgs.appendChild(d);
     }
     if (pkg.contracts && pkg.contracts.length) {
@@ -182,6 +256,7 @@ async function refresh() {
     if (first) selectNode(first);
   }
   populateStepInputs();
+  populateEditSelectors();
   const e = entryNode();
   document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
   document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
@@ -218,6 +293,10 @@ function selectNode(n) {
   document.getElementById("panel-node").innerHTML = html;
 }
 
+function currentTab() {
+  return document.querySelector(".tab.active")?.dataset.tab;
+}
+
 function showTab(name) {
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
   document.querySelectorAll("[id^='panel-']").forEach(p => p.style.display = "none");
@@ -233,16 +312,182 @@ function showTab(name) {
     fetchText("/api/clite/header").then(t => document.getElementById("build-header").textContent = t);
     fetchText("/api/clite/source").then(t => document.getElementById("build-source").textContent = t);
   }
+  if (name === "diagram") {
+    const n = state.selectedNode?.name || state.inspect?.project?.main;
+    if (n) loadDiagram(n);
+  }
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
-async function runSim() {
+async function runSim(full) {
   const body = document.getElementById("sim-input").value;
-  const r = await fetch("/api/simulate", { method: "POST", body });
+  const r = await fetch("/api/simulate" + (full ? "?full=1" : ""), { method: "POST", body });
   document.getElementById("sim-output").textContent = await r.text();
 }
 
-// --- Stepped simulation ---
+// --- Diagram rendering ---
+
+async function loadDiagram(nodeName) {
+  let d;
+  try {
+    d = await fetchJSON("/api/diagram?node=" + encodeURIComponent(nodeName));
+  } catch (e) {
+    document.getElementById("diagram-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
+    return;
+  }
+  document.getElementById("diagram-node-name").textContent = d.node + " (" + d.kind + ")";
+  renderDiagram(d);
+}
+
+function renderDiagram(d) {
+  const ROW = 44, BOXH = 30, INW = 150, EQW = 280, OUTW = 150;
+  const X_IN = 16, X_EQ = 230, X_OUT = 580;
+  const leftItems = d.inputs.map(p => ({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }));
+  const midItems  = d.equations.map(e => ({ id: e.id, label: e.text, cls: "box eq" }));
+  const rightItems = d.outputs.map(p => ({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }))
+    .concat(d.locals.map(l => ({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)", cls: "box" })));
+  const rows = Math.max(leftItems.length, midItems.length, rightItems.length, 1);
+  const H = rows * ROW + 30;
+
+  const pos = {};
+  function place(items, x, w) {
+    items.forEach((it, i) => {
+      pos[it.id] = { x, y: 16 + i * ROW, w, h: BOXH };
+    });
+  }
+  place(leftItems, X_IN, INW);
+  place(midItems, X_EQ, EQW);
+  place(rightItems, X_OUT, OUTW);
+
+  let svg = '<svg width="760" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  // wires beneath boxes
+  for (const w of d.wires) {
+    const a = pos[w.from], b = pos[w.to];
+    if (!a || !b) continue;
+    const x1 = a.x + a.w, y1 = a.y + a.h / 2;
+    const x2 = b.x, y2 = b.y + b.h / 2;
+    const mx = (x1 + x2) / 2;
+    svg += '<path class="wire" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"/>';
+  }
+  function drawBoxes(items) {
+    for (const it of items) {
+      const p = pos[it.id];
+      svg += '<rect class="' + it.cls + '" x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + p.h + '" rx="4"/>';
+      const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
+      svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + 19) + '">' + escapeHTML(label) + '</text>';
+    }
+  }
+  drawBoxes(leftItems); drawBoxes(midItems); drawBoxes(rightItems);
+  svg += '<text class="label" x="' + X_IN + '" y="10">inputs</text>';
+  svg += '<text class="label" x="' + X_EQ + '" y="10">equations</text>';
+  svg += '<text class="label" x="' + X_OUT + '" y="10">outputs / locals</text>';
+  svg += "</svg>";
+  document.getElementById("diagram-host").innerHTML = svg;
+}
+
+// --- Editing ---
+
+function populateEditSelectors() {
+  const names = [];
+  for (const pkg of state.inspect.project.packages) {
+    // Only nodes in the model file itself are editable; the stdlib package
+    // is read-only by construction (server rejects edits to it).
+    if (pkg.name === "stdlib") continue;
+    for (const n of pkg.nodes) names.push(n.name);
+  }
+  for (const id of ["port-node", "eq-node", "main-select"]) {
+    const sel = document.getElementById(id);
+    const prev = sel.value;
+    sel.innerHTML = "";
+    for (const n of names) {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n;
+      sel.appendChild(o);
+    }
+    if (names.includes(prev)) sel.value = prev;
+    else if (state.selectedNode && names.includes(state.selectedNode.name)) sel.value = state.selectedNode.name;
+  }
+  // Palette: stdlib blocks as insertable call chips.
+  const pal = document.getElementById("palette");
+  pal.innerHTML = "";
+  const stdpkg = state.inspect.project.packages.find(p => p.name === "stdlib");
+  const blocks = stdpkg ? stdpkg.nodes : [];
+  for (const b of blocks) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = b.name;
+    chip.title = b.inputs.map(p => p.name + ":" + typeName(p.type)).join(", ");
+    chip.onclick = () => {
+      const args = b.inputs.map(p => p.name).join(", ");
+      const ta = document.getElementById("eq-body");
+      ta.value += (ta.value ? " " : "") + b.name + "(" + args + ")";
+      ta.focus();
+    };
+    pal.appendChild(chip);
+  }
+  if (!blocks.length) {
+    pal.innerHTML = '<span class="build-note">start the server with --with-stdlib libraries to get the 41-block palette</span>';
+  }
+}
+
+function setEditStatus(ok, msg) {
+  const el = document.getElementById("edit-status");
+  el.className = ok ? "ok" : "err";
+  el.textContent = msg;
+}
+
+async function postEdit(path, payload) {
+  const r = await fetch(path, { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setEditStatus(false, msg);
+    return false;
+  }
+  setEditStatus(true, "saved ✓");
+  await refresh();
+  if (currentTab() === "diagram" && state.selectedNode) loadDiagram(state.selectedNode.name);
+  return true;
+}
+
+function editAddNode() {
+  postEdit("/api/edit/add_node", {
+    name: document.getElementById("new-node-name").value.trim(),
+    kind: document.getElementById("new-node-kind").value,
+  });
+}
+
+function editAddPort() {
+  const side = document.getElementById("port-side").value;
+  const payload = {
+    node: document.getElementById("port-node").value,
+    name: document.getElementById("port-name").value.trim(),
+    type: document.getElementById("port-type").value.trim(),
+  };
+  if (side === "local") {
+    postEdit("/api/edit/add_local", payload);
+  } else {
+    payload.side = side;
+    postEdit("/api/edit/add_port", payload);
+  }
+}
+
+function editAddEquation() {
+  postEdit("/api/edit/add_equation", {
+    node: document.getElementById("eq-node").value,
+    lhs: document.getElementById("eq-lhs").value.trim(),
+    body: document.getElementById("eq-body").value.trim(),
+  });
+}
+
+function editSetMain() {
+  postEdit("/api/edit/set_main", {
+    main: document.getElementById("main-select").value,
+  });
+}
+
+// --- Stepped simulation (full trace: every item, every cycle) ---
 
 function populateStepInputs() {
   const e = entryNode();
@@ -287,7 +532,7 @@ async function stepOnce() {
     state.stepHistory = currentHeaderRow() + "\n";
   }
   state.stepHistory += currentInputRow() + "\n";
-  const r = await fetch("/api/simulate", { method: "POST", body: state.stepHistory });
+  const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
   const trace = await r.text();
   renderStepTrace(trace);
 }
@@ -316,9 +561,7 @@ function escapeHTML(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// --- Build: download all files as a zip-like bundle (a single .tar would
-// require binary handling; instead we save each file individually via a
-// data: download link). ---
+// --- Build: save each generated file via a data: download link. ---
 
 async function downloadBuild() {
   const files = [

@@ -85,6 +85,10 @@ name = "studio_server"
 path = "studio_server.rs"
 
 [[test]]
+name = "studio_editing"
+path = "studio_editing.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

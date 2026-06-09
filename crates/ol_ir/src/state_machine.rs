@@ -132,7 +132,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
     }
 
     let state_type_name = format!("{}_StateEnum", sm.name);
-    let state_ty = Type::Named(state_type_name.clone());
+    let state_ty = Type::named(state_type_name.clone());
 
     let state_type = TypeDef {
         body: TypeBody::Enum(EnumDef {
@@ -254,6 +254,6 @@ fn default_expr_for_type(ty: &Type) -> Expr {
         // every state assigns the output (which we require above) this branch
         // is unreachable at runtime, but lowering still has to produce
         // something type-shaped for the chain's terminal else.
-        Type::Array { .. } | Type::Named(_) => Expr::int_lit(0),
+        Type::Array { .. } | Type::Named { .. } => Expr::int_lit(0),
     }
 }

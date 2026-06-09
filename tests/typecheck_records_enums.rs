@@ -68,7 +68,7 @@ fn record_field_access_resolves_to_field_type() {
     let node = NodeDef {
         name: "Probe".into(),
         kind: NodeKind::Function,
-        inputs: vec![Port { name: "msg".into(), ty: Type::Named("AdsbMsg".into()) }],
+        inputs: vec![Port { name: "msg".into(), ty: Type::named("AdsbMsg") }],
         outputs: vec![Port { name: "alt".into(), ty: Type::Int32 }],
         locals: vec![],
         equations: vec![Equation {
@@ -95,7 +95,7 @@ fn unknown_record_field_errors() {
     let node = NodeDef {
         name: "Probe".into(),
         kind: NodeKind::Function,
-        inputs: vec![Port { name: "msg".into(), ty: Type::Named("AdsbMsg".into()) }],
+        inputs: vec![Port { name: "msg".into(), ty: Type::named("AdsbMsg") }],
         outputs: vec![Port { name: "out".into(), ty: Type::Int32 }],
         locals: vec![],
         equations: vec![Equation {
@@ -122,7 +122,7 @@ fn enum_variant_is_resolved_as_its_enum_type() {
         name: "Pick".into(),
         kind: NodeKind::Function,
         inputs: vec![],
-        outputs: vec![Port { name: "c".into(), ty: Type::Named("Color".into()) }],
+        outputs: vec![Port { name: "c".into(), ty: Type::named("Color") }],
         locals: vec![],
         equations: vec![Equation {
             lhs: vec!["c".into()],
@@ -145,7 +145,7 @@ fn type_alias_resolves_when_comparing_types() {
         name: "Pass".into(),
         kind: NodeKind::Function,
         inputs: vec![Port { name: "x".into(), ty: Type::Int32 }],
-        outputs: vec![Port { name: "y".into(), ty: Type::Named("Altitude".into()) }],
+        outputs: vec![Port { name: "y".into(), ty: Type::named("Altitude") }],
         locals: vec![],
         equations: vec![Equation {
             lhs: vec!["y".into()],
