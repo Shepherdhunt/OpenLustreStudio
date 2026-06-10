@@ -342,8 +342,19 @@ fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
     Ok(format!("{lus}\n{con}"))
 }
 
-fn build_clite(ctx: &ServerCtx) -> Result<(String, String), String> {
+/// The Build/C-Lite views generate the SCADE way: the selected root (the
+/// project's `main`) and everything it transitively uses — never the whole
+/// merged project (which would drag every stdlib block into the generated C).
+fn sliced_for_main(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
     let project = load(ctx)?;
+    match project.main.clone() {
+        Some(root) => project.slice_for_root(&root),
+        None => Ok(project),
+    }
+}
+
+fn build_clite(ctx: &ServerCtx) -> Result<(String, String), String> {
+    let project = sliced_for_main(ctx)?;
     let bundle = ol_clite_emit::emit_project(&project);
     Ok((bundle.header, bundle.source))
 }

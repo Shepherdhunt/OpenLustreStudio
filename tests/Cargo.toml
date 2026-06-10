@@ -93,6 +93,10 @@ name = "scenario_harness"
 path = "scenario_harness.rs"
 
 [[test]]
+name = "selective_codegen"
+path = "selective_codegen.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

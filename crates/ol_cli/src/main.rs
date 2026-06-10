@@ -45,6 +45,10 @@ enum Cmd {
         legacy: bool,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+        /// Generate only this operator and everything it transitively uses
+        /// (SCADE-style selected-root generation) instead of the whole project.
+        #[arg(long, value_name = "NODE")]
+        root: Option<String>,
     },
     /// Emit Directional C-Lite + contract monitors to a directory.
     EmitClite {
@@ -62,6 +66,10 @@ enum Cmd {
         /// directory, plus a build manifest listing external sources to link.
         #[arg(long, value_name = "DIR")]
         imports: Option<PathBuf>,
+        /// Generate only this operator and everything it transitively uses
+        /// (SCADE-style selected-root generation) instead of the whole project.
+        #[arg(long, value_name = "NODE")]
+        root: Option<String>,
     },
     /// Run the IR simulator against a CSV input vector.
     Simulate {
@@ -218,14 +226,23 @@ fn main() -> Result<()> {
             out,
             legacy,
             with_stdlib,
-        } => cmd_emit_lustre(&model, &out, legacy, with_stdlib.as_deref()),
+            root,
+        } => cmd_emit_lustre(&model, &out, legacy, with_stdlib.as_deref(), root.as_deref()),
         Cmd::EmitClite {
             model,
             out,
             with_stdlib,
             driver,
             imports,
-        } => cmd_emit_clite(&model, &out, with_stdlib.as_deref(), driver, imports.as_deref()),
+            root,
+        } => cmd_emit_clite(
+            &model,
+            &out,
+            with_stdlib.as_deref(),
+            driver,
+            imports.as_deref(),
+            root.as_deref(),
+        ),
         Cmd::Simulate {
             model,
             node,
@@ -542,8 +559,18 @@ fn cmd_emit_lustre(
     out: &Path,
     legacy: bool,
     with_stdlib: Option<&Path>,
+    root: Option<&str>,
 ) -> Result<()> {
-    let project = load_with_stdlib(model, with_stdlib)?;
+    let mut project = load_with_stdlib(model, with_stdlib)?;
+    if let Some(root) = root {
+        project = project
+            .slice_for_root(root)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "emit-lustre: selected root `{root}` — generating {} used node(s)",
+            project.all_nodes().count()
+        );
+    }
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let lus = ol_lustre_emit::emit_project(&project);
     std::fs::write(out.join("model.lus"), &lus)?;
@@ -564,8 +591,18 @@ fn cmd_emit_clite(
     with_stdlib: Option<&Path>,
     driver: bool,
     imports: Option<&Path>,
+    root: Option<&str>,
 ) -> Result<()> {
-    let project = load_with_stdlib(model, with_stdlib)?;
+    let mut project = load_with_stdlib(model, with_stdlib)?;
+    if let Some(root) = root {
+        project = project
+            .slice_for_root(root)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        println!(
+            "emit-clite: selected root `{root}` — generating {} used node(s)",
+            project.all_nodes().count()
+        );
+    }
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
     let clite_dir = out.join("clite");
     let mon_dir = out.join("monitors");

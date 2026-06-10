@@ -134,6 +134,13 @@ impl Project {
         }
     }
 
+    /// Slice this project down to `root` and everything it transitively
+    /// uses — the SCADE-style "generate the selected operator and all that
+    /// are used by that model" selection. See [`crate::slice::slice_for_root`].
+    pub fn slice_for_root(&self, root: &str) -> Result<Project, String> {
+        crate::slice::slice_for_root(self, root)
+    }
+
     /// Replace each [`StateMachineDef`] in every package with the dataflow
     /// node and state-enum type it lowers to. After this call, downstream
     /// tools see only ordinary nodes and types and need no per-tool

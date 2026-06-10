@@ -404,6 +404,9 @@ pub fn cc_available() -> bool {
 }
 
 fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledModel, String> {
+    // Selected-root generation: compile only the node under test and what it
+    // transitively uses, exactly as the production emit path does.
+    let project = &project.slice_for_root(node_name)?;
     let node = project
         .find_node(node_name)
         .ok_or_else(|| format!("node `{node_name}` not found"))?;
