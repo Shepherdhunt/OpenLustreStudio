@@ -20,11 +20,31 @@ The model is not just equations.
 The model is equations + contracts + modes + evidence.
 ```
 
+## Installing
+
+**Windows** — download `OpenLustreStudio-<version>-Setup.exe` from the
+releases page and run it. You get a normal install wizard, a Start Menu
+entry, and an optional Desktop shortcut; double-clicking the shortcut runs
+`openlustre studio launch`, which starts the Studio and opens your browser
+on a welcome project (created at `%USERPROFILE%\OpenLustre` on first run).
+The 41-block standard library is embedded in the binary — nothing else to
+install. (Installer built from `packaging/windows/openlustre.iss`; the
+`release` GitHub Actions workflow produces it on every version tag.)
+
+**Linux / macOS** — grab the release archive (or `cargo build --release
+-p ol_cli`), then `./packaging/linux/install.sh` to get the binary in
+`~/.local/bin` plus an application-menu shortcut, or just run:
+
+```bash
+openlustre studio launch        # starts the Studio + opens your browser
+```
+
 ## The workflow
 
 ```bash
-# 1. Open the Studio in a browser (no JS toolchain, no install beyond cargo):
-openlustre studio serve model.json --with-stdlib libraries
+# 1. Open the Studio in a browser (the embedded block library loads
+#    automatically; --with-stdlib DIR overrides it for development):
+openlustre studio launch model.json
 #    → Project Explorer, dataflow Diagram, Edit forms (create operators,
 #      ports, equations with if/math/temporal ops and a 41-block library
 #      palette), SCADE-style Step tab (deterministic value for EVERY item,

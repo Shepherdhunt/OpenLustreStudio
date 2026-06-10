@@ -97,6 +97,10 @@ name = "selective_codegen"
 path = "selective_codegen.rs"
 
 [[test]]
+name = "packaging_launch"
+path = "packaging_launch.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

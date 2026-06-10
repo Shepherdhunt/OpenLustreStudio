@@ -26,6 +26,9 @@ const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub struct ServerCtx {
     pub model: PathBuf,
     pub with_stdlib: Option<PathBuf>,
+    /// Merge the library embedded in this binary when no on-disk
+    /// `--with-stdlib` directory was given (the deployed-app default).
+    pub use_embedded: bool,
     /// Directory of test scenarios (*.csv + *.golden.csv). Defaults to a
     /// `scenarios` directory next to the model file.
     pub scenarios: PathBuf,
@@ -291,7 +294,7 @@ fn json_error(msg: &str) -> String {
 // --- emit / inspect / simulate paths.
 
 fn load(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
-    crate::load_with_stdlib(&ctx.model, ctx.with_stdlib.as_deref())
+    crate::load_for_studio(&ctx.model, ctx.with_stdlib.as_deref(), ctx.use_embedded)
         .map_err(|e| format!("{e:#}"))
 }
 

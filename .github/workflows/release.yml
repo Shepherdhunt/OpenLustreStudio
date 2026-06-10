@@ -1,0 +1,70 @@
+# Release packaging: push a tag like v0.1.0 and this workflow builds the
+# openlustre binary for Windows / Linux / macOS, compiles the Windows
+# installer (Inno Setup, preinstalled on the windows-latest runner), and
+# attaches everything to a GitHub release.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+
+  build:
+    needs: test
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: openlustre-windows-x86_64
+          - os: ubuntu-latest
+            artifact: openlustre-linux-x86_64
+          - os: macos-latest
+            artifact: openlustre-macos-aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release -p ol_cli
+
+      - name: Derive version from tag
+        id: version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Windows installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/build-installer.ps1 -Version "${{ steps.version.outputs.version }}"
+
+      - name: Package archive (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          tar -C target/release -czf "dist/${{ matrix.artifact }}.tar.gz" openlustre
+      - name: Package archive (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path target/release/openlustre.exe `
+            -DestinationPath "dist/${{ matrix.artifact }}.zip"
+          Copy-Item packaging/windows/dist/*.exe dist/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

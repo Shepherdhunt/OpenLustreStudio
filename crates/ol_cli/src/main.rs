@@ -197,12 +197,35 @@ enum StudioCmd {
         model: PathBuf,
         #[arg(long, default_value_t = 8181)]
         port: u16,
+        /// Use this on-disk block library instead of the one embedded in the
+        /// binary. Without this flag the embedded 41-block palette is used.
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+        /// Serve the model alone, without any standard-library palette.
+        #[arg(long)]
+        no_stdlib: bool,
         /// Directory of test scenarios for the Tests tab. Defaults to a
         /// `scenarios` directory next to the model file.
         #[arg(long, value_name = "DIR")]
         scenarios: Option<PathBuf>,
+    },
+    /// Desktop entry point: start the Studio and open it in the default
+    /// browser. With no model argument, opens (creating on first run) a
+    /// starter project in `~/OpenLustre/welcome.json`. This is the command
+    /// installer shortcuts run.
+    Launch {
+        /// Model to open; defaults to ~/OpenLustre/welcome.json.
+        model: Option<PathBuf>,
+        /// Port to serve on; 0 picks a free port.
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        #[arg(long)]
+        no_stdlib: bool,
+        /// Print the URL without opening a browser (CI / headless use).
+        #[arg(long)]
+        no_open: bool,
     },
 }
 
@@ -291,8 +314,16 @@ fn main() -> Result<()> {
                 model,
                 port,
                 with_stdlib,
+                no_stdlib,
                 scenarios,
-            } => cmd_studio_serve(&model, port, with_stdlib, scenarios),
+            } => serve_studio(&model, port, with_stdlib, no_stdlib, scenarios, false),
+            StudioCmd::Launch {
+                model,
+                port,
+                with_stdlib,
+                no_stdlib,
+                no_open,
+            } => cmd_studio_launch(model, port, with_stdlib, no_stdlib, no_open),
         },
         Cmd::Test { cmd } => match cmd {
             TestCmd::Record {
@@ -779,16 +810,47 @@ fn cmd_prove(
     Ok(())
 }
 
-fn cmd_studio_serve(
+/// Load a project the way the Studio does: an explicit `--with-stdlib DIR`
+/// wins; otherwise the library embedded in this binary is merged (the
+/// deployed-app default) unless stdlib use is disabled entirely.
+pub(crate) fn load_for_studio(
+    model: &Path,
+    with_stdlib: Option<&Path>,
+    use_embedded: bool,
+) -> Result<ol_ir::Project> {
+    if with_stdlib.is_some() {
+        return load_with_stdlib(model, with_stdlib);
+    }
+    let mut project = load(model)?;
+    if use_embedded {
+        let lib = ol_stdlib::load_embedded()
+            .map_err(|e| anyhow::anyhow!("embedded stdlib: {e}"))?;
+        lib.merge_into(&mut project, "stdlib");
+    }
+    if let Err(errs) = project.lower_state_machines() {
+        let joined = errs
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("state-machine lowering failed:\n{joined}");
+    }
+    Ok(project)
+}
+
+fn serve_studio(
     model: &Path,
     port: u16,
     with_stdlib: Option<PathBuf>,
+    no_stdlib: bool,
     scenarios: Option<PathBuf>,
+    open_browser: bool,
 ) -> Result<()> {
+    let use_embedded = with_stdlib.is_none() && !no_stdlib;
     // Eagerly load once to surface configuration errors before starting the
     // server — better to fail fast than to spin up a UI that only ever shows
     // errors.
-    let _ = load_with_stdlib(model, with_stdlib.as_deref())
+    let _ = load_for_studio(model, with_stdlib.as_deref(), use_embedded)
         .with_context(|| format!("loading model {}", model.display()))?;
 
     let scenarios = scenarios.unwrap_or_else(|| {
@@ -801,15 +863,103 @@ fn cmd_studio_serve(
     let listener = studio_server::bind(studio_server::loopback(port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let local = listener.local_addr()?;
-    println!("studio: serving http://{local} (model: {})", model.display());
+    let url = format!("http://{local}");
+    println!("studio: serving {url} (model: {})", model.display());
     println!("studio: ctrl-c to stop.");
+    if open_browser {
+        open_in_browser(&url);
+    }
     let ctx = studio_server::ServerCtx {
         model: model.to_path_buf(),
         with_stdlib,
+        use_embedded,
         scenarios,
     };
     studio_server::serve(listener, ctx)?;
     Ok(())
+}
+
+fn cmd_studio_launch(
+    model: Option<PathBuf>,
+    port: u16,
+    with_stdlib: Option<PathBuf>,
+    no_stdlib: bool,
+    no_open: bool,
+) -> Result<()> {
+    let model = match model {
+        Some(m) => m,
+        None => welcome_project_path()?,
+    };
+    serve_studio(&model, port, with_stdlib, no_stdlib, None, !no_open)
+}
+
+/// `~/OpenLustre/welcome.json`, created from a starter model on first run so
+/// double-clicking the installed shortcut always opens something editable.
+fn welcome_project_path() -> Result<PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .context("could not determine the home directory (HOME / USERPROFILE)")?;
+    let dir = home.join("OpenLustre");
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating {}", dir.display()))?;
+    let path = dir.join("welcome.json");
+    if !path.exists() {
+        let project = starter_project();
+        std::fs::write(&path, serde_json::to_string_pretty(&project)?)
+            .with_context(|| format!("writing {}", path.display()))?;
+        println!("studio: created starter project at {}", path.display());
+    }
+    Ok(path)
+}
+
+/// A small self-contained model: `Heartbeat(enable) -> beat` toggles every
+/// cycle while enabled. Uses `->`/`pre`, if-logic, and is set as `main`, so
+/// the Step / Build / Tests tabs all work out of the box.
+fn starter_project() -> ol_ir::Project {
+    use ol_ir::{Equation, Expr, NodeDef, NodeKind, Package, Port, Project, Type};
+    let node = NodeDef {
+        name: "Heartbeat".into(),
+        kind: NodeKind::Operator,
+        inputs: vec![Port { name: "enable".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "beat".into(), ty: Type::Bool }],
+        locals: vec![],
+        equations: vec![Equation {
+            lhs: vec!["beat".into()],
+            rhs: Expr::and(
+                Expr::var("enable"),
+                Expr::arrow(Expr::bool_lit(true), Expr::not(Expr::pre(Expr::var("beat")))),
+            ),
+        }],
+        contract: None,
+        diagram: Default::default(),
+    };
+    Project {
+        name: "welcome".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            nodes: vec![node],
+            ..Default::default()
+        }],
+        main: Some("Heartbeat".into()),
+        ..Default::default()
+    }
+}
+
+/// Best-effort: open `url` in the platform's default browser. Failure is
+/// non-fatal — the URL is already printed.
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("cmd")
+        .args(["/C", "start", "", url])
+        .spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if result.is_err() {
+        eprintln!("studio: could not open a browser automatically; open {url} manually");
+    }
 }
 
 /// Render a single-command Makefile that builds the standalone executable
