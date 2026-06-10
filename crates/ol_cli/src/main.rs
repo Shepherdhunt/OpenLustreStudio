@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod scenario;
 mod studio_server;
 
 use ol_clite_emit::{load_manifest_dir, monitor};
@@ -119,6 +120,51 @@ enum Cmd {
         #[command(subcommand)]
         cmd: StudioCmd,
     },
+    /// Project test scenarios: record golden traces from the IR simulator,
+    /// then re-run them against the IR simulator AND the compiled generated C
+    /// to prove the model and the auto-generated code behave identically.
+    Test {
+        #[command(subcommand)]
+        cmd: TestCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TestCmd {
+    /// Capture (or refresh) golden traces for every scenario input vector.
+    Record {
+        model: PathBuf,
+        /// Directory of scenario input vectors (*.csv). Goldens are written
+        /// alongside as *.golden.csv.
+        #[arg(long, default_value = "scenarios")]
+        scenarios: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Node to drive; defaults to the project's `main`.
+        #[arg(long)]
+        node: Option<String>,
+    },
+    /// Run every scenario and compare against the goldens.
+    Run {
+        model: PathBuf,
+        #[arg(long, default_value = "scenarios")]
+        scenarios: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        #[arg(long)]
+        node: Option<String>,
+        /// Which backends to verify: the IR simulator, the compiled
+        /// generated C, or both (default).
+        #[arg(long, value_enum, default_value_t = TestBackend::Both)]
+        backend: TestBackend,
+    },
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum TestBackend {
+    Ir,
+    C,
+    Both,
 }
 
 #[derive(Subcommand, Debug)]
@@ -145,6 +191,10 @@ enum StudioCmd {
         port: u16,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+        /// Directory of test scenarios for the Tests tab. Defaults to a
+        /// `scenarios` directory next to the model file.
+        #[arg(long, value_name = "DIR")]
+        scenarios: Option<PathBuf>,
     },
 }
 
@@ -224,7 +274,29 @@ fn main() -> Result<()> {
                 model,
                 port,
                 with_stdlib,
-            } => cmd_studio_serve(&model, port, with_stdlib),
+                scenarios,
+            } => cmd_studio_serve(&model, port, with_stdlib, scenarios),
+        },
+        Cmd::Test { cmd } => match cmd {
+            TestCmd::Record {
+                model,
+                scenarios,
+                with_stdlib,
+                node,
+            } => cmd_test_record(&model, &scenarios, with_stdlib.as_deref(), node.as_deref()),
+            TestCmd::Run {
+                model,
+                scenarios,
+                with_stdlib,
+                node,
+                backend,
+            } => cmd_test_run(
+                &model,
+                &scenarios,
+                with_stdlib.as_deref(),
+                node.as_deref(),
+                backend,
+            ),
         },
     }
 }
@@ -670,12 +742,24 @@ fn cmd_prove(
     Ok(())
 }
 
-fn cmd_studio_serve(model: &Path, port: u16, with_stdlib: Option<PathBuf>) -> Result<()> {
+fn cmd_studio_serve(
+    model: &Path,
+    port: u16,
+    with_stdlib: Option<PathBuf>,
+    scenarios: Option<PathBuf>,
+) -> Result<()> {
     // Eagerly load once to surface configuration errors before starting the
     // server — better to fail fast than to spin up a UI that only ever shows
     // errors.
     let _ = load_with_stdlib(model, with_stdlib.as_deref())
         .with_context(|| format!("loading model {}", model.display()))?;
+
+    let scenarios = scenarios.unwrap_or_else(|| {
+        model
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join("scenarios")
+    });
 
     let listener = studio_server::bind(studio_server::loopback(port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
@@ -685,6 +769,7 @@ fn cmd_studio_serve(model: &Path, port: u16, with_stdlib: Option<PathBuf>) -> Re
     let ctx = studio_server::ServerCtx {
         model: model.to_path_buf(),
         with_stdlib,
+        scenarios,
     };
     studio_server::serve(listener, ctx)?;
     Ok(())
@@ -721,4 +806,55 @@ clean:
 .PHONY: run clean
 "
     )
+}
+
+fn cmd_test_record(
+    model: &Path,
+    scenarios: &Path,
+    with_stdlib: Option<&Path>,
+    node: Option<&str>,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let node_name = node
+        .map(|s| s.to_string())
+        .or_else(|| project.main.clone())
+        .context("no --node specified and project has no `main`")?;
+    let recorded = scenario::record_goldens(&project, scenarios, &node_name)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    for (name, path) in &recorded {
+        println!("recorded golden for `{name}` -> {}", path.display());
+    }
+    println!("test record: {} golden trace(s) captured", recorded.len());
+    Ok(())
+}
+
+fn cmd_test_run(
+    model: &Path,
+    scenarios: &Path,
+    with_stdlib: Option<&Path>,
+    node: Option<&str>,
+    backend: TestBackend,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let node_name = node
+        .map(|s| s.to_string())
+        .or_else(|| project.main.clone())
+        .context("no --node specified and project has no `main`")?;
+    let backends: Vec<scenario::Backend> = match backend {
+        TestBackend::Ir => vec![scenario::Backend::Ir],
+        TestBackend::C => vec![scenario::Backend::C],
+        TestBackend::Both => vec![scenario::Backend::Ir, scenario::Backend::C],
+    };
+    let results = scenario::run_scenarios(&project, scenarios, &node_name, &backends);
+    if results.is_empty() {
+        anyhow::bail!(
+            "no scenarios found in {} (expected *.csv input vectors)",
+            scenarios.display()
+        );
+    }
+    print!("{}", scenario::render_report(&results));
+    if !scenario::all_green(&results) {
+        anyhow::bail!("test run failed");
+    }
+    Ok(())
 }

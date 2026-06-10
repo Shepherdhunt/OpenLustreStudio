@@ -26,6 +26,9 @@ const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 pub struct ServerCtx {
     pub model: PathBuf,
     pub with_stdlib: Option<PathBuf>,
+    /// Directory of test scenarios (*.csv + *.golden.csv). Defaults to a
+    /// `scenarios` directory next to the model file.
+    pub scenarios: PathBuf,
 }
 
 /// Bind a listener on `addr`. The caller can pass port `0` to let the OS pick
@@ -165,6 +168,18 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/add_node") => {
             apply_edit_response(ctx, body, edit_add_node)
         }
+        ("GET", "/api/tests") => match tests_list(ctx) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/tests/run") => match tests_run(ctx) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/tests/record") => match tests_record(ctx) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -659,4 +674,58 @@ fn is_identifier(s: &str) -> bool {
 /// unused port, which tests use to avoid collisions.
 pub fn loopback(port: u16) -> SocketAddr {
     SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port)
+}
+
+// --- Test scenarios (SCADE Test analog): list / run / record ---
+
+fn main_node(project: &ol_ir::Project) -> Result<String, String> {
+    project
+        .main
+        .clone()
+        .ok_or_else(|| "project has no `main` node".to_string())
+}
+
+fn tests_list(ctx: &ServerCtx) -> Result<String, String> {
+    let scenarios = crate::scenario::list_scenarios(&ctx.scenarios);
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "scenarios_dir": ctx.scenarios.display().to_string(),
+        "scenarios": scenarios.iter().map(|s| serde_json::json!({
+            "name": s.name,
+            "has_golden": s.has_golden,
+        })).collect::<Vec<_>>(),
+        "cc_available": crate::scenario::cc_available(),
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
+    let project = load(ctx)?;
+    let node = main_node(&project)?;
+    let results = crate::scenario::run_scenarios(
+        &project,
+        &ctx.scenarios,
+        &node,
+        &[crate::scenario::Backend::Ir, crate::scenario::Backend::C],
+    );
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "all_green": crate::scenario::all_green(&results),
+        "results": results,
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
+    let project = load(ctx)?;
+    let node = main_node(&project)?;
+    let recorded = crate::scenario::record_goldens(&project, &ctx.scenarios, &node)?;
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "recorded": recorded.iter().map(|(name, path)| serde_json::json!({
+            "name": name,
+            "golden": path.display().to_string(),
+        })).collect::<Vec<_>>(),
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
 }

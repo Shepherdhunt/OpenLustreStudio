@@ -89,6 +89,10 @@ name = "studio_editing"
 path = "studio_editing.rs"
 
 [[test]]
+name = "scenario_harness"
+path = "scenario_harness.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

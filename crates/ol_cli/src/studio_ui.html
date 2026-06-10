@@ -80,6 +80,7 @@
     <span class="tab" data-tab="diagram">Diagram</span>
     <span class="tab" data-tab="edit">Edit</span>
     <span class="tab" data-tab="step">Step</span>
+    <span class="tab" data-tab="tests">Tests</span>
     <span class="tab" data-tab="simulate">Simulate (CSV)</span>
     <span class="tab" data-tab="lustre">Lustre</span>
     <span class="tab" data-tab="clite">C-Lite</span>
@@ -152,6 +153,19 @@
     </div>
     <h4>Trace — all items, every cycle</h4>
     <div id="step-trace"></div>
+  </div>
+
+  <div id="panel-tests" style="display:none">
+    <p>Project test scenarios — golden traces recorded from the model, verified against <strong>both</strong> the IR simulator and the compiled generated C. Scenario inputs live in <code class="inline" id="tests-dir">scenarios/</code> next to the model.</p>
+    <div>
+      <button class="primary" onclick="testsRun()">Run all</button>
+      <button onclick="testsRecord()">Record goldens</button>
+      <span class="build-note" id="tests-summary"></span>
+    </div>
+    <h4>Scenarios</h4>
+    <div id="tests-scenarios"></div>
+    <h4>Results</h4>
+    <div id="tests-results"></div>
   </div>
 
   <div id="panel-simulate" style="display:none">
@@ -316,6 +330,7 @@ function showTab(name) {
     const n = state.selectedNode?.name || state.inspect?.project?.main;
     if (n) loadDiagram(n);
   }
+  if (name === "tests") loadTests();
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
@@ -559,6 +574,92 @@ function renderStepTrace(csv) {
 
 function escapeHTML(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// --- Tests: golden-trace scenarios, run against IR sim AND compiled C ---
+
+async function loadTests() {
+  let t;
+  try {
+    t = await fetchJSON("/api/tests");
+  } catch (e) {
+    document.getElementById("tests-scenarios").innerHTML =
+      '<div class="diag severity-Error">' + e + "</div>";
+    return;
+  }
+  document.getElementById("tests-dir").textContent = t.scenarios_dir;
+  const host = document.getElementById("tests-scenarios");
+  if (!t.scenarios.length) {
+    host.innerHTML = '<span class="build-note">No scenarios yet. Add input vectors as <code>NAME.csv</code> (header row = main-node inputs) to the scenarios directory, then Record goldens.</span>';
+    return;
+  }
+  let html = "<table><thead><tr><th>scenario</th><th>golden</th></tr></thead><tbody>";
+  for (const s of t.scenarios) {
+    html += "<tr><td>" + escapeHTML(s.name) + "</td><td>" +
+      (s.has_golden ? "✓ recorded" : '<span class="severity-Warning">missing</span>') +
+      "</td></tr>";
+  }
+  html += "</tbody></table>";
+  if (!t.cc_available) {
+    html += '<p class="build-note">cc not found — the C backend will be reported as skipped.</p>';
+  }
+  host.innerHTML = html;
+}
+
+async function testsRun() {
+  document.getElementById("tests-summary").textContent = "running…";
+  const r = await fetch("/api/tests/run", { method: "POST" });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) {
+    document.getElementById("tests-results").innerHTML =
+      '<div class="diag severity-Error">' + escapeHTML(text) + "</div>";
+    return;
+  }
+  if (data.error) {
+    document.getElementById("tests-summary").textContent = "";
+    document.getElementById("tests-results").innerHTML =
+      '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    return;
+  }
+  const results = data.results || [];
+  let pass = 0, fail = 0;
+  let html = "<table><thead><tr><th>scenario</th><th>backend</th><th>status</th><th>detail</th></tr></thead><tbody>";
+  for (const res of results) {
+    const ok = res.status === "pass";
+    const skip = res.status === "skipped" || res.status === "no_golden";
+    if (ok) pass++; else if (!skip) fail++;
+    const cls = ok ? "severity-Info" : (skip ? "severity-Warning" : "severity-Error");
+    let detail = escapeHTML(res.message || "");
+    for (const d of (res.diffs || [])) {
+      detail += (detail ? "<br>" : "") +
+        "cycle " + escapeHTML(d.cycle) + ": <code>" + escapeHTML(d.column) +
+        "</code> expected " + escapeHTML(d.expected) + " got " + escapeHTML(d.actual);
+    }
+    html += "<tr><td>" + escapeHTML(res.name) + "</td><td>" + res.backend +
+      '</td><td class="' + cls + '">' + escapeHTML(res.status) + "</td><td>" + detail + "</td></tr>";
+  }
+  html += "</tbody></table>";
+  document.getElementById("tests-results").innerHTML = html;
+  document.getElementById("tests-summary").textContent =
+    (data.all_green ? "✓ all green — " : "✗ failures — ") + pass + " passed, " + fail + " failed";
+}
+
+async function testsRecord() {
+  document.getElementById("tests-summary").textContent = "recording…";
+  const r = await fetch("/api/tests/record", { method: "POST" });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  if (data.error) {
+    document.getElementById("tests-summary").textContent = "";
+    document.getElementById("tests-results").innerHTML =
+      '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    return;
+  }
+  document.getElementById("tests-summary").textContent =
+    "recorded " + (data.recorded || []).length + " golden trace(s)";
+  loadTests();
 }
 
 // --- Build: save each generated file via a data: download link. ---
