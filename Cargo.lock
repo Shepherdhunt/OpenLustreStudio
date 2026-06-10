@@ -247,6 +247,7 @@ version = "0.1.0"
 dependencies = [
  "ol_contract_ir",
  "ol_ir",
+ "ol_lustre_emit",
  "serde",
  "serde_json",
  "thiserror",
