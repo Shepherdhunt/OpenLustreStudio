@@ -37,10 +37,23 @@ pub struct Equation {
     pub rhs: Expr,
 }
 
+/// Position of one diagram element. Keys in [`DiagramLayout::positions`] use
+/// the same ids the Studio diagram API serves: port and local names, and
+/// `eqN` for the N-th equation box.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct NodePos {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DiagramLayout {
     /// Free-form layout hints used by the GUI; ignored by the compiler.
     pub notes: Option<String>,
+    /// Persisted free-form canvas positions, keyed by diagram element id.
+    /// Absent entries fall back to the GUI's automatic column layout.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub positions: std::collections::BTreeMap<String, NodePos>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

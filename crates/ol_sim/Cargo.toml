@@ -10,3 +10,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 ol_ir = { workspace = true }
 ol_contract_ir = { workspace = true }
+ol_lustre_emit = { workspace = true }

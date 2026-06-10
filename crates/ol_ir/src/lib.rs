@@ -24,7 +24,7 @@ pub mod loader;
 
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, Literal, UnaryOp};
-pub use node::{Equation, Local, NodeDef, NodeKind, Port};
+pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port};
 pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
 pub use slice::slice_for_root;
 pub use state_machine::{lower as lower_state_machine, LoweredMachine, StateDef, StateMachineDef, Transition};

@@ -1032,15 +1032,27 @@ fn cmd_test_run(
         TestBackend::C => vec![scenario::Backend::C],
         TestBackend::Both => vec![scenario::Backend::Ir, scenario::Backend::C],
     };
-    let results = scenario::run_scenarios(&project, scenarios, &node_name, &backends);
-    if results.is_empty() {
+    let outcome = scenario::run_scenarios(&project, scenarios, &node_name, &backends);
+    if outcome.results.is_empty() {
         anyhow::bail!(
             "no scenarios found in {} (expected *.csv input vectors)",
             scenarios.display()
         );
     }
-    print!("{}", scenario::render_report(&results));
-    if !scenario::all_green(&results) {
+    print!("{}", scenario::render_report(&outcome.results));
+    if let Some(cov) = &outcome.coverage {
+        println!(
+            "decision coverage: {}/{} if-conditions driven both ways",
+            cov.covered, cov.total
+        );
+        for u in &cov.uncovered {
+            println!(
+                "  uncovered: {}::{} `{}` (missing {})",
+                u.node, u.context, u.condition, u.missing
+            );
+        }
+    }
+    if !scenario::all_green(&outcome.results) {
         anyhow::bail!("test run failed");
     }
     Ok(())

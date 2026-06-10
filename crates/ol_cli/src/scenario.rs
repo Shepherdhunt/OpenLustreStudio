@@ -106,15 +106,83 @@ pub fn list_scenarios(dir: &Path) -> Vec<ScenarioInfo> {
     out
 }
 
-/// Run the IR simulator (full trace) on one input vector.
+/// Run the IR simulator (full trace) on one input vector. When `acc` is
+/// provided, decision coverage is collected and merged into it (keyed by
+/// node/context/condition so outcomes accumulate across scenarios).
 fn ir_full_trace(
     project: &ol_ir::Project,
     node: &str,
     input_csv: &str,
+    acc: Option<&mut CoverageAcc>,
 ) -> Result<String, String> {
     let mut sim = ol_sim::Sim::new(project, node).map_err(|e| e.to_string())?;
+    if acc.is_some() {
+        sim.enable_coverage();
+    }
     let trace = sim.run_csv_full(input_csv).map_err(|e| e.to_string())?;
+    if let (Some(acc), Some(sites)) = (acc, sim.coverage_sites()) {
+        for site in sites {
+            let key = (site.node.clone(), site.context.clone(), site.condition.clone());
+            let entry = acc.entry(key).or_insert((false, false));
+            entry.0 |= site.seen_true;
+            entry.1 |= site.seen_false;
+        }
+    }
     Ok(trace.to_csv())
+}
+
+type CoverageAcc =
+    std::collections::BTreeMap<(String, String, String), (bool, bool)>;
+
+/// Suite-level decision coverage: how many if-conditions were driven both
+/// true and false by the scenario suite (the first rung toward MC/DC).
+#[derive(Debug, Clone, Serialize)]
+pub struct CoverageSummary {
+    pub total: usize,
+    pub covered: usize,
+    pub uncovered: Vec<UncoveredDecision>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UncoveredDecision {
+    pub node: String,
+    pub context: String,
+    pub condition: String,
+    /// Which outcome was never observed: "true", "false", or "both".
+    pub missing: String,
+}
+
+fn summarize_coverage(acc: &CoverageAcc) -> CoverageSummary {
+    let total = acc.len();
+    let mut covered = 0usize;
+    let mut uncovered = Vec::new();
+    for ((node, context, condition), (t, f)) in acc {
+        if *t && *f {
+            covered += 1;
+        } else {
+            uncovered.push(UncoveredDecision {
+                node: node.clone(),
+                context: context.clone(),
+                condition: condition.clone(),
+                missing: match (t, f) {
+                    (false, false) => "both",
+                    (false, true) => "true",
+                    (true, false) => "false",
+                    _ => unreachable!(),
+                }
+                .to_string(),
+            });
+        }
+    }
+    CoverageSummary { total, covered, uncovered }
+}
+
+/// A scenario run's full outcome: per-scenario/backend results plus the
+/// suite-level decision coverage measured on the IR backend.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunOutcome {
+    pub results: Vec<ScenarioResult>,
+    pub coverage: Option<CoverageSummary>,
 }
 
 /// Capture golden traces for every scenario in `dir`. Returns the recorded
@@ -135,7 +203,7 @@ pub fn record_goldens(
     for s in scenarios {
         let input = std::fs::read_to_string(&s.input_path)
             .map_err(|e| format!("{}: {e}", s.input_path.display()))?;
-        let golden = ir_full_trace(project, node, &input)
+        let golden = ir_full_trace(project, node, &input, None)
             .map_err(|e| format!("scenario `{}`: {e}", s.name))?;
         std::fs::write(&s.golden_path, &golden)
             .map_err(|e| format!("{}: {e}", s.golden_path.display()))?;
@@ -152,9 +220,11 @@ pub fn run_scenarios(
     dir: &Path,
     node: &str,
     backends: &[Backend],
-) -> Vec<ScenarioResult> {
+) -> RunOutcome {
     let scenarios = list_scenarios(dir);
     let mut results = Vec::new();
+    let mut cov_acc: CoverageAcc = CoverageAcc::new();
+    let want_coverage = backends.contains(&Backend::Ir);
 
     // Compile the C backend once per run — every scenario reuses the binary.
     let c_exe: Option<Result<CompiledModel, String>> = if backends.contains(&Backend::C) {
@@ -204,7 +274,12 @@ pub fn run_scenarios(
                 continue;
             };
             let result = match backend {
-                Backend::Ir => match ir_full_trace(project, node, &input) {
+                Backend::Ir => match ir_full_trace(
+                    project,
+                    node,
+                    &input,
+                    if want_coverage { Some(&mut cov_acc) } else { None },
+                ) {
                     Ok(actual) => compare_csv(golden, &actual, &s.name, backend, false),
                     Err(e) => ScenarioResult {
                         name: s.name.clone(),
@@ -244,7 +319,14 @@ pub fn run_scenarios(
             results.push(result);
         }
     }
-    results
+    RunOutcome {
+        results,
+        coverage: if want_coverage && !cov_acc.is_empty() {
+            Some(summarize_coverage(&cov_acc))
+        } else {
+            None
+        },
+    }
 }
 
 /// Compare an actual trace against the golden.

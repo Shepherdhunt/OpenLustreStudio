@@ -101,6 +101,10 @@ name = "packaging_launch"
 path = "packaging_launch.rs"
 
 [[test]]
+name = "critical_items"
+path = "critical_items.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

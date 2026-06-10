@@ -139,6 +139,8 @@ pub struct Sim<'a> {
     /// Project-wide constants, pre-evaluated once at construction time. Seeded
     /// into every step's env so equations can name them directly.
     consts: BTreeMap<String, Value>,
+    /// Decision-coverage collector; populated by [`Sim::enable_coverage`].
+    coverage: Option<Coverage>,
 }
 
 impl<'a> Sim<'a> {
@@ -170,6 +172,7 @@ impl<'a> Sim<'a> {
                     &mut throwaway_state,
                     &mut throwaway_calls,
                     project,
+                    &mut None,
                 )
                 .map_err(|e| SimError::EvalError(format!("constant `{}`: {e}", c.name)))?;
                 consts.insert(c.name.clone(), v);
@@ -183,6 +186,7 @@ impl<'a> Sim<'a> {
             contract,
             call_states: HashMap::new(),
             consts,
+            coverage: None,
         })
     }
 
@@ -255,6 +259,7 @@ impl<'a> Sim<'a> {
                 &mut self.state,
                 &mut self.call_states,
                 self.project,
+                &mut self.coverage,
             )?;
             if eq.lhs.len() == 1 {
                 env.insert(eq.lhs[0].clone(), value);
@@ -475,7 +480,7 @@ fn evaluate_monitor(
     // Guarantees are always required to hold.
     for (i, g) in c.guarantees.iter().enumerate() {
         let label = g.name.clone().unwrap_or_else(|| format!("guarantee#{i}"));
-        match eval(&g.expr, &env, &mut state, &mut call_states, &project) {
+        match eval(&g.expr, &env, &mut state, &mut call_states, &project, &mut None) {
             Ok(Value::Bool(true)) => {}
             _ => violations.push(label),
         }
@@ -486,7 +491,7 @@ fn evaluate_monitor(
     for m in &c.modes {
         let mut hit = true;
         for r in &m.requires {
-            match eval(r, &env, &mut state, &mut call_states, &project) {
+            match eval(r, &env, &mut state, &mut call_states, &project, &mut None) {
                 Ok(Value::Bool(true)) => {}
                 _ => {
                     hit = false;
@@ -498,7 +503,7 @@ fn evaluate_monitor(
             active.push(m.name.clone());
             for (j, e) in m.ensures.iter().enumerate() {
                 let label = format!("{}::ensure#{j}", m.name);
-                match eval(e, &env, &mut state, &mut call_states, &project) {
+                match eval(e, &env, &mut state, &mut call_states, &project, &mut None) {
                     Ok(Value::Bool(true)) => {}
                     _ => violations.push(label),
                 }
@@ -518,6 +523,7 @@ fn eval(
     state: &mut State,
     call_states: &mut HashMap<usize, State>,
     project: &Project,
+    cov: &mut Option<Coverage>,
 ) -> Result<Value, SimError> {
     match expr {
         Expr::Const { lit } => Ok(match lit {
@@ -531,7 +537,7 @@ fn eval(
                 .ok_or_else(|| SimError::EvalError(format!("unbound variable `{name}`"))),
         },
         Expr::Unary { op, arg } => {
-            let v = eval(arg, env, state, call_states, project)?;
+            let v = eval(arg, env, state, call_states, project, cov)?;
             Ok(match (op, v) {
                 (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
                 (UnaryOp::Neg, Value::Int(i)) => Value::Int(-i),
@@ -544,8 +550,8 @@ fn eval(
             })
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = eval(lhs, env, state, call_states, project)?;
-            let r = eval(rhs, env, state, call_states, project)?;
+            let l = eval(lhs, env, state, call_states, project, cov)?;
+            let r = eval(rhs, env, state, call_states, project, cov)?;
             eval_binary(*op, l, r)
         }
         Expr::IfThenElse {
@@ -553,10 +559,13 @@ fn eval(
             then_branch,
             else_branch,
         } => {
-            let c = eval(cond, env, state, call_states, project)?;
+            let c = eval(cond, env, state, call_states, project, cov)?;
+            if let (Some(coverage), Value::Bool(b)) = (cov.as_mut(), &c) {
+                coverage.mark(cond.as_ref() as *const Expr as usize, *b);
+            }
             match c {
-                Value::Bool(true) => eval(then_branch, env, state, call_states, project),
-                Value::Bool(false) => eval(else_branch, env, state, call_states, project),
+                Value::Bool(true) => eval(then_branch, env, state, call_states, project, cov),
+                Value::Bool(false) => eval(else_branch, env, state, call_states, project, cov),
                 other => Err(SimError::EvalError(format!(
                     "if-condition is not bool: {other:?}"
                 ))),
@@ -579,14 +588,14 @@ fn eval(
         }
         Expr::Arrow { init, body } => {
             if state.cycle == 0 {
-                eval(init, env, state, call_states, project)
+                eval(init, env, state, call_states, project, cov)
             } else {
-                eval(body, env, state, call_states, project)
+                eval(body, env, state, call_states, project, cov)
             }
         }
-        Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project),
+        Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, cov),
         Expr::Field { base, field } => {
-            let bv = eval(base, env, state, call_states, project)?;
+            let bv = eval(base, env, state, call_states, project, cov)?;
             match bv {
                 Value::Record(m) => m.get(field).cloned().ok_or_else(|| {
                     SimError::EvalError(format!("record has no field `{field}`"))
@@ -597,8 +606,8 @@ fn eval(
             }
         }
         Expr::Index { base, index } => {
-            let bv = eval(base, env, state, call_states, project)?;
-            let iv = eval(index, env, state, call_states, project)?;
+            let bv = eval(base, env, state, call_states, project, cov)?;
+            let iv = eval(index, env, state, call_states, project, cov)?;
             let i = iv.as_int().ok_or_else(|| {
                 SimError::EvalError(format!("array index must be int, got {iv:?}"))
             })?;
@@ -621,7 +630,7 @@ fn eval(
         Expr::Tuple { items } => {
             let mut vs = Vec::with_capacity(items.len());
             for it in items {
-                vs.push(eval(it, env, state, call_states, project)?);
+                vs.push(eval(it, env, state, call_states, project, cov)?);
             }
             Ok(Value::Tuple(vs))
         }
@@ -636,6 +645,7 @@ fn eval_call(
     state: &mut State,
     call_states: &mut HashMap<usize, State>,
     project: &Project,
+    cov: &mut Option<Coverage>,
 ) -> Result<Value, SimError> {
     let callee = project
         .find_node(node)
@@ -657,7 +667,7 @@ fn eval_call(
     // Evaluate arguments in the OUTER scope (caller's state).
     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
     for a in args {
-        arg_values.push(eval(a, env, state, call_states, project)?);
+        arg_values.push(eval(a, env, state, call_states, project, cov)?);
     }
 
     // Project-wide constants are visible inside every callee body. We
@@ -675,6 +685,7 @@ fn eval_call(
                 &mut throw_state,
                 &mut throw_calls,
                 project,
+                &mut None,
             ) {
                 callee_env.insert(c.name.clone(), v);
             }
@@ -695,7 +706,7 @@ fn eval_call(
             // Stateless: a single pass over the body with a throwaway state.
             let mut throwaway = State::default();
             for eq in &callee.equations {
-                let v = eval(&eq.rhs, &callee_env, &mut throwaway, call_states, project)?;
+                let v = eval(&eq.rhs, &callee_env, &mut throwaway, call_states, project, cov)?;
                 bind_lhs(&mut callee_env, eq, v)?;
             }
             extract_output(callee, &mut callee_env)
@@ -707,7 +718,7 @@ fn eval_call(
             let key = call_expr as *const Expr as usize;
             let mut sub_state = call_states.remove(&key).unwrap_or_default();
             for eq in &callee.equations {
-                let v = eval(&eq.rhs, &callee_env, &mut sub_state, call_states, project)?;
+                let v = eval(&eq.rhs, &callee_env, &mut sub_state, call_states, project, cov)?;
                 bind_lhs(&mut callee_env, eq, v)?;
             }
             for (k, v) in &callee_env {
@@ -792,4 +803,113 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
             )))
         }
     })
+}
+
+// --- Decision coverage (toward MC/DC) ---------------------------------------
+//
+// A decision site is the condition of an `if/then/else`. A scenario suite
+// achieves decision coverage of a site when the condition has evaluated to
+// BOTH true and false across the suite. Sites are registered for the entry
+// node and every node it transitively calls, keyed by the condition
+// expression's address in the IR (stable for the Sim's lifetime, exactly
+// like call-site state).
+
+/// One if-condition with its observed outcomes.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DecisionSite {
+    /// Node the decision lives in.
+    pub node: String,
+    /// The equation's lhs, for locating the decision.
+    pub context: String,
+    /// The condition, rendered in Lustre surface syntax.
+    pub condition: String,
+    pub seen_true: bool,
+    pub seen_false: bool,
+}
+
+#[derive(Debug, Default)]
+pub struct Coverage {
+    /// ptr-of-cond -> index into `sites`.
+    index: HashMap<usize, usize>,
+    sites: Vec<DecisionSite>,
+}
+
+impl Coverage {
+    fn mark(&mut self, key: usize, outcome: bool) {
+        if let Some(&i) = self.index.get(&key) {
+            if outcome {
+                self.sites[i].seen_true = true;
+            } else {
+                self.sites[i].seen_false = true;
+            }
+        }
+    }
+}
+
+impl<'a> Sim<'a> {
+    /// Turn on decision-coverage collection. Registers every if-condition in
+    /// the entry node and all nodes it transitively calls. Subsequent
+    /// `step`/`run_csv*` calls accumulate outcomes; read them back with
+    /// [`Sim::coverage_sites`].
+    pub fn enable_coverage(&mut self) {
+        let mut coverage = Coverage::default();
+        let mut visited: std::collections::BTreeSet<String> = Default::default();
+        let mut queue: std::collections::VecDeque<&str> = Default::default();
+        queue.push_back(self.node.name.as_str());
+        while let Some(name) = queue.pop_front() {
+            if !visited.insert(name.to_string()) {
+                continue;
+            }
+            let Some(node) = self.project.find_node(name) else { continue };
+            for eq in &node.equations {
+                let ctx = eq.lhs.join(", ");
+                eq.rhs.visit(|e| {
+                    match e {
+                        Expr::IfThenElse { cond, .. } => {
+                            let key = cond.as_ref() as *const Expr as usize;
+                            let idx = coverage.sites.len();
+                            if coverage.index.insert(key, idx).is_none() {
+                                coverage.sites.push(DecisionSite {
+                                    node: node.name.clone(),
+                                    context: ctx.clone(),
+                                    condition: ol_lustre_emit::format_expr(cond),
+                                    seen_true: false,
+                                    seen_false: false,
+                                });
+                            }
+                        }
+                        Expr::Call { node: callee, .. } => {
+                            // visit() gives no &mut access for the queue from
+                            // the closure; collect names afterwards instead.
+                            let _ = callee;
+                        }
+                        _ => {}
+                    }
+                });
+                // Enqueue callees (separate pass: visit's closure can't
+                // borrow the queue mutably while `coverage` is also captured).
+                let mut callees: Vec<String> = Vec::new();
+                eq.rhs.visit(|e| {
+                    if let Expr::Call { node: callee, .. } = e {
+                        callees.push(callee.clone());
+                    }
+                });
+                for c in callees {
+                    if !visited.contains(&c) {
+                        // Safe: names outlive the loop via the project borrow.
+                        if let Some(n) = self.project.find_node(&c) {
+                            queue.push_back(&n.name);
+                        }
+                    }
+                }
+            }
+        }
+        self.coverage = Some(coverage);
+    }
+
+    /// Snapshot of every registered decision site and its outcomes so far.
+    /// `None` until [`Sim::enable_coverage`] is called.
+    pub fn coverage_sites(&self) -> Option<&[DecisionSite]> {
+        self.coverage.as_ref().map(|c| c.sites.as_slice())
+    }
 }

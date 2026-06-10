@@ -183,6 +183,20 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
+        ("POST", "/api/prove") => match prove_run(ctx, &parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("GET", "/api/fsm") => match fsm_get(ctx, &parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/edit/set_layout") => {
+            apply_edit_response(ctx, body, edit_set_layout)
+        }
+        ("POST", "/api/edit/add_state_machine") => {
+            apply_edit_response(ctx, body, edit_add_state_machine)
+        }
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -463,6 +477,7 @@ fn build_diagram(
         "schema_version": 1,
         "node": node.name,
         "kind": format!("{:?}", node.kind),
+        "positions": node.diagram.positions,
         "inputs": node.inputs.iter().map(|p| serde_json::json!({
             "name": p.name, "type": p.ty,
         })).collect::<Vec<_>>(),
@@ -671,8 +686,14 @@ fn edit_add_equation(project: &mut ol_ir::Project, req: &serde_json::Value) -> R
 
 fn edit_set_main(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
     let main = req_str(req, "main")?;
-    if project.find_node(main).is_none() {
-        return Err(format!("node `{main}` not found in the model file"));
+    let is_machine = project
+        .packages
+        .iter()
+        .any(|p| p.state_machines.iter().any(|m| m.name == main));
+    if project.find_node(main).is_none() && !is_machine {
+        return Err(format!(
+            "`{main}` is neither a node nor a state machine in the model file"
+        ));
     }
     project.main = Some(main.to_string());
     Ok(())
@@ -716,7 +737,7 @@ fn tests_list(ctx: &ServerCtx) -> Result<String, String> {
 fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
     let project = load(ctx)?;
     let node = main_node(&project)?;
-    let results = crate::scenario::run_scenarios(
+    let outcome = crate::scenario::run_scenarios(
         &project,
         &ctx.scenarios,
         &node,
@@ -724,8 +745,9 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
     );
     let value = serde_json::json!({
         "schema_version": 1,
-        "all_green": crate::scenario::all_green(&results),
-        "results": results,
+        "all_green": crate::scenario::all_green(&outcome.results),
+        "results": outcome.results,
+        "coverage": outcome.coverage,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
@@ -742,4 +764,268 @@ fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
         })).collect::<Vec<_>>(),
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+// --- Verify (Kind 2), free-form layout, and FSM authoring ------------------
+
+/// Run Kind 2 on the project's generated Lustre + contracts and return the
+/// property results as JSON, with counterexamples rendered as per-cycle
+/// waveform tables when they parse. When the `kind2` binary is not on PATH
+/// the response still succeeds, with `kind2_found: false` and an install
+/// hint — the Verify tab shows that instead of an opaque error.
+fn prove_run(
+    ctx: &ServerCtx,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let project = sliced_for_main(ctx)?;
+    let main = project.main.clone();
+    let lus = ol_lustre_emit::emit_project(&project);
+    let con = ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern);
+    let combined = format!("{lus}\n{con}");
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let work = std::env::temp_dir().join(format!("openlustre_prove_{stamp}"));
+    std::fs::create_dir_all(&work).map_err(|e| e.to_string())?;
+    let lus_path = work.join("model_with_contracts.lus");
+    std::fs::write(&lus_path, &combined).map_err(|e| e.to_string())?;
+
+    let timeout = query.get("timeout").and_then(|t| t.parse::<u32>().ok());
+    let opts = ol_kind2::Kind2Options {
+        main_node: main,
+        timeout_seconds: timeout,
+        ..Default::default()
+    };
+    let result = ol_kind2::run_kind2(&lus_path, &opts).map_err(|e| e.to_string())?;
+    let _ = std::fs::remove_dir_all(&work);
+
+    let kind2_found = !(result.exit_code == -1 && result.stderr.contains("could not launch"));
+    let properties: Vec<serde_json::Value> = result
+        .properties
+        .iter()
+        .map(|p| {
+            let waveform = p
+                .counterexample
+                .as_ref()
+                .and_then(ol_kind2::render_counterexample_waveform);
+            serde_json::json!({
+                "name": p.name,
+                "status": p.status,
+                "waveform": waveform,
+            })
+        })
+        .collect();
+    let stdout_tail: String = result
+        .stdout
+        .lines()
+        .rev()
+        .take(20)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "kind2_found": kind2_found,
+        "invocation": result.invocation,
+        "exit_code": result.exit_code,
+        "properties": properties,
+        "stdout_tail": stdout_tail,
+        "hint": if kind2_found { serde_json::Value::Null } else {
+            serde_json::Value::String(
+                "kind2 not found on PATH — install it from https://kind2-mc.github.io/kind2/ to prove contracts".into()
+            )
+        },
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// Persist free-form canvas positions for a node:
+/// `{ "node": "...", "positions": { "id": {"x": .., "y": ..}, ... } }`.
+fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req
+        .get("node")
+        .and_then(|v| v.as_str())
+        .ok_or("missing string field `node`")?
+        .to_string();
+    let positions = req
+        .get("positions")
+        .and_then(|v| v.as_object())
+        .ok_or("missing object field `positions`")?;
+    let mut map = std::collections::BTreeMap::new();
+    for (id, pos) in positions {
+        let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
+        let y = pos.get("y").and_then(|v| v.as_f64()).ok_or("position missing y")?;
+        map.insert(id.clone(), ol_ir::NodePos { x, y });
+    }
+    for pkg in &mut project.packages {
+        if let Some(n) = pkg.nodes.iter_mut().find(|n| n.name == node_name) {
+            n.diagram.positions = map;
+            return Ok(());
+        }
+    }
+    Err(format!("node `{node_name}` not found in the model file"))
+}
+
+/// List the model file's state machines, or return one machine's full
+/// definition (`?name=X`) with expressions rendered as text for the editor.
+fn fsm_get(
+    ctx: &ServerCtx,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let project = load_raw(ctx)?;
+    match query.get("name") {
+        None => {
+            let machines: Vec<&str> = project
+                .packages
+                .iter()
+                .flat_map(|p| p.state_machines.iter().map(|m| m.name.as_str()))
+                .collect();
+            Ok(serde_json::json!({ "schema_version": 1, "machines": machines }).to_string())
+        }
+        Some(name) => {
+            for pkg in &project.packages {
+                for m in &pkg.state_machines {
+                    if &m.name == name {
+                        let states: Vec<serde_json::Value> = m
+                            .states
+                            .iter()
+                            .map(|st| {
+                                serde_json::json!({
+                                    "name": st.name,
+                                    "equations": st.equations.iter().map(|eq| serde_json::json!({
+                                        "lhs": eq.lhs.join(", "),
+                                        "body": ol_lustre_emit::format_expr(&eq.rhs),
+                                    })).collect::<Vec<_>>(),
+                                    "transitions": st.transitions.iter().map(|t| serde_json::json!({
+                                        "guard": ol_lustre_emit::format_expr(&t.guard),
+                                        "target": t.target,
+                                    })).collect::<Vec<_>>(),
+                                })
+                            })
+                            .collect();
+                        let value = serde_json::json!({
+                            "schema_version": 1,
+                            "name": m.name,
+                            "inputs": m.inputs.iter().map(|p| serde_json::json!({
+                                "name": p.name, "type": p.ty,
+                            })).collect::<Vec<_>>(),
+                            "outputs": m.outputs.iter().map(|p| serde_json::json!({
+                                "name": p.name, "type": p.ty,
+                            })).collect::<Vec<_>>(),
+                            "initial_state": m.initial_state,
+                            "states": states,
+                        });
+                        return Ok(value.to_string());
+                    }
+                }
+            }
+            Err(format!("state machine `{name}` not found in the model file"))
+        }
+    }
+}
+
+/// Create a state machine from the structured editor payload. The machine is
+/// validated by lowering it once before the file is saved, so malformed
+/// machines (unknown initial state, unassigned outputs, ...) are rejected
+/// with the lowering error and the file stays untouched.
+fn edit_add_state_machine(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let name = req
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("missing string field `name`")?;
+    if project.find_node(name).is_some()
+        || project
+            .packages
+            .iter()
+            .any(|p| p.state_machines.iter().any(|m| m.name == name))
+    {
+        return Err(format!("`{name}` already exists"));
+    }
+
+    let parse_ports = |key: &str| -> Result<Vec<ol_ir::Port>, String> {
+        let mut out = Vec::new();
+        for item in req.get(key).and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+            let pname = item
+                .get("name")
+                .and_then(|v| v.as_str())
+                .ok_or(format!("{key}: port missing name"))?;
+            let tstr = item
+                .get("type")
+                .and_then(|v| v.as_str())
+                .ok_or(format!("{key}: port missing type"))?;
+            let ty = ol_stdlib::parse_type(tstr).map_err(|e| format!("{key} `{pname}`: {e}"))?;
+            out.push(ol_ir::Port { name: pname.to_string(), ty });
+        }
+        Ok(out)
+    };
+    let inputs = parse_ports("inputs")?;
+    let outputs = parse_ports("outputs")?;
+    let initial_state = req
+        .get("initial_state")
+        .and_then(|v| v.as_str())
+        .ok_or("missing string field `initial_state`")?
+        .to_string();
+
+    let mut states = Vec::new();
+    for st in req.get("states").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        let sname = st
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or("state missing name")?;
+        let mut equations = Vec::new();
+        for eq in st.get("equations").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+            let lhs_str = eq.get("lhs").and_then(|v| v.as_str()).ok_or("equation missing lhs")?;
+            let body = eq.get("body").and_then(|v| v.as_str()).ok_or("equation missing body")?;
+            let lhs: Vec<String> = lhs_str
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            let rhs = ol_stdlib::parse_expr(body)
+                .map_err(|e| format!("state `{sname}` equation: {e}"))?;
+            equations.push(ol_ir::Equation { lhs, rhs });
+        }
+        let mut transitions = Vec::new();
+        for t in st.get("transitions").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+            let guard_str = t.get("guard").and_then(|v| v.as_str()).ok_or("transition missing guard")?;
+            let target = t.get("target").and_then(|v| v.as_str()).ok_or("transition missing target")?;
+            let guard = ol_stdlib::parse_expr(guard_str)
+                .map_err(|e| format!("state `{sname}` transition guard: {e}"))?;
+            transitions.push(ol_ir::Transition { guard, target: target.to_string() });
+        }
+        states.push(ol_ir::StateDef {
+            name: sname.to_string(),
+            equations,
+            transitions,
+        });
+    }
+
+    let machine = ol_ir::StateMachineDef {
+        name: name.to_string(),
+        inputs,
+        outputs,
+        locals: vec![],
+        initial_state,
+        states,
+        contract: None,
+    };
+    // Validate before saving: lowering reports unknown initial state,
+    // unknown transition targets, and outputs unassigned in a state.
+    ol_ir::lower_state_machine(&machine).map_err(|e| e.to_string())?;
+
+    if project.packages.is_empty() {
+        project.packages.push(ol_ir::Package {
+            name: "user".into(),
+            ..Default::default()
+        });
+    }
+    project.packages[0].state_machines.push(machine);
+    Ok(())
 }

@@ -81,6 +81,8 @@
     <span class="tab" data-tab="edit">Edit</span>
     <span class="tab" data-tab="step">Step</span>
     <span class="tab" data-tab="tests">Tests</span>
+    <span class="tab" data-tab="verify">Verify</span>
+    <span class="tab" data-tab="fsm">FSM</span>
     <span class="tab" data-tab="simulate">Simulate (CSV)</span>
     <span class="tab" data-tab="lustre">Lustre</span>
     <span class="tab" data-tab="clite">C-Lite</span>
@@ -89,8 +91,10 @@
   <div id="panel-node">Select a node from the left pane.</div>
 
   <div id="panel-diagram" style="display:none">
-    <p>Dataflow view of <strong id="diagram-node-name">…</strong> — inputs flow left to right through equations to outputs. Click a node in the explorer to change the view.</p>
+    <p>Dataflow view of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange the canvas (layout persists to the model file). Click an equation that calls an operator to dive into it; use the breadcrumbs to come back.</p>
+    <div id="diagram-crumbs" style="margin:4px 0"></div>
     <div id="diagram-host"></div>
+    <div class="build-note" id="diagram-status"></div>
   </div>
 
   <div id="panel-edit" style="display:none">
@@ -185,6 +189,45 @@
     <h4>openlustre_generated.c</h4><pre id="clite-source">loading…</pre>
   </div>
 
+  <div id="panel-verify" style="display:none">
+    <p>Prove the model's contracts with <strong>Kind 2</strong>. Properties come from the generated Lustre + CoCoSpec of the selected root (<code class="inline">main</code>) and everything it uses.</p>
+    <div class="row">
+      timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
+      <button class="primary" onclick="proveRun()">Run Kind 2</button>
+      <span class="build-note" id="verify-status"></span>
+    </div>
+    <div id="verify-results"></div>
+  </div>
+
+  <div id="panel-fsm" style="display:none">
+    <p>State machines in the model file. They lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
+    <div class="row">machine <select id="fsm-select"></select> <button onclick="fsmView()">View</button></div>
+    <div id="fsm-host"></div>
+    <div class="edit-form">
+      <h4>New state machine</h4>
+      <div class="row">
+        <label>name</label><input id="fsm-name" placeholder="TrafficLight">
+        <label>initial</label><input id="fsm-initial" placeholder="Red">
+      </div>
+      <div class="row">
+        <label>inputs</label><input id="fsm-inputs" style="flex:1" placeholder="tick: bool, emergency: bool">
+      </div>
+      <div class="row">
+        <label>outputs</label><input id="fsm-outputs" style="flex:1" placeholder="go: bool, warn: bool">
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label>states</label>
+        <textarea id="fsm-states" rows="4" style="flex:1" placeholder="One state per line:&#10;Red:    go = false; warn = false&#10;Green:  go = true;  warn = false&#10;Yellow: go = false; warn = true"></textarea>
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label>transitions</label>
+        <textarea id="fsm-transitions" rows="4" style="flex:1" placeholder="One per line:&#10;Red -> Green when tick&#10;Green -> Yellow when tick&#10;Yellow -> Red when tick&#10;Green -> Red when emergency"></textarea>
+      </div>
+      <div class="row"><button class="primary" onclick="fsmCreate()">Create machine</button>
+      <span class="build-note" id="fsm-status"></span></div>
+    </div>
+  </div>
+
   <div id="panel-build" style="display:none">
     <p>One-command standalone build. The project's user-designated <code class="inline" id="build-entry">main</code> operator becomes the entry point of the executable — drop these files in a directory and run <code class="inline">make</code>.</p>
     <button onclick="downloadBuild()">Save all files</button>
@@ -198,7 +241,10 @@
 <script>
 "use strict";
 
-const state = { inspect: null, selectedNode: null, stepHistory: "" };
+const state = {
+  inspect: null, selectedNode: null, stepHistory: "",
+  diagramStack: [], diagramData: null, diagPos: {}, drag: null,
+};
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
 async function fetchText(p) { const r = await fetch(p); return r.text(); }
@@ -240,7 +286,11 @@ async function refresh() {
       d.className = "node";
       d.dataset.name = n.name;
       d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
-      d.onclick = () => { selectNode(n); if (currentTab() === "diagram") loadDiagram(n.name); };
+      d.onclick = () => {
+        selectNode(n);
+        state.diagramStack = [];
+        if (currentTab() === "diagram") loadDiagram(n.name);
+      };
       pkgs.appendChild(d);
     }
     if (pkg.contracts && pkg.contracts.length) {
@@ -327,10 +377,13 @@ function showTab(name) {
     fetchText("/api/clite/source").then(t => document.getElementById("build-source").textContent = t);
   }
   if (name === "diagram") {
-    const n = state.selectedNode?.name || state.inspect?.project?.main;
+    const n = state.diagramStack.length
+      ? state.diagramStack[state.diagramStack.length - 1]
+      : (state.selectedNode?.name || state.inspect?.project?.main);
     if (n) loadDiagram(n);
   }
   if (name === "tests") loadTests();
+  if (name === "fsm") loadFsmList();
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
@@ -342,7 +395,7 @@ async function runSim(full) {
 
 // --- Diagram rendering ---
 
-async function loadDiagram(nodeName) {
+async function loadDiagram(nodeName, push) {
   let d;
   try {
     d = await fetchJSON("/api/diagram?node=" + encodeURIComponent(nodeName));
@@ -350,54 +403,334 @@ async function loadDiagram(nodeName) {
     document.getElementById("diagram-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
     return;
   }
+  if (push === undefined) push = true;
+  if (push) {
+    const last = state.diagramStack[state.diagramStack.length - 1];
+    if (last !== d.node) state.diagramStack.push(d.node);
+  }
   document.getElementById("diagram-node-name").textContent = d.node + " (" + d.kind + ")";
-  renderDiagram(d);
+  state.diagramData = d;
+  state.diagPos = computePositions(d);
+  renderCrumbs();
+  renderDiagram();
 }
 
-function renderDiagram(d) {
-  const ROW = 44, BOXH = 30, INW = 150, EQW = 280, OUTW = 150;
-  const X_IN = 16, X_EQ = 230, X_OUT = 580;
-  const leftItems = d.inputs.map(p => ({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }));
-  const midItems  = d.equations.map(e => ({ id: e.id, label: e.text, cls: "box eq" }));
-  const rightItems = d.outputs.map(p => ({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }))
-    .concat(d.locals.map(l => ({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)", cls: "box" })));
-  const rows = Math.max(leftItems.length, midItems.length, rightItems.length, 1);
-  const H = rows * ROW + 30;
+function renderCrumbs() {
+  const host = document.getElementById("diagram-crumbs");
+  host.innerHTML = "";
+  state.diagramStack.forEach((name, i) => {
+    if (i > 0) host.appendChild(document.createTextNode(" › "));
+    const c = document.createElement("span");
+    c.className = "chip";
+    c.textContent = name;
+    c.onclick = () => {
+      state.diagramStack = state.diagramStack.slice(0, i + 1);
+      loadDiagram(name, false);
+    };
+    host.appendChild(c);
+  });
+}
 
+const DIAG = { ROW: 44, BOXH: 30, INW: 150, EQW: 280, OUTW: 170,
+               X_IN: 16, X_EQ: 230, X_OUT: 580 };
+
+function computePositions(d) {
+  // Automatic column layout, overridden by any persisted positions.
   const pos = {};
-  function place(items, x, w) {
-    items.forEach((it, i) => {
-      pos[it.id] = { x, y: 16 + i * ROW, w, h: BOXH };
-    });
+  d.inputs.forEach((p, i) => pos[p.name] = { x: DIAG.X_IN, y: 16 + i * DIAG.ROW, w: DIAG.INW });
+  d.equations.forEach((e, i) => pos[e.id] = { x: DIAG.X_EQ, y: 16 + i * DIAG.ROW, w: DIAG.EQW });
+  const right = d.outputs.map(p => p.name).concat(d.locals.map(l => l.name));
+  right.forEach((id, i) => pos[id] = { x: DIAG.X_OUT, y: 16 + i * DIAG.ROW, w: DIAG.OUTW });
+  for (const [id, p] of Object.entries(d.positions || {})) {
+    if (pos[id]) { pos[id].x = p.x; pos[id].y = p.y; }
   }
-  place(leftItems, X_IN, INW);
-  place(midItems, X_EQ, EQW);
-  place(rightItems, X_OUT, OUTW);
+  return pos;
+}
 
-  let svg = '<svg width="760" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
-  // wires beneath boxes
+function renderDiagram() {
+  const d = state.diagramData;
+  if (!d) return;
+  const pos = state.diagPos;
+  let maxY = 0, maxX = 0;
+  for (const p of Object.values(pos)) {
+    maxY = Math.max(maxY, p.y + DIAG.BOXH);
+    maxX = Math.max(maxX, p.x + p.w);
+  }
+  const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 120);
+
+  const items = [];
+  d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }));
+  d.equations.forEach(e => items.push({
+    id: e.id,
+    label: e.text,
+    cls: "box eq",
+    calls: e.calls || [],
+  }));
+  d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type), cls: "box" }));
+  d.locals.forEach(l => items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)", cls: "box" }));
+
+  let svg = '<svg id="diagram-svg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
   for (const w of d.wires) {
     const a = pos[w.from], b = pos[w.to];
     if (!a || !b) continue;
-    const x1 = a.x + a.w, y1 = a.y + a.h / 2;
-    const x2 = b.x, y2 = b.y + b.h / 2;
+    const x1 = a.x + a.w, y1 = a.y + DIAG.BOXH / 2;
+    const x2 = b.x, y2 = b.y + DIAG.BOXH / 2;
     const mx = (x1 + x2) / 2;
     svg += '<path class="wire" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '"/>';
   }
-  function drawBoxes(items) {
-    for (const it of items) {
-      const p = pos[it.id];
-      svg += '<rect class="' + it.cls + '" x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + p.h + '" rx="4"/>';
-      const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
-      svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + 19) + '">' + escapeHTML(label) + '</text>';
+  for (const it of items) {
+    const p = pos[it.id];
+    if (!p) continue;
+    const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
+    const divable = it.calls && it.calls.length;
+    svg += '<g class="diag-item" data-id="' + it.id + '"' +
+      (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
+      ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
+    svg += '<rect class="' + it.cls + '" x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + DIAG.BOXH + '" rx="4"/>';
+    svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + 19) + '">' + escapeHTML(label) + '</text>';
+    if (divable) {
+      svg += '<text class="label" x="' + (p.x + p.w - 14) + '" y="' + (p.y + 19) + '">▸</text>';
+    }
+    svg += '</g>';
+  }
+  svg += "</svg>";
+  const host = document.getElementById("diagram-host");
+  host.innerHTML = svg;
+
+  const svgEl = document.getElementById("diagram-svg");
+  svgEl.addEventListener("pointerdown", diagPointerDown);
+  svgEl.addEventListener("pointermove", diagPointerMove);
+  svgEl.addEventListener("pointerup", diagPointerUp);
+}
+
+function svgPoint(ev) {
+  const r = document.getElementById("diagram-svg").getBoundingClientRect();
+  return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+}
+
+function diagPointerDown(ev) {
+  const g = ev.target.closest("g.diag-item");
+  if (!g) return;
+  const id = g.dataset.id;
+  const pt = svgPoint(ev);
+  const p = state.diagPos[id];
+  state.drag = { id, dx: pt.x - p.x, dy: pt.y - p.y, moved: false, call: g.dataset.call };
+  ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
+}
+
+function diagPointerMove(ev) {
+  if (!state.drag) return;
+  const pt = svgPoint(ev);
+  const p = state.diagPos[state.drag.id];
+  const nx = Math.max(0, pt.x - state.drag.dx);
+  const ny = Math.max(0, pt.y - state.drag.dy);
+  if (Math.abs(nx - p.x) + Math.abs(ny - p.y) > 3) state.drag.moved = true;
+  if (state.drag.moved) {
+    p.x = nx; p.y = ny;
+    renderDiagram();
+  }
+}
+
+async function diagPointerUp() {
+  const drag = state.drag;
+  state.drag = null;
+  if (!drag) return;
+  if (!drag.moved && drag.call) {
+    // A plain click on a calling equation: dive into the callee.
+    loadDiagram(drag.call, true);
+    return;
+  }
+  if (drag.moved) {
+    // Persist the whole layout for this node.
+    const positions = {};
+    for (const [id, p] of Object.entries(state.diagPos)) {
+      positions[id] = { x: p.x, y: p.y };
+    }
+    const r = await fetch("/api/edit/set_layout", {
+      method: "POST",
+      body: JSON.stringify({ node: state.diagramData.node, positions }),
+    });
+    document.getElementById("diagram-status").textContent =
+      r.ok ? "layout saved" : "layout not saved (" + await r.text() + ")";
+  }
+}
+
+// --- Verify (Kind 2) ---
+
+async function proveRun() {
+  const t = document.getElementById("verify-timeout").value || "30";
+  document.getElementById("verify-status").textContent = "running kind2…";
+  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t), { method: "POST" });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  const host = document.getElementById("verify-results");
+  document.getElementById("verify-status").textContent = "";
+  if (data.error) {
+    host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    return;
+  }
+  if (!data.kind2_found) {
+    host.innerHTML = '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
+    return;
+  }
+  let html = "";
+  if (data.properties.length) {
+    html += "<table><thead><tr><th>property</th><th>status</th></tr></thead><tbody>";
+    for (const p of data.properties) {
+      const ok = (p.status || "").toLowerCase() === "valid";
+      html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
+        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td></tr>";
+      if (p.waveform) {
+        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre></td></tr>";
+      }
+    }
+    html += "</tbody></table>";
+  } else {
+    html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
+  }
+  host.innerHTML = html;
+}
+
+// --- FSM authoring + state-diagram view ---
+
+async function loadFsmList() {
+  let data;
+  try { data = await fetchJSON("/api/fsm"); } catch (e) { return; }
+  const sel = document.getElementById("fsm-select");
+  sel.innerHTML = "";
+  for (const m of data.machines) {
+    const o = document.createElement("option");
+    o.value = m; o.textContent = m;
+    sel.appendChild(o);
+  }
+  if (!data.machines.length) {
+    document.getElementById("fsm-host").innerHTML =
+      '<span class="build-note">No state machines in the model file yet — create one below.</span>';
+  }
+}
+
+async function fsmView() {
+  const name = document.getElementById("fsm-select").value;
+  if (!name) return;
+  let m;
+  try { m = await fetchJSON("/api/fsm?name=" + encodeURIComponent(name)); }
+  catch (e) {
+    document.getElementById("fsm-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
+    return;
+  }
+  renderFsm(m);
+}
+
+function renderFsm(m) {
+  // States on a circle; transitions as labelled arcs.
+  const n = m.states.length;
+  const R = Math.max(120, n * 38), CX = R + 90, CY = R + 50;
+  const W = CX * 2, H = CY * 2;
+  const pos = {};
+  m.states.forEach((st, i) => {
+    const a = (2 * Math.PI * i) / n - Math.PI / 2;
+    pos[st.name] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+  });
+  let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  svg += '<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
+         '<path d="M0,0 L7,3 L0,6 z" fill="#5cb6e5"/></marker></defs>';
+  for (const st of m.states) {
+    for (const t of st.transitions) {
+      const a = pos[st.name], b = pos[t.target];
+      if (!a || !b) continue;
+      if (st.name === t.target) {
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (a.x + 28) + ' ' + (a.y - 12) +
+               ' C ' + (a.x + 75) + ' ' + (a.y - 55) + ', ' + (a.x + 75) + ' ' + (a.y + 30) +
+               ', ' + (a.x + 30) + ' ' + (a.y + 14) + '"/>';
+        svg += '<text class="label" x="' + (a.x + 60) + '" y="' + (a.y - 18) + '">' + escapeHTML(t.guard) + '</text>';
+      } else {
+        const mx = (a.x + b.x) / 2 + (a.y - b.y) * 0.18;
+        const my = (a.y + b.y) / 2 + (b.x - a.x) * 0.18;
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + a.x + ' ' + a.y +
+               ' Q ' + mx + ' ' + my + ' ' + b.x + ' ' + b.y + '"/>';
+        svg += '<text class="label" x="' + mx + '" y="' + my + '">' + escapeHTML(t.guard) + '</text>';
+      }
     }
   }
-  drawBoxes(leftItems); drawBoxes(midItems); drawBoxes(rightItems);
-  svg += '<text class="label" x="' + X_IN + '" y="10">inputs</text>';
-  svg += '<text class="label" x="' + X_EQ + '" y="10">equations</text>';
-  svg += '<text class="label" x="' + X_OUT + '" y="10">outputs / locals</text>';
+  for (const st of m.states) {
+    const p = pos[st.name];
+    const initial = st.name === m.initial_state;
+    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="30" class="box"' +
+      (initial ? ' stroke="#98c379" stroke-width="2.4"' : '') + '/>';
+    svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
+    const eqs = st.equations.map(e => e.lhs + " = " + e.body).join("; ");
+    svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
+      escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
+  }
   svg += "</svg>";
-  document.getElementById("diagram-host").innerHTML = svg;
+  document.getElementById("fsm-host").innerHTML = svg;
+}
+
+function parsePortsSpec(text) {
+  // "tick: bool, emergency: bool" -> [{name, type}]
+  return text.split(",").map(s => s.trim()).filter(Boolean).map(s => {
+    const [name, type] = s.split(":").map(x => x.trim());
+    return { name, type: type || "bool" };
+  });
+}
+
+async function fsmCreate() {
+  const statesText = document.getElementById("fsm-states").value;
+  const transText = document.getElementById("fsm-transitions").value;
+  const states = {};
+  const order = [];
+  for (const line of statesText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const ci = t.indexOf(":");
+    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return; }
+    const name = t.slice(0, ci).trim();
+    const eqs = t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean).map(e => {
+      const ei = e.indexOf("=");
+      return { lhs: e.slice(0, ei).trim(), body: e.slice(ei + 1).trim() };
+    });
+    states[name] = { name, equations: eqs, transitions: [] };
+    order.push(name);
+  }
+  for (const line of transText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
+    if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return; }
+    const [, from, to, guard] = m;
+    if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return; }
+    states[from].transitions.push({ guard: guard.trim(), target: to });
+  }
+  const payload = {
+    name: document.getElementById("fsm-name").value.trim(),
+    initial_state: document.getElementById("fsm-initial").value.trim(),
+    inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
+    outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
+    states: order.map(n => states[n]),
+  };
+  const r = await fetch("/api/edit/add_state_machine", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setFsmStatus(false, msg);
+    return;
+  }
+  setFsmStatus(true, "created ✓ — the machine lowers to dataflow and is ready to simulate");
+  await refresh();
+  await loadFsmList();
+  document.getElementById("fsm-select").value = payload.name;
+  fsmView();
+}
+
+function setFsmStatus(ok, msg) {
+  const el = document.getElementById("fsm-status");
+  el.style.color = ok ? "#98c379" : "#e06c75";
+  el.textContent = msg;
 }
 
 // --- Editing ---
@@ -640,6 +973,20 @@ async function testsRun() {
       '</td><td class="' + cls + '">' + escapeHTML(res.status) + "</td><td>" + detail + "</td></tr>";
   }
   html += "</tbody></table>";
+  if (data.coverage) {
+    const c = data.coverage;
+    html += "<h4>Decision coverage</h4><p>" + c.covered + " / " + c.total +
+      " if-conditions driven both true and false by this suite.</p>";
+    if (c.uncovered.length) {
+      html += "<table><thead><tr><th>node</th><th>equation</th><th>condition</th><th>missing</th></tr></thead><tbody>";
+      for (const u of c.uncovered) {
+        html += "<tr><td>" + escapeHTML(u.node) + "</td><td>" + escapeHTML(u.context) +
+          "</td><td><code>" + escapeHTML(u.condition) + "</code></td><td class=\"severity-Warning\">" +
+          escapeHTML(u.missing) + "</td></tr>";
+      }
+      html += "</tbody></table>";
+    }
+  }
   document.getElementById("tests-results").innerHTML = html;
   document.getElementById("tests-summary").textContent =
     (data.all_green ? "✓ all green — " : "✗ failures — ") + pass + " passed, " + fail + " failed";
