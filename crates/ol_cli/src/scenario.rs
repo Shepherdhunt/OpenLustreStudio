@@ -535,6 +535,91 @@ pub fn cc_available() -> bool {
     find_compiler().is_some()
 }
 
+/// Compile C sources that already live in `dir` into `dir/<exe_name>`,
+/// using a POSIX-style compiler from PATH or MSVC via vcvars64 — the same
+/// discovery the scenario harness uses. `which` restricts the choice
+/// (`"cc"`/`"gcc"`/`"clang"`/`"msvc"`); `None` is auto. Returns a
+/// human-readable log of what ran.
+pub(crate) fn compile_in_dir(
+    dir: &Path,
+    source_names: &[&str],
+    exe_name: &str,
+    which: Option<&str>,
+) -> Result<String, String> {
+    let compiler = match which {
+        None | Some("auto") => {
+            find_compiler().ok_or("no C compiler found (cc/gcc/clang on PATH, or MSVC)")?
+        }
+        Some(name @ ("cc" | "gcc" | "clang")) => {
+            let ok = Command::new(name)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                return Err(format!("`{name}` is not available on PATH"));
+            }
+            match name {
+                "cc" => CompilerKind::Posix("cc"),
+                "gcc" => CompilerKind::Posix("gcc"),
+                _ => CompilerKind::Posix("clang"),
+            }
+        }
+        #[cfg(windows)]
+        Some("msvc") => CompilerKind::Msvc(
+            find_msvc_vcvars().ok_or("MSVC (vcvars64.bat) not found via vswhere")?,
+        ),
+        Some(other) => return Err(format!("unknown compiler `{other}`")),
+    };
+
+    let (out, desc) = match compiler {
+        CompilerKind::Posix(name) => {
+            let exe = dir.join(exe_name);
+            let out = Command::new(name)
+                .current_dir(dir)
+                .args(["-std=c11", "-Wall", "-O2", "-o"])
+                .arg(&exe)
+                .args(source_names)
+                .arg("-I.")
+                .output()
+                .map_err(|e| format!("invoking {name}: {e}"))?;
+            (out, name.to_string())
+        }
+        #[cfg(windows)]
+        CompilerKind::Msvc(vcvars) => {
+            let mut cmdline = format!(
+                "\"{}\" >NUL 2>&1 && cl /nologo /std:c11 /W3 /O2 /Fe:{exe_name}",
+                vcvars.display()
+            );
+            for s in source_names {
+                cmdline.push(' ');
+                cmdline.push_str(s);
+            }
+            cmdline.push_str(" /I.");
+            use std::os::windows::process::CommandExt as _;
+            let out = Command::new("cmd")
+                .current_dir(dir)
+                .arg("/S")
+                .arg("/C")
+                .raw_arg(format!("\"{cmdline}\""))
+                .output()
+                .map_err(|e| format!("invoking cl via vcvars64: {e}"))?;
+            (out, "cl (MSVC via vcvars64)".to_string())
+        }
+    };
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if !out.status.success() {
+        return Err(format!("[{desc}] compile failed:\n{log}"));
+    }
+    Ok(format!("[{desc}] compiled {exe_name}\n{log}"))
+}
+
 fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledModel, String> {
     // Selected-root generation: compile only the node under test and what it
     // transitively uses, exactly as the production emit path does.

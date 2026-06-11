@@ -114,6 +114,13 @@ pub enum Expr {
     Tuple {
         items: Vec<Expr>,
     },
+    /// Explicit numeric conversion — SCADE's `numeric_cast`. Surface syntax
+    /// is function-style: `int16(x)`, `float64(x)`. Both the operand and the
+    /// target must be numeric; semantics match a C cast for in-range values.
+    Cast {
+        to: crate::types::Type,
+        arg: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -177,6 +184,9 @@ impl Expr {
     pub fn call<S: Into<String>>(node: S, args: Vec<Expr>) -> Self {
         Expr::Call { node: node.into(), args }
     }
+    pub fn cast(to: crate::types::Type, arg: Expr) -> Self {
+        Expr::Cast { to, arg: Box::new(arg) }
+    }
 
     /// `false -> pre e` — the canonical "edge buffer" pattern.
     pub fn pre_with_init(init: Expr, body: Expr) -> Self {
@@ -226,6 +236,7 @@ impl Expr {
                         walk(item, f);
                     }
                 }
+                Expr::Cast { arg, .. } => walk(arg, f),
             }
         }
         walk(self, &mut f);
@@ -252,7 +263,9 @@ impl Expr {
                 }
             }
             Expr::Const { .. } => {}
-            Expr::Unary { arg, .. } | Expr::Pre { arg } => arg.rename_var(from, to),
+            Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Cast { arg, .. } => {
+                arg.rename_var(from, to)
+            }
             Expr::Binary { lhs, rhs, .. } => {
                 lhs.rename_var(from, to);
                 rhs.rename_var(from, to);

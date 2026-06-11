@@ -414,7 +414,9 @@ fn check_pre_initialization(
             check_pre_initialization(init, under_arrow_body, diags, ctx);
             check_pre_initialization(body, true, diags, ctx);
         }
-        Expr::Unary { arg, .. } => check_pre_initialization(arg, under_arrow_body, diags, ctx),
+        Expr::Unary { arg, .. } | Expr::Cast { arg, .. } => {
+            check_pre_initialization(arg, under_arrow_body, diags, ctx)
+        }
         Expr::Binary { lhs, rhs, .. } => {
             check_pre_initialization(lhs, under_arrow_body, diags, ctx);
             check_pre_initialization(rhs, under_arrow_body, diags, ctx);
@@ -484,6 +486,30 @@ pub fn infer_expr_type(
                 _ => Type::Float64,
             },
         }),
+        Expr::Cast { to, arg } => {
+            let a = infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, None)?;
+            if !tctx.resolve(&a).is_numeric() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0093",
+                        format!("numeric_cast requires a numeric operand, got {a:?}"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            if !to.is_numeric() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0094",
+                        format!("numeric_cast target must be numeric, got {to:?}"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            Some(to.clone())
+        }
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
             None => match tctx.const_type(name) {
@@ -887,7 +913,7 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         Expr::Var { name } => {
             out.insert(name.clone());
         }
-        Expr::Unary { arg, .. } => collect_immediate_deps(arg, out),
+        Expr::Unary { arg, .. } | Expr::Cast { arg, .. } => collect_immediate_deps(arg, out),
         Expr::Binary { lhs, rhs, .. } => {
             collect_immediate_deps(lhs, out);
             collect_immediate_deps(rhs, out);

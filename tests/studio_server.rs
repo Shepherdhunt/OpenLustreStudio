@@ -181,9 +181,13 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(body.contains("$(CC)"));
     assert!(body.contains("openlustre_generated.c driver.c"));
 
-    // The SPA must include the new Step + Build tabs so the GUI panels we
-    // built are actually reachable.
+    // The SPA must expose stepping and code generation: the Simulation menu
+    // (with the run-gated Step item), the Simulation dock, and the Compile
+    // C-Lite menu entry.
     let (_, _, html) = http_get(port, "/").expect("root");
-    assert!(html.contains("data-tab=\"step\""), "Step tab missing");
-    assert!(html.contains("data-tab=\"build\""), "Build tab missing");
+    assert!(html.contains("data-menu=\"simulation\""), "Simulation menu missing");
+    assert!(html.contains("mi-sim-step"), "Step menu item missing");
+    assert!(html.contains("data-dock=\"simulation\""), "Simulation dock missing");
+    assert!(html.contains("mi-code-compile"), "Compile C-Lite menu item missing");
+    assert!(html.contains("toolbox"), "Operations toolbox missing");
 }

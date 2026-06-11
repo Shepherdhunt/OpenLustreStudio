@@ -105,6 +105,39 @@ verification burden the qualified tool would otherwise discharge.
   document tabs, bottom Messages dock (click a message to select the node), toolbar,
   and status bar.
 
+### Third slice, same day — the SCADE shell: menus, toolbox, numeric_cast
+
+* **Menu-driven GUI**: the tab strip is gone. File / Insert (Operator, Input,
+  Output, Local, Equation, State Machine) / Simulation (Build, Run, Step —
+  gated until a simulation is running — Stop, CSV vector) / Code (View Lustre,
+  View Generated C, Generate C-Lite, Compile C-Lite…) / Project (Types, Tests,
+  Verify, State Machines). One diagram document in the center; Messages /
+  Simulation / Tests / Verify are bottom dock tabs; the **Lustre text of the
+  model is always visible** in the right dock while drawing.
+* **Operations toolbox** (right dock): the SCADE operator families —
+  Mathematics (plus, minus, multiply, divide, modulo, numeric_cast, squared,
+  cubed, to_nth_power(n); square_root listed but disabled pending float
+  intrinsics), Comparisons, Logical, Structures/Arrays, Time/Statefuls,
+  Choice, Bitwise, Higher Order (map/fold disabled — iterators are roadmap) —
+  plus the project's operators and the 41 library blocks. Everything drags
+  onto the canvas and lands as a placed equation with a typed result local
+  and red unbound pins.
+* **numeric_cast is a first-class IR operator**: surface syntax `int16(x)` /
+  `float64(x)`; typechecked (numeric→numeric only, E0093/E0094); simulated
+  with C semantics (two's-complement narrowing, float→int truncation,
+  float32 rounding); generated C emits a real cast — IR and compiled C agree
+  cell-by-cell in the test suite. The Kind 2 view emits `int_cast`/`real_cast`
+  function calls (the bit_and convention) since unbounded-int Lustre cannot
+  express widths.
+* **Compile C-Lite from the GUI**: `Code > Compile C-Lite…` emits the
+  generated sources + Makefile to a chosen directory and compiles them with
+  auto-detected or selected compiler (MSVC via vcvars64, gcc/clang/cc);
+  target OS is the host (cross-compilation noted as roadmap).
+* Known small gaps recorded: variable names colliding with C keywords (e.g.
+  `unsigned`) break generated-C compilation — needs an identifier mangling
+  pass (P1); `square_root` and friends need a float-intrinsics family across
+  sim/C/Lustre (P1).
+
 ### Second slice, same day — the SCADE project workflow
 
 * **Workspaces**: opening a directory (`openlustre new <dir>` or `studio launch

@@ -13,7 +13,9 @@ use std::fmt::Write as _;
 
 use ol_contract_ir::{parse_contracts, ContractDef};
 use ol_ir::{NodeDef, Project};
-use ol_lustre_emit::format_expr;
+// Contract text goes to Kind 2, so use the Lustre-mode formatter (casts and
+// bit ops render as user-suppliable function calls).
+use ol_lustre_emit::format_expr_lustre as format_expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {

@@ -4,14 +4,15 @@
 <meta charset="utf-8">
 <title>OpenLustre Studio</title>
 <style>
-  /* SCADE-Suite-style chrome: light Windows IDE, docked panels, MDI tabs. */
+  /* SCADE-Suite-style shell: menu bar, docked panels, one diagram document,
+     an Operations toolbox on the right, and a live Lustre text view. */
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; height: 100%;
     font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, sans-serif; }
   body {
     display: grid;
-    grid-template-columns: 280px 1fr;
-    grid-template-rows: 30px 34px 1fr 180px 24px;
+    grid-template-columns: 250px 1fr 320px;
+    grid-template-rows: 30px 28px 1fr 200px 24px;
     height: 100vh; background: #ececec; color: #1e1e1e; font-size: 12px;
   }
   #titlebar {
@@ -21,17 +22,27 @@
   #titlebar .app-title { font-weight: 600; letter-spacing: 0.2px; }
   #titlebar .project { color: #cfe0f5; }
   #titlebar .main-node { color: #9fc0e8; margin-left: auto; font-size: 12px; }
-  #toolbar {
-    grid-column: 1 / -1; background: linear-gradient(#f7f7f7, #e9e9e9);
-    border-bottom: 1px solid #c5c5c5; display: flex; align-items: center;
-    gap: 4px; padding: 0 8px;
+  /* --- Menu bar ------------------------------------------------------- */
+  #menubar {
+    grid-column: 1 / -1; background: #f5f5f5; border-bottom: 1px solid #c5c5c5;
+    display: flex; align-items: stretch; padding: 0 4px; user-select: none;
   }
-  #toolbar button {
-    background: transparent; border: 1px solid transparent; color: #1e1e1e;
-    padding: 4px 10px; cursor: pointer; font-family: inherit; font-size: 12px; margin: 0;
+  .menu { position: relative; }
+  .menu > .menu-title { padding: 5px 12px; cursor: default; display: inline-block; }
+  .menu:hover > .menu-title, .menu.open > .menu-title { background: #dcebfa; }
+  .menu .dropdown {
+    display: none; position: absolute; left: 0; top: 100%; z-index: 100;
+    background: #fff; border: 1px solid #adadad; box-shadow: 2px 3px 8px rgba(0,0,0,0.25);
+    min-width: 230px; padding: 3px 0;
   }
-  #toolbar button:hover { background: #dcebfa; border-color: #99c9ef; }
-  #toolbar .sep { width: 1px; height: 20px; background: #c5c5c5; margin: 0 4px; }
+  .menu.open .dropdown { display: block; }
+  .mi { padding: 6px 22px 6px 14px; cursor: default; white-space: nowrap; }
+  .mi:hover { background: #dcebfa; }
+  .mi.disabled { color: #9a9a9a; }
+  .mi.disabled:hover { background: transparent; }
+  .mi .shortcut { float: right; color: #888; margin-left: 24px; font-size: 11px; }
+  .menu-sep { border-top: 1px solid #e0e0e0; margin: 3px 0; }
+  /* --- Docks ----------------------------------------------------------- */
   #left {
     background: #f5f5f5; border-right: 1px solid #c5c5c5; overflow: auto;
     grid-row: 3; grid-column: 1;
@@ -42,18 +53,38 @@
     text-transform: uppercase; letter-spacing: 0.5px;
     position: sticky; top: 0; z-index: 2;
   }
-  #right { overflow: auto; padding: 0; grid-row: 3; grid-column: 2; background: #fafafa; }
-  #right .panel-body { padding: 10px 14px; }
+  #center { overflow: auto; padding: 8px 12px; grid-row: 3; grid-column: 2; background: #fafafa; }
+  #rightdock {
+    grid-row: 3; grid-column: 3; background: #f5f5f5; border-left: 1px solid #c5c5c5;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #toolbox { flex: 1 1 55%; overflow: auto; border-bottom: 1px solid #c5c5c5; }
+  #sidetext { flex: 1 1 45%; overflow: auto; display: flex; flex-direction: column; }
+  #sidetext .dock-title { display: flex; gap: 10px; align-items: center; }
+  #sidetext .dock-title span[data-pane] { cursor: pointer; padding: 0 4px; text-transform: none; font-weight: 400; }
+  #sidetext .dock-title span[data-pane].active { font-weight: 700; color: #2b579a; }
+  #sidetext pre { flex: 1; margin: 0; border: none; }
   #bottomdock {
     grid-column: 1 / -1; grid-row: 4; background: #f5f5f5;
-    border-top: 1px solid #c5c5c5; overflow: auto;
+    border-top: 1px solid #c5c5c5; overflow: auto; display: flex; flex-direction: column;
   }
+  #bottomdock .dock-title { display: flex; gap: 2px; align-items: center; }
+  #bottomdock .dock-title .dock-tab {
+    cursor: pointer; padding: 2px 12px; text-transform: none; font-weight: 400;
+    border: 1px solid transparent; border-bottom: none;
+  }
+  #bottomdock .dock-title .dock-tab.active {
+    background: #fff; border-color: #c5c5c5; font-weight: 600; color: #2b579a;
+  }
+  #bottomdock .dock-body { flex: 1; overflow: auto; background: #fff; }
+  #bottomdock .dock-pane { padding: 6px 10px; }
   #statusbar {
     grid-column: 1 / -1; grid-row: 5; background: #2b579a; color: #dce8f7;
     display: flex; align-items: center; gap: 18px; padding: 0 12px; font-size: 11px;
   }
   #statusbar .err { color: #ffc4c4; }
   #statusbar .warn { color: #ffe2ad; }
+  #statusbar .simstate { color: #b8f5b8; }
   h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
        color: #5a5a5a; margin: 10px 8px 4px; }
   .node { cursor: pointer; padding: 3px 16px; color: #1e1e1e; white-space: nowrap; }
@@ -66,19 +97,6 @@
   .severity-Error   { color: #c42b1c; }
   .severity-Warning { color: #9d5d00; }
   .severity-Info    { color: #555; }
-  .tabs {
-    display: flex; gap: 0; border-bottom: 1px solid #c5c5c5;
-    background: #e4e4e4; padding: 4px 8px 0; position: sticky; top: 0; z-index: 3;
-  }
-  .tab {
-    padding: 6px 14px; cursor: pointer; color: #444; border: 1px solid transparent;
-    border-bottom: none; margin-right: 1px; border-radius: 2px 2px 0 0; font-size: 12px;
-  }
-  .tab:hover { background: #efefef; }
-  .tab.active {
-    background: #fafafa; color: #1e1e1e; border-color: #c5c5c5;
-    border-top: 2px solid #2b579a; margin-bottom: -1px; padding-bottom: 7px;
-  }
   pre { background: #fff; border: 1px solid #d5d5d5; padding: 10px; overflow: auto;
         color: #1e1e1e; font-size: 12px; line-height: 1.45;
         font-family: Consolas, "Cascadia Mono", monospace; }
@@ -115,9 +133,16 @@
   #edit-status.err { color: #c42b1c; }
   .palette { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
   .chip { background: #eef2f7; border: 1px solid #b9c8d9; border-radius: 10px;
-          padding: 1px 8px; font-size: 11px; cursor: pointer; color: #2b579a; }
+          padding: 1px 8px; font-size: 11px; cursor: grab; color: #2b579a; }
   .chip:hover { background: #dcebfa; }
-  /* Diagram canvas: white sheet, engineering grid, dark wires, red = broken. */
+  /* --- Operations toolbox ---------------------------------------------- */
+  #toolbox details { border-bottom: 1px solid #e0e0e0; }
+  #toolbox summary { padding: 4px 10px; cursor: pointer; font-weight: 600; color: #3c3c3c;
+                     background: #efefef; }
+  #toolbox .op-item { padding: 3px 10px 3px 22px; cursor: grab; }
+  #toolbox .op-item:hover { background: #e3eef9; }
+  #toolbox .op-item.disabled { color: #9a9a9a; cursor: not-allowed; }
+  /* --- Canvas ----------------------------------------------------------- */
   #diagram-host { background: #fff; border: 1px solid #c5c5c5; overflow: auto; }
   .diagram-toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0;
                      font-size: 12px; color: #3c3c3c; }
@@ -135,6 +160,19 @@
     background: #fdeeee; border: 1px solid #d11a1a; color: #c42b1c;
     padding: 6px 10px; margin: 6px 0; font-size: 12px;
   }
+  /* --- Modal dialogs ----------------------------------------------------- */
+  #modal-backdrop {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35); z-index: 200;
+  }
+  #modal {
+    display: none; position: fixed; z-index: 201; left: 50%; top: 12%;
+    transform: translateX(-50%); background: #fafafa; border: 1px solid #2b579a;
+    box-shadow: 3px 5px 16px rgba(0,0,0,0.35); min-width: 560px; max-width: 860px;
+    max-height: 76vh; overflow: auto; padding: 0 0 8px;
+  }
+  #modal .dock-title { display: flex; justify-content: space-between; }
+  #modal .dlg { display: none; padding: 10px 14px; }
+  #modal .dlg.active { display: block; }
 </style>
 </head>
 <body>
@@ -143,64 +181,161 @@
   <span class="project" id="project-name">loading…</span>
   <span class="main-node" id="main-node"></span>
 </div>
-<div id="toolbar">
-  <button onclick="refresh()" title="Re-load the model and re-run checks">⟳ Refresh</button>
-  <span class="sep"></span>
-  <button onclick="showTab('diagram')" title="Dataflow diagram of the selected operator">◫ Diagram</button>
-  <button onclick="showTab('step')" title="Step the main operator one cycle at a time">▶ Step</button>
-  <button onclick="showTab('tests'); testsRun()" title="Run all golden-trace scenarios">✓ Run tests</button>
-  <button onclick="showTab('verify')" title="Prove contracts with Kind 2">⊢ Verify</button>
-  <button onclick="showTab('build')" title="Generated C + Makefile for the selected root">⚙ Build</button>
+
+<div id="menubar">
+  <div class="menu" data-menu="file">
+    <span class="menu-title">File</span>
+    <div class="dropdown">
+      <div class="mi" onclick="openDialog('dlg-operator')">New Operator…</div>
+      <div class="mi" onclick="openDialog('dlg-main')">Set Main Operator…</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="refresh()">Refresh Project</div>
+    </div>
+  </div>
+  <div class="menu" data-menu="insert">
+    <span class="menu-title">Insert</span>
+    <div class="dropdown">
+      <div class="mi" onclick="openDialog('dlg-operator')">Operator…</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="openPortDialog('input')">Input…</div>
+      <div class="mi" onclick="openPortDialog('output')">Output…</div>
+      <div class="mi" onclick="openPortDialog('local')">Local…</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="openDialog('dlg-equation')">Equation…</div>
+      <div class="mi" id="mi-insert-fsm" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machine…</div>
+    </div>
+  </div>
+  <div class="menu" data-menu="simulation">
+    <span class="menu-title">Simulation</span>
+    <div class="dropdown">
+      <div class="mi" id="mi-sim-build" onclick="simBuild()">Build</div>
+      <div class="mi" id="mi-sim-run" onclick="simRun()">Run</div>
+      <div class="mi disabled" id="mi-sim-step" onclick="simStep()">Step <span class="shortcut">active while running</span></div>
+      <div class="mi disabled" id="mi-sim-stop" onclick="simStop()">Stop / Reset</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="openDialog('dlg-csv')">Run CSV Vector…</div>
+    </div>
+  </div>
+  <div class="menu" data-menu="code">
+    <span class="menu-title">Code</span>
+    <div class="dropdown">
+      <div class="mi" onclick="setSidePane('lustre')">View Lustre Text</div>
+      <div class="mi" onclick="setSidePane('c')">View Generated C</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="downloadBuild()">Generate C-Lite (save files)</div>
+      <div class="mi" id="mi-code-compile" onclick="openDialog('dlg-compile')">Compile C-Lite…</div>
+    </div>
+  </div>
+  <div class="menu" data-menu="project">
+    <span class="menu-title">Project</span>
+    <div class="dropdown">
+      <div class="mi" onclick="openDialog('dlg-types'); loadTypes()">Types…</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="showDock('tests'); loadTests(); testsRun()">Run Test Scenarios</div>
+      <div class="mi" onclick="showDock('tests'); testsRecord()">Record Golden Traces</div>
+      <div class="mi" onclick="showDock('verify'); proveRun()">Verify with Kind 2</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machines…</div>
+    </div>
+  </div>
 </div>
+
 <div id="left">
   <div class="dock-title">Workspace</div>
   <div id="packages"></div>
 </div>
-<div id="right">
-  <div class="tabs">
-    <span class="tab active" data-tab="node">Node</span>
-    <span class="tab" data-tab="diagram">Diagram</span>
-    <span class="tab" data-tab="edit">Edit</span>
-    <span class="tab" data-tab="types">Types</span>
-    <span class="tab" data-tab="step">Step</span>
-    <span class="tab" data-tab="tests">Tests</span>
-    <span class="tab" data-tab="verify">Verify</span>
-    <span class="tab" data-tab="fsm">FSM</span>
-    <span class="tab" data-tab="simulate">Simulate (CSV)</span>
-    <span class="tab" data-tab="lustre">Lustre</span>
-    <span class="tab" data-tab="clite">C-Lite</span>
-    <span class="tab" data-tab="build">Build</span>
-  </div>
-  <div class="panel-body">
-  <div id="panel-node">Select a node from the Workspace pane.</div>
 
-  <div id="panel-diagram" style="display:none">
-    <p>Dataflow view of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange the canvas — they snap to the grid and the layout persists to the model file. <strong>Drag a block from the palette below onto the canvas</strong> to instantiate it; unbound pins show <span class="severity-Error">red</span> until you wire them. <strong>Right-click</strong> any box for properties (rename, type, role, bind, delete). Click an equation that calls an operator to dive into it; breadcrumbs come back.</p>
-    <div id="diagram-crumbs" style="margin:4px 0"></div>
-    <h4 style="margin-top:8px">Palette — drag onto the canvas</h4>
-    <div class="palette" id="diagram-palette"></div>
-    <div class="diagram-toolbar">
-      grid
-      <select id="grid-size" onchange="gridChanged()">
-        <option value="4">4 px</option>
-        <option value="8" selected>8 px</option>
-        <option value="10">10 px</option>
-        <option value="16">16 px</option>
-        <option value="20">20 px</option>
-      </select>
-      <label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label>
-      <label><input type="checkbox" id="grid-snap" checked> snap to grid</label>
-      <span class="build-note" id="diagram-status"></span>
+<div id="center">
+  <p style="margin:4px 0">Diagram of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange (grid-snapped, persisted). Drag an <strong>operation or operator from the toolbox</strong> on the right onto the canvas to instantiate it; unbound pins show <span class="severity-Error">red</span>. <strong>Right-click</strong> any box for properties; click a calling equation to dive in.</p>
+  <div id="diagram-crumbs" style="margin:4px 0"></div>
+  <div class="diagram-toolbar">
+    grid
+    <select id="grid-size" onchange="gridChanged()">
+      <option value="4">4 px</option>
+      <option value="8" selected>8 px</option>
+      <option value="10">10 px</option>
+      <option value="16">16 px</option>
+      <option value="20">20 px</option>
+    </select>
+    <label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label>
+    <label><input type="checkbox" id="grid-snap" checked> snap to grid</label>
+    <span class="build-note" id="diagram-status"></span>
+  </div>
+  <div id="diagram-problems"></div>
+  <div id="diagram-host"></div>
+  <div id="float-panel" style="display:none; position:fixed; z-index:50; background:#fff; border:1px solid #2b579a; box-shadow:2px 3px 8px rgba(0,0,0,0.25); padding:10px 12px; min-width:260px"></div>
+</div>
+
+<div id="rightdock">
+  <div id="toolbox">
+    <div class="dock-title">Operations</div>
+    <div id="toolbox-body"></div>
+  </div>
+  <div id="sidetext">
+    <div class="dock-title">
+      <span data-pane="lustre" class="active" onclick="setSidePane('lustre')">Lustre</span>
+      <span data-pane="c" onclick="setSidePane('c')">Generated C</span>
     </div>
-    <div id="diagram-problems"></div>
-    <div id="diagram-host"></div>
-    <div id="float-panel" style="display:none; position:fixed; z-index:50; background:#fff; border:1px solid #2b579a; box-shadow:2px 3px 8px rgba(0,0,0,0.25); padding:10px 12px; min-width:260px"></div>
+    <pre id="side-lustre">loading…</pre>
+    <pre id="side-c" style="display:none">loading…</pre>
   </div>
+</div>
 
-  <div id="panel-edit" style="display:none">
-    <p>Build the model: create operators, add ports, then write equations using <code class="inline">if … then … else …</code>, math (<code class="inline">+ - * / mod</code>), comparisons, temporal ops (<code class="inline">-&gt;</code>, <code class="inline">pre</code>), and calls to any library block. Every change saves to the model file and re-checks instantly.</p>
+<div id="bottomdock">
+  <div class="dock-title">
+    <span class="dock-tab active" data-dock="messages" onclick="showDock('messages')">Messages</span>
+    <span class="dock-tab" data-dock="simulation" onclick="showDock('simulation')">Simulation</span>
+    <span class="dock-tab" data-dock="tests" onclick="showDock('tests'); loadTests()">Tests</span>
+    <span class="dock-tab" data-dock="verify" onclick="showDock('verify')">Verify</span>
+  </div>
+  <div class="dock-body">
+    <div class="dock-pane" id="dock-messages"><div id="diagnostics"></div></div>
+    <div class="dock-pane" id="dock-simulation" style="display:none">
+      <p style="margin:4px 0">Stepping <strong id="step-entry-name">main</strong> — set inputs, then <code class="inline">Simulation &gt; Step</code>. Every named item has a deterministic value each cycle.</p>
+      <div id="step-inputs" class="step-grid"></div>
+      <div>
+        <button class="primary" onclick="simStep()">Step</button>
+        <button onclick="simStop()">Stop / Reset</button>
+        <span class="build-note">cycle <span id="step-cycle">0</span></span>
+      </div>
+      <div id="step-trace"></div>
+    </div>
+    <div class="dock-pane" id="dock-tests" style="display:none">
+      <div>
+        <button class="primary" onclick="testsRun()">Run all</button>
+        <button onclick="testsRecord()">Record goldens</button>
+        <span class="build-note" id="tests-summary"></span>
+        <span class="build-note">scenarios in <code class="inline" id="tests-dir">scenarios/</code></span>
+      </div>
+      <div id="tests-scenarios"></div>
+      <div id="tests-results"></div>
+    </div>
+    <div class="dock-pane" id="dock-verify" style="display:none">
+      <div class="row">
+        timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
+        <button class="primary" onclick="proveRun()">Run Kind 2</button>
+        <span class="build-note" id="verify-status"></span>
+      </div>
+      <div id="verify-results"></div>
+    </div>
+  </div>
+</div>
+
+<div id="statusbar">
+  <span class="err" id="err-count">0 errors</span>
+  <span class="warn" id="warn-count">0 warnings</span>
+  <span id="status-grid"></span>
+  <span class="simstate" id="status-sim"></span>
+  <span style="margin-left:auto">/api/inspect every 5 s</span>
+</div>
+
+<!-- ------------------------------ dialogs ------------------------------ -->
+<div id="modal-backdrop" onclick="closeDialog()"></div>
+<div id="modal">
+  <div class="dock-title"><span id="modal-title">…</span><span style="cursor:pointer" onclick="closeDialog()">✕</span></div>
+
+  <div class="dlg" id="dlg-operator">
     <div id="edit-status"></div>
-
     <div class="edit-form">
       <h4>New operator</h4>
       <div class="row">
@@ -209,26 +344,45 @@
         <select id="new-node-kind"><option value="operator">operator (stateful)</option><option value="function">function (pure)</option></select>
         <button class="primary" onclick="editAddNode()">Create</button>
       </div>
+      <p class="build-note">The new operator opens as a blank canvas — add Inputs/Outputs/Locals from the Insert menu, then draw by dragging operations in from the toolbox.</p>
     </div>
+  </div>
 
+  <div class="dlg" id="dlg-main">
     <div class="edit-form">
-      <h4>Add port / local</h4>
+      <h4>Entry point (main operator → standalone executable)</h4>
       <div class="row">
-        <label>node</label><select id="port-node"></select>
+        <label>main</label><select id="main-select"></select>
+        <button class="primary" onclick="editSetMain()">Set main</button>
+      </div>
+      <p class="build-note">Simulation and code generation drive the main operator and everything it uses (<span id="build-entry">none set</span>).</p>
+    </div>
+  </div>
+
+  <div class="dlg" id="dlg-port">
+    <div class="edit-form">
+      <h4 id="dlg-port-title">Add variable</h4>
+      <div class="row">
+        <label>operator</label><select id="port-node"></select>
         <label>kind</label>
         <select id="port-side"><option value="input">input</option><option value="output">output</option><option value="local">local</option></select>
+      </div>
+      <div class="row">
         <label>name</label><input id="port-name" placeholder="x">
         <label>type</label>
         <select id="port-type"></select>
         <input id="port-type-custom" placeholder="uint8[4]" style="display:none; width:110px">
         <button class="primary" onclick="editAddPort()">Add</button>
       </div>
+      <p class="build-note">Every variable has a defined data type — <code class="inline">bool</code> by default until you change it. Named types from the Types dialog appear in the list.</p>
     </div>
+  </div>
 
+  <div class="dlg" id="dlg-equation">
     <div class="edit-form">
-      <h4>Add equation</h4>
+      <h4>Add equation (textual)</h4>
       <div class="row">
-        <label>node</label><select id="eq-node"></select>
+        <label>operator</label><select id="eq-node"></select>
         <label>lhs</label><input id="eq-lhs" placeholder="y  (or: q, count for multi-output calls)">
       </div>
       <div class="row" style="align-items:flex-start">
@@ -239,21 +393,11 @@
       <h4>Library palette — click to insert a call</h4>
       <div class="palette" id="palette"></div>
     </div>
-
-    <div class="edit-form">
-      <h4>Entry point (main operator → standalone executable)</h4>
-      <div class="row">
-        <label>main</label><select id="main-select"></select>
-        <button class="primary" onclick="editSetMain()">Set main</button>
-      </div>
-    </div>
   </div>
 
-  <div id="panel-types" style="display:none">
+  <div class="dlg" id="dlg-types">
     <p>Named types — enums, structures, and array aliases — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
-    <h4>Defined types</h4>
     <div id="types-list"></div>
-
     <div class="edit-form">
       <h4>New enum</h4>
       <div class="row">
@@ -262,7 +406,6 @@
         <button class="primary" onclick="typesAddEnum()">Create</button>
       </div>
     </div>
-
     <div class="edit-form">
       <h4>New structure (record)</h4>
       <div class="row">
@@ -271,72 +414,19 @@
         <button class="primary" onclick="typesAddRecord()">Create</button>
       </div>
     </div>
-
     <div class="edit-form">
       <h4>New alias / array type</h4>
       <div class="row">
         <label>name</label><input id="type-alias-name" placeholder="Vec3">
-        <label>target</label><input id="type-alias-target" style="flex:1" placeholder="float32[3]  (or any type: uint16, Sample[8], …)">
+        <label>target</label><input id="type-alias-target" style="flex:1" placeholder="float32[3]">
         <button class="primary" onclick="typesAddAlias()">Create</button>
       </div>
     </div>
     <div class="build-note" id="types-status"></div>
   </div>
 
-  <div id="panel-step" style="display:none">
-    <p>Step the project's <strong id="step-entry-name">main operator</strong> one cycle at a time. Every named item — inputs, locals, outputs, active mode, contract violations — has a deterministic value each step.</p>
-    <div id="step-inputs" class="step-grid"></div>
-    <div>
-      <button class="primary" onclick="stepOnce()">Step</button>
-      <button onclick="stepReset()">Reset</button>
-      <span class="build-note">cycle <span id="step-cycle">0</span></span>
-    </div>
-    <h4>Trace — all items, every cycle</h4>
-    <div id="step-trace"></div>
-  </div>
-
-  <div id="panel-tests" style="display:none">
-    <p>Project test scenarios — golden traces recorded from the model, verified against <strong>both</strong> the IR simulator and the compiled generated C. Scenario inputs live in <code class="inline" id="tests-dir">scenarios/</code> next to the model.</p>
-    <div>
-      <button class="primary" onclick="testsRun()">Run all</button>
-      <button onclick="testsRecord()">Record goldens</button>
-      <span class="build-note" id="tests-summary"></span>
-    </div>
-    <h4>Scenarios</h4>
-    <div id="tests-scenarios"></div>
-    <h4>Results</h4>
-    <div id="tests-results"></div>
-  </div>
-
-  <div id="panel-simulate" style="display:none">
-    <p>CSV input — first row is the header (one column per main-node input). Useful for batch traces.</p>
-    <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
-    <div>
-      <button onclick="runSim(false)">Simulate (outputs)</button>
-      <button onclick="runSim(true)">Simulate (all items)</button>
-    </div>
-    <pre id="sim-output"></pre>
-  </div>
-
-  <div id="panel-lustre" style="display:none"><pre id="lustre-text">loading…</pre></div>
-
-  <div id="panel-clite" style="display:none">
-    <h4>openlustre_generated.h</h4><pre id="clite-header">loading…</pre>
-    <h4>openlustre_generated.c</h4><pre id="clite-source">loading…</pre>
-  </div>
-
-  <div id="panel-verify" style="display:none">
-    <p>Prove the model's contracts with <strong>Kind 2</strong>. Properties come from the generated Lustre + CoCoSpec of the selected root (<code class="inline">main</code>) and everything it uses.</p>
-    <div class="row">
-      timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
-      <button class="primary" onclick="proveRun()">Run Kind 2</button>
-      <span class="build-note" id="verify-status"></span>
-    </div>
-    <div id="verify-results"></div>
-  </div>
-
-  <div id="panel-fsm" style="display:none">
-    <p>State machines in the model file. They lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
+  <div class="dlg" id="dlg-fsm">
+    <p>State machines lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
     <div class="row">machine <select id="fsm-select"></select> <button onclick="fsmView()">View</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -364,33 +454,52 @@
     </div>
   </div>
 
-  <div id="panel-build" style="display:none">
-    <p>One-command standalone build. The project's user-designated <code class="inline" id="build-entry">main</code> operator becomes the entry point of the executable — drop these files in a directory and run <code class="inline">make</code>.</p>
-    <button onclick="downloadBuild()">Save all files</button>
-    <h4>Makefile</h4><pre id="build-makefile">loading…</pre>
-    <h4>driver.c</h4><pre id="build-driver">loading…</pre>
-    <h4>openlustre_generated.h</h4><pre id="build-header">loading…</pre>
-    <h4>openlustre_generated.c</h4><pre id="build-source">loading…</pre>
-    <p class="build-note">After saving these four files into one directory, run <code class="inline">make</code>; you get an executable named after the entry operator. It reads CSV from stdin (header row first, columns matching the operator's inputs) and writes the per-cycle trace on stdout in the same shape as <code class="inline">openlustre simulate</code>.</p>
+  <div class="dlg" id="dlg-csv">
+    <p>CSV input — first row is the header (one column per main-operator input). Useful for batch traces.</p>
+    <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
+    <div>
+      <button onclick="runSim(false)">Simulate (outputs)</button>
+      <button onclick="runSim(true)">Simulate (all items)</button>
+    </div>
+    <pre id="sim-output"></pre>
   </div>
+
+  <div class="dlg" id="dlg-compile">
+    <div class="edit-form">
+      <h4>Compile C-Lite</h4>
+      <div class="row">
+        <label>target OS</label>
+        <select id="compile-os"><option>host (this machine)</option><option disabled>cross-compile — roadmap</option></select>
+        <label>compiler</label>
+        <select id="compile-cc">
+          <option value="auto">auto-detect</option>
+          <option value="msvc">MSVC (cl)</option>
+          <option value="gcc">gcc</option>
+          <option value="clang">clang</option>
+          <option value="cc">cc</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>output dir</label><input id="compile-dir" style="flex:1" placeholder="(default: <workspace>\build)">
+      </div>
+      <div class="row">
+        <button class="primary" onclick="cliteCompile()">Emit + Compile</button>
+        <span class="build-note" id="compile-status"></span>
+      </div>
+      <pre id="compile-log" style="display:none"></pre>
+      <p class="build-note">Emits <code class="inline">openlustre_generated.h/.c</code>, <code class="inline">driver.c</code>, monitors when the main operator has a contract, and a <code class="inline">Makefile</code> — then compiles them on this machine. The executable is named after the main operator and speaks CSV on stdin/stdout.</p>
+    </div>
   </div>
 </div>
-<div id="bottomdock">
-  <div class="dock-title">Messages</div>
-  <div id="diagnostics"></div>
-</div>
-<div id="statusbar">
-  <span class="err" id="err-count">0 errors</span>
-  <span class="warn" id="warn-count">0 warnings</span>
-  <span id="status-grid"></span>
-  <span style="margin-left:auto">/api/inspect every 5 s</span>
-</div>
+
 <script>
 "use strict";
 
 const state = {
   inspect: null, selectedNode: null, stepHistory: "",
   diagramStack: [], diagramData: null, diagPos: {}, drag: null,
+  sim: { built: false, running: false },
+  ops: null,
 };
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
@@ -405,6 +514,92 @@ function typeName(t) {
 }
 
 function typeKind(t) { return (t && typeof t === "object" ? t.kind : null) || "Bool"; }
+
+// --- Menus -------------------------------------------------------------------
+
+document.querySelectorAll("#menubar .menu > .menu-title").forEach(t => {
+  t.onclick = ev => {
+    const m = ev.target.parentElement;
+    const was = m.classList.contains("open");
+    document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
+    if (!was) m.classList.add("open");
+    ev.stopPropagation();
+  };
+});
+document.addEventListener("click", () => {
+  document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
+});
+document.querySelectorAll("#menubar .mi").forEach(mi => {
+  mi.addEventListener("click", ev => {
+    if (mi.classList.contains("disabled")) { ev.stopPropagation(); return; }
+    document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
+  });
+});
+
+// --- Dialogs -------------------------------------------------------------------
+
+const DLG_TITLES = {
+  "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
+  "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
+  "dlg-types": "Types", "dlg-fsm": "State Machines",
+  "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
+};
+
+function openDialog(id) {
+  document.querySelectorAll("#modal .dlg").forEach(d => d.classList.toggle("active", d.id === id));
+  document.getElementById("modal-title").textContent = DLG_TITLES[id] || id;
+  document.getElementById("modal-backdrop").style.display = "";
+  document.getElementById("modal").style.display = "";
+}
+
+function closeDialog() {
+  document.getElementById("modal-backdrop").style.display = "none";
+  document.getElementById("modal").style.display = "none";
+}
+
+function openPortDialog(side) {
+  openDialog("dlg-port");
+  document.getElementById("port-side").value = side;
+  document.getElementById("dlg-port-title").textContent = "Add " + side;
+  if (state.selectedNode) {
+    const sel = document.getElementById("port-node");
+    if ([...sel.options].some(o => o.value === state.selectedNode.name)) {
+      sel.value = state.selectedNode.name;
+    }
+  }
+}
+
+// --- Bottom dock ---------------------------------------------------------------
+
+function showDock(name) {
+  document.querySelectorAll("#bottomdock .dock-tab").forEach(t =>
+    t.classList.toggle("active", t.dataset.dock === name));
+  document.querySelectorAll("#bottomdock .dock-pane").forEach(p =>
+    p.style.display = p.id === "dock-" + name ? "" : "none");
+}
+
+// --- Right side text panes -------------------------------------------------------
+
+function setSidePane(name) {
+  document.querySelectorAll("#sidetext [data-pane]").forEach(s =>
+    s.classList.toggle("active", s.dataset.pane === name));
+  document.getElementById("side-lustre").style.display = name === "lustre" ? "" : "none";
+  document.getElementById("side-c").style.display = name === "c" ? "" : "none";
+  refreshSideText();
+}
+
+async function refreshSideText() {
+  // The Lustre view of the model is always one glance away while drawing.
+  if (document.getElementById("side-lustre").style.display !== "none") {
+    document.getElementById("side-lustre").textContent = await fetchText("/api/lustre");
+  } else {
+    const h = await fetchText("/api/clite/header");
+    const c = await fetchText("/api/clite/source");
+    document.getElementById("side-c").textContent = h + "\n/* ---- source ---- */\n\n" + c;
+  }
+}
+
+// --- Project refresh -------------------------------------------------------------
 
 async function refresh() {
   try {
@@ -436,7 +631,7 @@ async function refresh() {
       d.onclick = () => {
         selectNode(n);
         state.diagramStack = [];
-        if (currentTab() === "diagram") loadDiagram(n.name);
+        loadDiagram(n.name);
       };
       pkgs.appendChild(d);
     }
@@ -466,7 +661,7 @@ async function refresh() {
     const m = (d.context || []).map(c => /^node (\w+)/.exec(c)).find(Boolean);
     if (m) {
       x.style.cursor = "pointer";
-      x.onclick = () => { const n = findNode(m[1]); if (n) selectNode(n); };
+      x.onclick = () => { const n = findNode(m[1]); if (n) { selectNode(n); loadDiagram(n.name); } };
     }
     diag.appendChild(x);
   }
@@ -475,11 +670,12 @@ async function refresh() {
     if (still) selectNode(still);
   } else {
     const first = ins.project.packages.find(p => p.nodes.length)?.nodes[0];
-    if (first) selectNode(first);
+    if (first) { selectNode(first); loadDiagram(first.name); }
   }
   populateStepInputs();
   populateEditSelectors();
   loadTypes();
+  refreshSideText();
   const e = entryNode();
   document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
   document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
@@ -500,52 +696,71 @@ function entryNode() {
 function selectNode(n) {
   state.selectedNode = n;
   document.querySelectorAll(".node").forEach(el => el.classList.toggle("selected", el.dataset.name === n.name));
-  let html = "<h3>" + n.name + "</h3>";
-  html += "<p><strong>" + n.kind + "</strong> — " + n.equation_count + " equation" + (n.equation_count === 1 ? "" : "s");
-  if (n.contract) html += " — contract <code class='inline'>" + n.contract + "</code>";
-  html += "</p>";
-  function table(title, ports) {
-    if (!ports.length) return "";
-    let h = "<h4>" + title + "</h4><table><thead><tr><th>name</th><th>type</th></tr></thead><tbody>";
-    for (const p of ports) h += "<tr><td>" + p.name + "</td><td><code class='inline'>" + typeName(p.type) + "</code></td></tr>";
-    return h + "</tbody></table>";
-  }
-  html += table("inputs",  n.inputs);
-  html += table("outputs", n.outputs);
-  html += table("locals",  n.locals);
-  document.getElementById("panel-node").innerHTML = html;
 }
 
-function currentTab() {
-  return document.querySelector(".tab.active")?.dataset.tab;
+// --- Simulation menu (Build / Run / Step / Stop) -----------------------------------
+
+function setMenuEnabled(id, on) {
+  document.getElementById(id).classList.toggle("disabled", !on);
 }
 
-function showTab(name) {
-  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
-  document.querySelectorAll("[id^='panel-']").forEach(p => p.style.display = "none");
-  document.getElementById("panel-" + name).style.display = "";
-  if (name === "lustre") fetchText("/api/lustre").then(t => document.getElementById("lustre-text").textContent = t);
-  if (name === "clite") {
-    fetchText("/api/clite/header").then(t => document.getElementById("clite-header").textContent = t);
-    fetchText("/api/clite/source").then(t => document.getElementById("clite-source").textContent = t);
-  }
-  if (name === "build") {
-    fetchText("/api/clite/makefile").then(t => document.getElementById("build-makefile").textContent = t);
-    fetchText("/api/clite/driver").then(t => document.getElementById("build-driver").textContent = t);
-    fetchText("/api/clite/header").then(t => document.getElementById("build-header").textContent = t);
-    fetchText("/api/clite/source").then(t => document.getElementById("build-source").textContent = t);
-  }
-  if (name === "diagram") {
-    const n = state.diagramStack.length
-      ? state.diagramStack[state.diagramStack.length - 1]
-      : (state.selectedNode?.name || state.inspect?.project?.main);
-    if (n) loadDiagram(n);
-  }
-  if (name === "tests") loadTests();
-  if (name === "fsm") loadFsmList();
-  if (name === "types") loadTypes();
+function setSimStatus(msg) {
+  document.getElementById("status-sim").textContent = msg;
 }
-document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
+
+async function simBuild() {
+  await refresh();
+  const errs = state.inspect?.summary?.errors ?? 1;
+  if (errs > 0) {
+    state.sim.built = false;
+    setSimStatus("build failed — fix the errors in Messages");
+    showDock("messages");
+    return;
+  }
+  if (!state.inspect?.project?.main) {
+    state.sim.built = false;
+    setSimStatus("build failed — no main operator (File > Set Main Operator)");
+    return;
+  }
+  state.sim.built = true;
+  setSimStatus("build OK — Simulation > Run");
+}
+
+function simRun() {
+  if (!state.sim.built) {
+    setSimStatus("build first (Simulation > Build)");
+    return;
+  }
+  state.sim.running = true;
+  state.stepHistory = "";
+  document.getElementById("step-trace").innerHTML = "";
+  document.getElementById("step-cycle").textContent = "0";
+  populateStepInputs();
+  setMenuEnabled("mi-sim-step", true);
+  setMenuEnabled("mi-sim-stop", true);
+  setSimStatus("SIMULATION RUNNING — cycle 0");
+  showDock("simulation");
+}
+
+function simStep() {
+  if (!state.sim.running) {
+    setSimStatus("not running (Simulation > Run)");
+    return;
+  }
+  stepOnce().then(() => {
+    setSimStatus("SIMULATION RUNNING — cycle " + document.getElementById("step-cycle").textContent);
+  });
+}
+
+function simStop() {
+  state.sim.running = false;
+  state.stepHistory = "";
+  document.getElementById("step-trace").innerHTML = "";
+  document.getElementById("step-cycle").textContent = "0";
+  setMenuEnabled("mi-sim-step", false);
+  setMenuEnabled("mi-sim-stop", false);
+  setSimStatus("");
+}
 
 async function runSim(full) {
   const body = document.getElementById("sim-input").value;
@@ -553,7 +768,35 @@ async function runSim(full) {
   document.getElementById("sim-output").textContent = await r.text();
 }
 
-// --- Diagram rendering ---
+// --- Compile C-Lite ------------------------------------------------------------
+
+async function cliteCompile() {
+  const st = document.getElementById("compile-status");
+  st.textContent = "compiling…";
+  const r = await fetch("/api/clite/compile", {
+    method: "POST",
+    body: JSON.stringify({
+      compiler: document.getElementById("compile-cc").value,
+      out_dir: document.getElementById("compile-dir").value.trim(),
+    }),
+  });
+  const text = await r.text();
+  let v;
+  try { v = JSON.parse(text); } catch (_) { v = { error: text }; }
+  const log = document.getElementById("compile-log");
+  log.style.display = "";
+  if (v.error) {
+    st.textContent = "failed";
+    log.textContent = v.error;
+    return;
+  }
+  st.textContent = v.compiled
+    ? "✓ compiled — " + v.exe
+    : "emitted to " + v.out_dir + " but compile failed";
+  log.textContent = "wrote: " + (v.wrote || []).join(", ") + "\n\n" + (v.log || "");
+}
+
+// --- Diagram rendering -----------------------------------------------------------
 
 function gridPitch() {
   return parseInt(document.getElementById("grid-size").value, 10) || 8;
@@ -587,7 +830,6 @@ async function loadDiagram(nodeName, push) {
   state.diagPos = computePositions(d);
   renderCrumbs();
   renderProblems();
-  renderDiagramPalette();
   renderDiagram();
 }
 
@@ -643,7 +885,7 @@ function renderDiagram() {
     maxY = Math.max(maxY, p.y + DIAG.BOXH);
     maxX = Math.max(maxX, p.x + p.w);
   }
-  const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 160);
+  const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 240);
 
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
@@ -781,318 +1023,62 @@ function gridChanged() {
   saveLayout();
 }
 
-// --- Verify (Kind 2) ---
+// --- Operations toolbox (right dock) -------------------------------------------
 
-async function proveRun() {
-  const t = document.getElementById("verify-timeout").value || "30";
-  document.getElementById("verify-status").textContent = "running kind2…";
-  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t), { method: "POST" });
-  const text = await r.text();
-  let data;
-  try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
-  const host = document.getElementById("verify-results");
-  document.getElementById("verify-status").textContent = "";
-  if (data.error) {
-    host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
-    return;
-  }
-  if (!data.kind2_found) {
-    host.innerHTML = '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
-    return;
-  }
-  let html = "";
-  if (data.properties.length) {
-    html += "<table><thead><tr><th>property</th><th>status</th></tr></thead><tbody>";
-    for (const p of data.properties) {
-      const ok = (p.status || "").toLowerCase() === "valid";
-      html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
-        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td></tr>";
-      if (p.waveform) {
-        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre></td></tr>";
-      }
-    }
-    html += "</tbody></table>";
-  } else {
-    html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
-  }
-  host.innerHTML = html;
+async function loadToolbox() {
+  try { state.ops = await fetchJSON("/api/operations"); } catch (e) { return; }
+  renderToolbox();
 }
 
-// --- FSM authoring + state-diagram view ---
-
-async function loadFsmList() {
-  let data;
-  try { data = await fetchJSON("/api/fsm"); } catch (e) { return; }
-  const sel = document.getElementById("fsm-select");
-  sel.innerHTML = "";
-  for (const m of data.machines) {
-    const o = document.createElement("option");
-    o.value = m; o.textContent = m;
-    sel.appendChild(o);
-  }
-  if (!data.machines.length) {
-    document.getElementById("fsm-host").innerHTML =
-      '<span class="build-note">No state machines in the model file yet — create one below.</span>';
-  }
-}
-
-async function fsmView() {
-  const name = document.getElementById("fsm-select").value;
-  if (!name) return;
-  let m;
-  try { m = await fetchJSON("/api/fsm?name=" + encodeURIComponent(name)); }
-  catch (e) {
-    document.getElementById("fsm-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
-    return;
-  }
-  renderFsm(m);
-}
-
-function renderFsm(m) {
-  // States on a circle; transitions as labelled arcs.
-  const n = m.states.length;
-  const R = Math.max(120, n * 38), CX = R + 90, CY = R + 50;
-  const W = CX * 2, H = CY * 2;
-  const pos = {};
-  m.states.forEach((st, i) => {
-    const a = (2 * Math.PI * i) / n - Math.PI / 2;
-    pos[st.name] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
-  });
-  let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
-  svg += '<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
-         '<path d="M0,0 L7,3 L0,6 z" fill="#4a4a4a"/></marker></defs>';
-  for (const st of m.states) {
-    for (const t of st.transitions) {
-      const a = pos[st.name], b = pos[t.target];
-      if (!a || !b) continue;
-      if (st.name === t.target) {
-        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (a.x + 28) + ' ' + (a.y - 12) +
-               ' C ' + (a.x + 75) + ' ' + (a.y - 55) + ', ' + (a.x + 75) + ' ' + (a.y + 30) +
-               ', ' + (a.x + 30) + ' ' + (a.y + 14) + '"/>';
-        svg += '<text class="label" x="' + (a.x + 60) + '" y="' + (a.y - 18) + '">' + escapeHTML(t.guard) + '</text>';
-      } else {
-        const mx = (a.x + b.x) / 2 + (a.y - b.y) * 0.18;
-        const my = (a.y + b.y) / 2 + (b.x - a.x) * 0.18;
-        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + a.x + ' ' + a.y +
-               ' Q ' + mx + ' ' + my + ' ' + b.x + ' ' + b.y + '"/>';
-        svg += '<text class="label" x="' + mx + '" y="' + my + '">' + escapeHTML(t.guard) + '</text>';
-      }
-    }
-  }
-  for (const st of m.states) {
-    const p = pos[st.name];
-    const initial = st.name === m.initial_state;
-    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="30" class="box"' +
-      (initial ? ' stroke="#107c10" stroke-width="2.4"' : '') + '/>';
-    svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
-    const eqs = st.equations.map(e => e.lhs + " = " + e.body).join("; ");
-    svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
-      escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
-  }
-  svg += "</svg>";
-  document.getElementById("fsm-host").innerHTML = svg;
-}
-
-function parsePortsSpec(text) {
-  // "tick: bool, emergency: bool" -> [{name, type}]
-  return text.split(",").map(s => s.trim()).filter(Boolean).map(s => {
-    const [name, type] = s.split(":").map(x => x.trim());
-    return { name, type: type || "bool" };
-  });
-}
-
-async function fsmCreate() {
-  const statesText = document.getElementById("fsm-states").value;
-  const transText = document.getElementById("fsm-transitions").value;
-  const states = {};
-  const order = [];
-  for (const line of statesText.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    const ci = t.indexOf(":");
-    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return; }
-    const name = t.slice(0, ci).trim();
-    const eqs = t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean).map(e => {
-      const ei = e.indexOf("=");
-      return { lhs: e.slice(0, ei).trim(), body: e.slice(ei + 1).trim() };
-    });
-    states[name] = { name, equations: eqs, transitions: [] };
-    order.push(name);
-  }
-  for (const line of transText.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
-    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
-    if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return; }
-    const [, from, to, guard] = m;
-    if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return; }
-    states[from].transitions.push({ guard: guard.trim(), target: to });
-  }
-  const payload = {
-    name: document.getElementById("fsm-name").value.trim(),
-    initial_state: document.getElementById("fsm-initial").value.trim(),
-    inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
-    outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
-    states: order.map(n => states[n]),
-  };
-  const r = await fetch("/api/edit/add_state_machine", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  const text = await r.text();
-  if (!r.ok) {
-    let msg = text;
-    try { msg = JSON.parse(text).error || text; } catch (_) {}
-    setFsmStatus(false, msg);
-    return;
-  }
-  setFsmStatus(true, "created ✓ — the machine lowers to dataflow and is ready to simulate");
-  await refresh();
-  await loadFsmList();
-  document.getElementById("fsm-select").value = payload.name;
-  fsmView();
-}
-
-function setFsmStatus(ok, msg) {
-  const el = document.getElementById("fsm-status");
-  el.style.color = ok ? "#107c10" : "#c42b1c";
-  el.textContent = msg;
-}
-
-// --- Types: the SCADE-style types file -------------------------------------
-
-async function loadTypes() {
-  let t;
-  try { t = await fetchJSON("/api/types"); } catch (e) { return; }
-  state.types = t;
-  document.getElementById("types-file-note").textContent = t.types_file
-    ? "Definitions save to " + t.types_file + "."
-    : "No types file in this workspace — definitions save into the model file.";
-  let html;
-  if (!t.types.length) {
-    html = '<span class="build-note">No named types yet — create one below.</span>';
-  } else {
-    html = "<table><thead><tr><th>name</th><th>kind</th><th>definition</th><th>package</th><th></th></tr></thead><tbody>";
-    for (const ty of t.types) {
-      const editable = ty.package !== "stdlib";
-      html += "<tr><td><code class='inline'>" + escapeHTML(ty.name) + "</code></td><td>" + ty.kind +
-        "</td><td>" + escapeHTML(ty.detail) + "</td><td>" + escapeHTML(ty.package) + "</td><td>" +
-        (editable ? '<button onclick="typesRemove(\'' + escapeAttr(ty.name) + '\')">Delete</button>' : "") +
-        "</td></tr>";
-    }
-    html += "</tbody></table>";
-  }
-  document.getElementById("types-list").innerHTML = html;
-  populateTypeSelect(document.getElementById("port-type"));
-}
-
-function typeOptions() {
-  const prims = state.types?.primitives ||
-    ["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64"];
-  return prims.concat((state.types?.types || []).map(t => t.name));
-}
-
-/// Fill a type selector: primitives, then named types, then "custom…".
-/// Every variable gets a defined data type — `bool` is the default until
-/// the user picks something else.
-function populateTypeSelect(sel, current) {
-  if (!sel) return;
-  const prev = current !== undefined ? current : sel.value;
-  sel.innerHTML = "";
-  for (const t of typeOptions()) {
-    const o = document.createElement("option");
-    o.value = t; o.textContent = t;
-    sel.appendChild(o);
-  }
-  const custom = document.createElement("option");
-  custom.value = "(custom)"; custom.textContent = "custom…";
-  sel.appendChild(custom);
-  sel.value = typeOptions().includes(prev) ? prev : "bool";
-}
-
-function selectedType(selId, customId) {
-  const sel = document.getElementById(selId);
-  if (sel.value === "(custom)") {
-    return document.getElementById(customId).value.trim() || "bool";
-  }
-  return sel.value || "bool";
-}
-
-function setTypesStatus(ok, msg) {
-  const el = document.getElementById("types-status");
-  el.style.color = ok ? "#107c10" : "#c42b1c";
-  el.textContent = msg;
-}
-
-async function postTypeEdit(payload) {
-  const r = await fetch("/api/edit/add_type", { method: "POST", body: JSON.stringify(payload) });
-  const text = await r.text();
-  if (!r.ok) {
-    let msg = text;
-    try { msg = JSON.parse(text).error || text; } catch (_) {}
-    setTypesStatus(false, msg);
-    return;
-  }
-  setTypesStatus(true, "saved ✓");
-  await refresh();
-}
-
-function typesAddEnum() {
-  postTypeEdit({
-    kind: "enum",
-    name: document.getElementById("type-enum-name").value.trim(),
-    variants: document.getElementById("type-enum-variants").value
-      .split(",").map(s => s.trim()).filter(Boolean),
-  });
-}
-
-function typesAddRecord() {
-  postTypeEdit({
-    kind: "record",
-    name: document.getElementById("type-record-name").value.trim(),
-    fields: parsePortsSpec(document.getElementById("type-record-fields").value),
-  });
-}
-
-function typesAddAlias() {
-  postTypeEdit({
-    kind: "alias",
-    name: document.getElementById("type-alias-name").value.trim(),
-    target: document.getElementById("type-alias-target").value.trim(),
-  });
-}
-
-async function typesRemove(name) {
-  const r = await fetch("/api/edit/remove_type", { method: "POST", body: JSON.stringify({ name }) });
-  if (!r.ok) {
-    let msg = await r.text();
-    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
-    setTypesStatus(false, msg);
-    return;
-  }
-  setTypesStatus(true, "removed `" + name + "`");
-  await refresh();
-}
-
-// --- Draw on canvas: palette drag-drop + right-click properties -------------
-
-function renderDiagramPalette() {
-  const host = document.getElementById("diagram-palette");
+function renderToolbox() {
+  const host = document.getElementById("toolbox-body");
   host.innerHTML = "";
-  if (!state.inspect) return;
-  const current = state.diagramData?.node;
-  for (const pkg of state.inspect.project.packages) {
-    for (const n of pkg.nodes) {
-      if (n.name === current) continue;
-      const chip = document.createElement("span");
-      chip.className = "chip";
-      chip.textContent = n.name;
-      chip.title = n.inputs.map(p => p.name + ": " + typeName(p.type)).join(", ") +
-        " — drag onto the canvas to instantiate";
-      chip.draggable = true;
-      chip.ondragstart = ev => ev.dataTransfer.setData("text/plain", n.name);
-      host.appendChild(chip);
+  // Project operators and library blocks first — drag to instantiate a call.
+  if (state.inspect) {
+    const groups = [
+      ["Operators (project)", state.inspect.project.packages.filter(p => p.name !== "stdlib")],
+      ["Library Blocks", state.inspect.project.packages.filter(p => p.name === "stdlib")],
+    ];
+    for (const [title, pkgs] of groups) {
+      const nodes = pkgs.flatMap(p => p.nodes).filter(n => n.name !== state.diagramData?.node);
+      if (!nodes.length) continue;
+      const det = document.createElement("details");
+      if (title.startsWith("Operators")) det.open = true;
+      const sum = document.createElement("summary");
+      sum.textContent = title;
+      det.appendChild(sum);
+      for (const n of nodes) {
+        const item = document.createElement("div");
+        item.className = "op-item";
+        item.textContent = n.name;
+        item.title = n.inputs.map(p => p.name + ": " + typeName(p.type)).join(", ") || "(no inputs)";
+        item.draggable = true;
+        item.ondragstart = ev => ev.dataTransfer.setData("text/plain", "call:" + n.name);
+        det.appendChild(item);
+      }
+      host.appendChild(det);
     }
+  }
+  // The predefined operation families, in SCADE order.
+  for (const cat of (state.ops?.categories || [])) {
+    const det = document.createElement("details");
+    det.open = ["Mathematics", "Comparisons", "Logical"].includes(cat.name);
+    const sum = document.createElement("summary");
+    sum.textContent = cat.name;
+    det.appendChild(sum);
+    for (const op of cat.items) {
+      const item = document.createElement("div");
+      item.className = "op-item" + (op.enabled ? "" : " disabled");
+      item.textContent = op.label;
+      item.title = op.hint || (op.pins + " input pin" + (op.pins === 1 ? "" : "s"));
+      if (op.enabled) {
+        item.draggable = true;
+        item.ondragstart = ev =>
+          ev.dataTransfer.setData("text/plain", "op:" + op.id + (op.param ? ":" + op.param : ""));
+      }
+      det.appendChild(item);
+    }
+    host.appendChild(det);
   }
 }
 
@@ -1100,16 +1086,30 @@ const diagramHostEl = document.getElementById("diagram-host");
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
   ev.preventDefault();
-  const callee = ev.dataTransfer.getData("text/plain");
-  if (!callee || !state.diagramData) return;
+  const data = ev.dataTransfer.getData("text/plain");
+  if (!data || !state.diagramData) return;
   const svgEl = document.getElementById("diagram-svg");
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
   const x = snap(Math.max(0, ev.clientX - r.left));
   const y = snap(Math.max(0, ev.clientY - r.top));
-  const resp = await fetch("/api/edit/add_block_call", {
-    method: "POST",
-    body: JSON.stringify({ node: state.diagramData.node, callee, x, y }),
-  });
+
+  let url, payload;
+  if (data.startsWith("call:")) {
+    url = "/api/edit/add_block_call";
+    payload = { node: state.diagramData.node, callee: data.slice(5), x, y };
+  } else if (data.startsWith("op:")) {
+    const [, id, param] = data.split(":");
+    payload = { node: state.diagramData.node, op: id, x, y };
+    if (param) {
+      const asked = promptForParam(id, param);
+      if (asked === null) return;
+      payload.param = asked;
+    }
+    url = "/api/edit/add_operation";
+  } else {
+    return;
+  }
+  const resp = await fetch(url, { method: "POST", body: JSON.stringify(payload) });
   if (!resp.ok) {
     let msg = await resp.text();
     try { msg = JSON.parse(msg).error || msg; } catch (_) {}
@@ -1117,10 +1117,22 @@ diagramHostEl.addEventListener("drop", async ev => {
     return;
   }
   document.getElementById("diagram-status").textContent =
-    "placed " + callee + " — bind its red pins (right-click them)";
+    "placed — bind any red pins (right-click them)";
   await refresh();
   loadDiagram(state.diagramData.node, false);
 });
+
+function promptForParam(opId, kind) {
+  switch (kind) {
+    case "type": return prompt("numeric_cast target type (int8…int64, uint8…uint64, float32, float64):", "int32");
+    case "n": return prompt("to_nth_power: exponent n (2–8):", "2");
+    case "field": return prompt("field name to read:", "value");
+    case "index": return prompt("array index (constant):", "0");
+    default: return prompt(kind + ":", "");
+  }
+}
+
+// --- Right-click properties (variables, equations, ghost pins) -------------------
 
 function escapeAttr(s) {
   return escapeHTML(s).replace(/"/g, "&quot;");
@@ -1262,7 +1274,7 @@ function replaceIdent(text, from, to) {
   return text.replace(new RegExp("\\b" + esc + "\\b", "g"), to);
 }
 
-/// Bind an unbound (ghost) pin: rewrite every equation that mentions it.
+// Bind an unbound (ghost) pin: rewrite every equation that mentions it.
 async function propsBindGhost() {
   const from = state.props.name;
   const to = document.getElementById("prop-bind").value;
@@ -1288,7 +1300,301 @@ async function propsBindGhost() {
   loadDiagram(d.node, false);
 }
 
-// --- Editing ---
+// --- Verify (Kind 2) ------------------------------------------------------------
+
+async function proveRun() {
+  showDock("verify");
+  const t = document.getElementById("verify-timeout").value || "30";
+  document.getElementById("verify-status").textContent = "running kind2…";
+  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t), { method: "POST" });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  const host = document.getElementById("verify-results");
+  document.getElementById("verify-status").textContent = "";
+  if (data.error) {
+    host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    return;
+  }
+  if (!data.kind2_found) {
+    host.innerHTML = '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
+    return;
+  }
+  let html = "";
+  if (data.properties.length) {
+    html += "<table><thead><tr><th>property</th><th>status</th></tr></thead><tbody>";
+    for (const p of data.properties) {
+      const ok = (p.status || "").toLowerCase() === "valid";
+      html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
+        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td></tr>";
+      if (p.waveform) {
+        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre></td></tr>";
+      }
+    }
+    html += "</tbody></table>";
+  } else {
+    html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
+  }
+  host.innerHTML = html;
+}
+
+// --- Types: the SCADE-style types file --------------------------------------------
+
+async function loadTypes() {
+  let t;
+  try { t = await fetchJSON("/api/types"); } catch (e) { return; }
+  state.types = t;
+  document.getElementById("types-file-note").textContent = t.types_file
+    ? "Definitions save to " + t.types_file + "."
+    : "No types file in this workspace — definitions save into the model file.";
+  let html;
+  if (!t.types.length) {
+    html = '<span class="build-note">No named types yet — create one below.</span>';
+  } else {
+    html = "<table><thead><tr><th>name</th><th>kind</th><th>definition</th><th>package</th><th></th></tr></thead><tbody>";
+    for (const ty of t.types) {
+      const editable = ty.package !== "stdlib";
+      html += "<tr><td><code class='inline'>" + escapeHTML(ty.name) + "</code></td><td>" + ty.kind +
+        "</td><td>" + escapeHTML(ty.detail) + "</td><td>" + escapeHTML(ty.package) + "</td><td>" +
+        (editable ? '<button onclick="typesRemove(\'' + escapeAttr(ty.name) + '\')">Delete</button>' : "") +
+        "</td></tr>";
+    }
+    html += "</tbody></table>";
+  }
+  document.getElementById("types-list").innerHTML = html;
+  populateTypeSelect(document.getElementById("port-type"));
+}
+
+function typeOptions() {
+  const prims = state.types?.primitives ||
+    ["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64"];
+  return prims.concat((state.types?.types || []).map(t => t.name));
+}
+
+// Fill a type selector: primitives, then named types, then "custom…".
+// Every variable gets a defined data type — `bool` is the default until
+// the user picks something else.
+function populateTypeSelect(sel, current) {
+  if (!sel) return;
+  const prev = current !== undefined ? current : sel.value;
+  sel.innerHTML = "";
+  for (const t of typeOptions()) {
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  }
+  const custom = document.createElement("option");
+  custom.value = "(custom)"; custom.textContent = "custom…";
+  sel.appendChild(custom);
+  sel.value = typeOptions().includes(prev) ? prev : "bool";
+}
+
+function selectedType(selId, customId) {
+  const sel = document.getElementById(selId);
+  if (sel.value === "(custom)") {
+    return document.getElementById(customId).value.trim() || "bool";
+  }
+  return sel.value || "bool";
+}
+
+function setTypesStatus(ok, msg) {
+  const el = document.getElementById("types-status");
+  el.style.color = ok ? "#107c10" : "#c42b1c";
+  el.textContent = msg;
+}
+
+async function postTypeEdit(payload) {
+  const r = await fetch("/api/edit/add_type", { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setTypesStatus(false, msg);
+    return;
+  }
+  setTypesStatus(true, "saved ✓");
+  await refresh();
+}
+
+function typesAddEnum() {
+  postTypeEdit({
+    kind: "enum",
+    name: document.getElementById("type-enum-name").value.trim(),
+    variants: document.getElementById("type-enum-variants").value
+      .split(",").map(s => s.trim()).filter(Boolean),
+  });
+}
+
+function typesAddRecord() {
+  postTypeEdit({
+    kind: "record",
+    name: document.getElementById("type-record-name").value.trim(),
+    fields: parsePortsSpec(document.getElementById("type-record-fields").value),
+  });
+}
+
+function typesAddAlias() {
+  postTypeEdit({
+    kind: "alias",
+    name: document.getElementById("type-alias-name").value.trim(),
+    target: document.getElementById("type-alias-target").value.trim(),
+  });
+}
+
+async function typesRemove(name) {
+  const r = await fetch("/api/edit/remove_type", { method: "POST", body: JSON.stringify({ name }) });
+  if (!r.ok) {
+    let msg = await r.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    setTypesStatus(false, msg);
+    return;
+  }
+  setTypesStatus(true, "removed `" + name + "`");
+  await refresh();
+}
+
+// --- FSM authoring + state-diagram view --------------------------------------------
+
+async function loadFsmList() {
+  let data;
+  try { data = await fetchJSON("/api/fsm"); } catch (e) { return; }
+  const sel = document.getElementById("fsm-select");
+  sel.innerHTML = "";
+  for (const m of data.machines) {
+    const o = document.createElement("option");
+    o.value = m; o.textContent = m;
+    sel.appendChild(o);
+  }
+  if (!data.machines.length) {
+    document.getElementById("fsm-host").innerHTML =
+      '<span class="build-note">No state machines in the model file yet — create one below.</span>';
+  }
+}
+
+async function fsmView() {
+  const name = document.getElementById("fsm-select").value;
+  if (!name) return;
+  let m;
+  try { m = await fetchJSON("/api/fsm?name=" + encodeURIComponent(name)); }
+  catch (e) {
+    document.getElementById("fsm-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
+    return;
+  }
+  renderFsm(m);
+}
+
+function renderFsm(m) {
+  // States on a circle; transitions as labelled arcs.
+  const n = m.states.length;
+  const R = Math.max(120, n * 38), CX = R + 90, CY = R + 50;
+  const W = CX * 2, H = CY * 2;
+  const pos = {};
+  m.states.forEach((st, i) => {
+    const a = (2 * Math.PI * i) / n - Math.PI / 2;
+    pos[st.name] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+  });
+  let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  svg += '<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
+         '<path d="M0,0 L7,3 L0,6 z" fill="#4a4a4a"/></marker></defs>';
+  for (const st of m.states) {
+    for (const t of st.transitions) {
+      const a = pos[st.name], b = pos[t.target];
+      if (!a || !b) continue;
+      if (st.name === t.target) {
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (a.x + 28) + ' ' + (a.y - 12) +
+               ' C ' + (a.x + 75) + ' ' + (a.y - 55) + ', ' + (a.x + 75) + ' ' + (a.y + 30) +
+               ', ' + (a.x + 30) + ' ' + (a.y + 14) + '"/>';
+        svg += '<text class="label" x="' + (a.x + 60) + '" y="' + (a.y - 18) + '">' + escapeHTML(t.guard) + '</text>';
+      } else {
+        const mx = (a.x + b.x) / 2 + (a.y - b.y) * 0.18;
+        const my = (a.y + b.y) / 2 + (b.x - a.x) * 0.18;
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + a.x + ' ' + a.y +
+               ' Q ' + mx + ' ' + my + ' ' + b.x + ' ' + b.y + '"/>';
+        svg += '<text class="label" x="' + mx + '" y="' + my + '">' + escapeHTML(t.guard) + '</text>';
+      }
+    }
+  }
+  for (const st of m.states) {
+    const p = pos[st.name];
+    const initial = st.name === m.initial_state;
+    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="30" class="box"' +
+      (initial ? ' stroke="#107c10" stroke-width="2.4"' : '') + '/>';
+    svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
+    const eqs = st.equations.map(e => e.lhs + " = " + e.body).join("; ");
+    svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
+      escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
+  }
+  svg += "</svg>";
+  document.getElementById("fsm-host").innerHTML = svg;
+}
+
+function parsePortsSpec(text) {
+  // "tick: bool, emergency: bool" -> [{name, type}]
+  return text.split(",").map(s => s.trim()).filter(Boolean).map(s => {
+    const [name, type] = s.split(":").map(x => x.trim());
+    return { name, type: type || "bool" };
+  });
+}
+
+async function fsmCreate() {
+  const statesText = document.getElementById("fsm-states").value;
+  const transText = document.getElementById("fsm-transitions").value;
+  const states = {};
+  const order = [];
+  for (const line of statesText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const ci = t.indexOf(":");
+    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return; }
+    const name = t.slice(0, ci).trim();
+    const eqs = t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean).map(e => {
+      const ei = e.indexOf("=");
+      return { lhs: e.slice(0, ei).trim(), body: e.slice(ei + 1).trim() };
+    });
+    states[name] = { name, equations: eqs, transitions: [] };
+    order.push(name);
+  }
+  for (const line of transText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
+    if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return; }
+    const [, from, to, guard] = m;
+    if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return; }
+    states[from].transitions.push({ guard: guard.trim(), target: to });
+  }
+  const payload = {
+    name: document.getElementById("fsm-name").value.trim(),
+    initial_state: document.getElementById("fsm-initial").value.trim(),
+    inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
+    outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
+    states: order.map(n => states[n]),
+  };
+  const r = await fetch("/api/edit/add_state_machine", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setFsmStatus(false, msg);
+    return;
+  }
+  setFsmStatus(true, "created ✓ — the machine lowers to dataflow and is ready to simulate");
+  await refresh();
+  await loadFsmList();
+  document.getElementById("fsm-select").value = payload.name;
+  fsmView();
+}
+
+function setFsmStatus(ok, msg) {
+  const el = document.getElementById("fsm-status");
+  el.style.color = ok ? "#107c10" : "#c42b1c";
+  el.textContent = msg;
+}
+
+// --- Editing dialogs ----------------------------------------------------------------
 
 function populateEditSelectors() {
   const names = [];
@@ -1310,7 +1616,7 @@ function populateEditSelectors() {
     if (names.includes(prev)) sel.value = prev;
     else if (state.selectedNode && names.includes(state.selectedNode.name)) sel.value = state.selectedNode.name;
   }
-  // Palette: stdlib blocks as insertable call chips.
+  // Palette: stdlib blocks as insertable call chips (textual equation dialog).
   const pal = document.getElementById("palette");
   pal.innerHTML = "";
   const stdpkg = state.inspect.project.packages.find(p => p.name === "stdlib");
@@ -1331,6 +1637,7 @@ function populateEditSelectors() {
   if (!blocks.length) {
     pal.innerHTML = '<span class="build-note">start the server with --with-stdlib libraries to get the 41-block palette</span>';
   }
+  renderToolbox();
 }
 
 function setEditStatus(ok, msg) {
@@ -1350,15 +1657,26 @@ async function postEdit(path, payload) {
   }
   setEditStatus(true, "saved ✓");
   await refresh();
-  if (currentTab() === "diagram" && state.selectedNode) loadDiagram(state.selectedNode.name);
+  if (state.diagramData) loadDiagram(state.diagramData.node, false);
   return true;
 }
 
-function editAddNode() {
-  postEdit("/api/edit/add_node", {
-    name: document.getElementById("new-node-name").value.trim(),
+async function editAddNode() {
+  const name = document.getElementById("new-node-name").value.trim();
+  const ok = await postEdit("/api/edit/add_node", {
+    name,
     kind: document.getElementById("new-node-kind").value,
   });
+  if (ok) {
+    // SCADE flow: a fresh operator opens as a blank canvas immediately.
+    closeDialog();
+    const n = findNode(name);
+    if (n) {
+      selectNode(n);
+      state.diagramStack = [];
+      loadDiagram(name);
+    }
+  }
 }
 
 function editAddPort() {
@@ -1390,7 +1708,7 @@ function editSetMain() {
   });
 }
 
-// --- Stepped simulation (full trace: every item, every cycle) ---
+// --- Stepped simulation (full trace: every item, every cycle) ------------------------
 
 function populateStepInputs() {
   const e = entryNode();
@@ -1440,12 +1758,6 @@ async function stepOnce() {
   renderStepTrace(trace);
 }
 
-function stepReset() {
-  state.stepHistory = "";
-  document.getElementById("step-trace").innerHTML = "";
-  document.getElementById("step-cycle").textContent = "0";
-}
-
 function renderStepTrace(csv) {
   const lines = csv.trim().split("\n");
   if (!lines.length) return;
@@ -1464,7 +1776,7 @@ function escapeHTML(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// --- Tests: golden-trace scenarios, run against IR sim AND compiled C ---
+// --- Tests: golden-trace scenarios, run against IR sim AND compiled C ------------------
 
 async function loadTests() {
   let t;
@@ -1478,7 +1790,7 @@ async function loadTests() {
   document.getElementById("tests-dir").textContent = t.scenarios_dir;
   const host = document.getElementById("tests-scenarios");
   if (!t.scenarios.length) {
-    host.innerHTML = '<span class="build-note">No scenarios yet. Add input vectors as <code>NAME.csv</code> (header row = main-node inputs) to the scenarios directory, then Record goldens.</span>';
+    host.innerHTML = '<span class="build-note">No scenarios yet. Add input vectors as <code>NAME.csv</code> (header row = main-operator inputs) to the scenarios directory, then Record goldens.</span>';
     return;
   }
   let html = "<table><thead><tr><th>scenario</th><th>golden</th></tr></thead><tbody>";
@@ -1495,6 +1807,7 @@ async function loadTests() {
 }
 
 async function testsRun() {
+  showDock("tests");
   document.getElementById("tests-summary").textContent = "running…";
   const r = await fetch("/api/tests/run", { method: "POST" });
   const text = await r.text();
@@ -1548,6 +1861,7 @@ async function testsRun() {
 }
 
 async function testsRecord() {
+  showDock("tests");
   document.getElementById("tests-summary").textContent = "recording…";
   const r = await fetch("/api/tests/record", { method: "POST" });
   const text = await r.text();
@@ -1564,7 +1878,7 @@ async function testsRecord() {
   loadTests();
 }
 
-// --- Build: save each generated file via a data: download link. ---
+// --- Generate C-Lite: save each generated file via a data: download link. -------------
 
 async function downloadBuild() {
   const files = [
@@ -1590,6 +1904,7 @@ document.getElementById("port-type").addEventListener("change", () => {
 });
 
 refresh();
+loadToolbox();
 // Live-reload — the model file may be edited externally.
 setInterval(refresh, 5000);
 </script>

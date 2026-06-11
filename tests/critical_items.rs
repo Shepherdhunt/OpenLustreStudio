@@ -153,10 +153,11 @@ fn diagram_exposes_callee_names_for_dive_navigation() {
     let d: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(d["node"], "RisingEdge");
 
-    // The SPA carries the new tabs and the dive/breadcrumb machinery.
+    // The SPA carries the Verify dock, the FSM dialog, and the
+    // dive/breadcrumb machinery.
     let (_, html) = request(port, "GET", "/", "").expect("spa");
-    assert!(html.contains("data-tab=\"verify\""));
-    assert!(html.contains("data-tab=\"fsm\""));
+    assert!(html.contains("data-dock=\"verify\""));
+    assert!(html.contains("dlg-fsm"));
     assert!(html.contains("diagram-crumbs"));
 }
 

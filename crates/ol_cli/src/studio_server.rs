@@ -220,6 +220,13 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             apply_edit_response(ctx, body, edit_remove_equation)
         }
         ("POST", "/api/edit/add_block_call") => add_block_call_response(ctx, body),
+        ("GET", "/api/operations") => (
+            200,
+            "application/json",
+            operations_catalog().to_string().into_bytes(),
+        ),
+        ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
+        ("POST", "/api/clite/compile") => clite_compile_response(ctx, body),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -1719,4 +1726,354 @@ fn add_block_call_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
     }
+}
+
+// --- Predefined operations: the SCADE-style toolbox --------------------------
+
+/// One predefined operation the toolbox offers. `pins` is the number of
+/// ghost input pins the dropped instance starts with; `param` names an extra
+/// piece of information the GUI must collect (`n`, `type`, `field`, `index`).
+struct OpDef {
+    id: &'static str,
+    label: &'static str,
+    pins: u8,
+    out_type: &'static str,
+    param: Option<&'static str>,
+    enabled: bool,
+    hint: &'static str,
+}
+
+const fn op(id: &'static str, label: &'static str, pins: u8, out_type: &'static str) -> OpDef {
+    OpDef { id, label, pins, out_type, param: None, enabled: true, hint: "" }
+}
+
+/// The toolbox, in SCADE's operator-family order.
+fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
+    vec![
+        ("Mathematics", vec![
+            op("plus", "plus (+)", 2, "int32"),
+            op("minus", "minus (-)", 2, "int32"),
+            op("multiply", "multiply (*)", 2, "int32"),
+            op("divide", "divide (/)", 2, "int32"),
+            op("modulo", "modulo (mod)", 2, "int32"),
+            OpDef { id: "numeric_cast", label: "numeric_cast", pins: 1, out_type: "int32",
+                    param: Some("type"), enabled: true, hint: "convert to int8…uint64, float32/64" },
+            OpDef { id: "square_root", label: "square_root", pins: 1, out_type: "float64",
+                    param: None, enabled: false,
+                    hint: "needs float intrinsics (sqrt) across sim/C/Lustre — roadmap" },
+            op("squared", "squared (x*x)", 1, "int32"),
+            op("cubed", "cubed (x*x*x)", 1, "int32"),
+            OpDef { id: "to_nth_power", label: "to_nth_power(n)", pins: 1, out_type: "int32",
+                    param: Some("n"), enabled: true, hint: "n between 2 and 8" },
+        ]),
+        ("Comparisons", vec![
+            op("equal", "equal (=)", 2, "bool"),
+            op("not_equal", "not equal (<>)", 2, "bool"),
+            op("greater_than", "greater than (>)", 2, "bool"),
+            op("greater_equal", "greater or equal (>=)", 2, "bool"),
+            op("less_than", "less than (<)", 2, "bool"),
+            op("less_equal", "less or equal (<=)", 2, "bool"),
+        ]),
+        ("Logical", vec![
+            op("and", "and", 2, "bool"),
+            op("or", "or", 2, "bool"),
+            op("xor", "xor", 2, "bool"),
+            op("not", "not", 1, "bool"),
+            op("implies", "implies (=>)", 2, "bool"),
+        ]),
+        ("Structures/Arrays", vec![
+            OpDef { id: "record_field", label: "field access (.f)", pins: 1, out_type: "int32",
+                    param: Some("field"), enabled: true, hint: "read one field of a structure" },
+            OpDef { id: "array_index", label: "array index ([i])", pins: 1, out_type: "int32",
+                    param: Some("index"), enabled: true, hint: "read one element by constant index" },
+        ]),
+        ("Time/Statefuls", vec![
+            op("init_pre", "init -> pre (followed by)", 2, "int32"),
+            op("arrow", "init -> (initialization)", 2, "int32"),
+        ]),
+        ("Choice", vec![
+            op("if_then_else", "if / then / else", 3, "int32"),
+        ]),
+        ("Bitwise", vec![
+            op("bit_and", "bitwise and (&)", 2, "int32"),
+            op("bit_or", "bitwise or (|)", 2, "int32"),
+            op("bit_xor", "bitwise xor (^)", 2, "int32"),
+            op("shift_left", "shift left (<<)", 2, "int32"),
+            op("shift_right", "shift right (>>)", 2, "int32"),
+        ]),
+        ("Higher Order", vec![
+            OpDef { id: "map", label: "map", pins: 0, out_type: "int32", param: None,
+                    enabled: false, hint: "array iterators — roadmap" },
+            OpDef { id: "fold", label: "fold", pins: 0, out_type: "int32", param: None,
+                    enabled: false, hint: "array iterators — roadmap" },
+        ]),
+    ]
+}
+
+fn operations_catalog() -> serde_json::Value {
+    let cats: Vec<serde_json::Value> = operation_families()
+        .into_iter()
+        .map(|(name, items)| {
+            serde_json::json!({
+                "name": name,
+                "items": items.iter().map(|o| serde_json::json!({
+                    "id": o.id,
+                    "label": o.label,
+                    "pins": o.pins,
+                    "param": o.param,
+                    "enabled": o.enabled,
+                    "hint": o.hint,
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "schema_version": 1, "categories": cats })
+}
+
+/// Build the equation body for an operation given its ghost pin names and
+/// the collected parameter. Returns (body text, out type text).
+fn operation_body(
+    opdef: &OpDef,
+    pins: &[String],
+    param: Option<&str>,
+) -> Result<(String, String), String> {
+    let a = pins.first().cloned().unwrap_or_default();
+    let b = pins.get(1).cloned().unwrap_or_default();
+    let c = pins.get(2).cloned().unwrap_or_default();
+    let body = match opdef.id {
+        "plus" => format!("{a} + {b}"),
+        "minus" => format!("{a} - {b}"),
+        "multiply" => format!("{a} * {b}"),
+        "divide" => format!("{a} / {b}"),
+        "modulo" => format!("{a} mod {b}"),
+        "squared" => format!("{a} * {a}"),
+        "cubed" => format!("{a} * {a} * {a}"),
+        "to_nth_power" => {
+            let n: u32 = param
+                .and_then(|p| p.parse().ok())
+                .ok_or("to_nth_power needs integer parameter `n`")?;
+            if !(2..=8).contains(&n) {
+                return Err("to_nth_power: n must be between 2 and 8".into());
+            }
+            vec![a.clone(); n as usize].join(" * ")
+        }
+        "numeric_cast" => {
+            let t = param.ok_or("numeric_cast needs parameter `type`")?;
+            let ty = ol_stdlib::parse_type(t).map_err(|e| format!("cast type `{t}`: {e}"))?;
+            if !ty.is_numeric() {
+                return Err(format!("numeric_cast target must be numeric, got `{t}`"));
+            }
+            let body = format!("{t}({a})");
+            return Ok((body, t.to_string()));
+        }
+        "equal" => format!("{a} = {b}"),
+        "not_equal" => format!("{a} <> {b}"),
+        "greater_than" => format!("{a} > {b}"),
+        "greater_equal" => format!("{a} >= {b}"),
+        "less_than" => format!("{a} < {b}"),
+        "less_equal" => format!("{a} <= {b}"),
+        "and" => format!("{a} and {b}"),
+        "or" => format!("{a} or {b}"),
+        "xor" => format!("{a} xor {b}"),
+        "not" => format!("not {a}"),
+        "implies" => format!("{a} => {b}"),
+        "record_field" => {
+            let f = param.ok_or("field access needs parameter `field`")?;
+            if !is_identifier(f) {
+                return Err(format!("`{f}` is not a valid field name"));
+            }
+            format!("{a}.{f}")
+        }
+        "array_index" => {
+            let i: u64 = param
+                .and_then(|p| p.parse().ok())
+                .ok_or("array index needs integer parameter `index`")?;
+            format!("{a}[{i}]")
+        }
+        "init_pre" => format!("{a} -> pre {b}"),
+        "arrow" => format!("{a} -> {b}"),
+        "if_then_else" => format!("if {a} then {b} else {c}"),
+        "bit_and" => format!("{a} & {b}"),
+        "bit_or" => format!("{a} | {b}"),
+        "bit_xor" => format!("{a} ^ {b}"),
+        "shift_left" => format!("{a} << {b}"),
+        "shift_right" => format!("{a} >> {b}"),
+        other => return Err(format!("unknown operation `{other}`")),
+    };
+    Ok((body, opdef.out_type.to_string()))
+}
+
+/// Drop a predefined operation onto a node's canvas at (x, y): a fresh typed
+/// local receives the result, the inputs start as red unbound pins, and the
+/// new equation lands at the drop position.
+fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let host_name = match req.get("node").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return bad("missing string field `node`"),
+    };
+    let op_id = match req.get("op").and_then(|v| v.as_str()) {
+        Some(o) => o.to_string(),
+        None => return bad("missing string field `op`"),
+    };
+    let x = req.get("x").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let y = req.get("y").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let param = req.get("param").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let opdef = match operation_families()
+        .into_iter()
+        .flat_map(|(_, items)| items)
+        .find(|o| o.id == op_id)
+    {
+        Some(o) => o,
+        None => return bad(&format!("unknown operation `{op_id}`")),
+    };
+    if !opdef.enabled {
+        return bad(&format!("`{op_id}` is not implemented yet: {}", opdef.hint));
+    }
+
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host_name) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
+        };
+        let eq_index = node.equations.len();
+        let pins: Vec<String> = (1..=opdef.pins)
+            .map(|k| format!("p{eq_index}_{k}"))
+            .collect();
+        let (body_text, out_type) = match operation_body(&opdef, &pins, param.as_deref()) {
+            Ok(v) => v,
+            Err(e) => return bad(&e),
+        };
+        let rhs = match ol_stdlib::parse_expr(&body_text) {
+            Ok(e) => e,
+            Err(e) => return bad(&format!("internal template error: {e}")),
+        };
+        let out_ty = match ol_stdlib::parse_type(&out_type) {
+            Ok(t) => t,
+            Err(e) => return bad(&format!("internal out-type error: {e}")),
+        };
+        let known: std::collections::HashSet<String> = node
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(node.outputs.iter().map(|p| p.name.clone()))
+            .chain(node.locals.iter().map(|l| l.name.clone()))
+            .collect();
+        let base = format!("{op_id}{eq_index}");
+        let mut lhs_name = base.clone();
+        let mut n = 2;
+        while known.contains(&lhs_name) {
+            lhs_name = format!("{base}_{n}");
+            n += 1;
+        }
+        node.locals.push(ol_ir::Local { name: lhs_name.clone(), ty: out_ty });
+        node.equations.push(ol_ir::Equation { lhs: vec![lhs_name.clone()], rhs });
+        node.diagram
+            .positions
+            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y });
+        node.diagram
+            .positions
+            .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y });
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+// --- Compile C-Lite: emit + compile into a user directory --------------------
+
+/// Emit the selected root's C (header, source, driver, monitors, Makefile)
+/// into `out_dir` and compile it on this machine with the requested
+/// compiler. Cross-compilation is not attempted — the target is the host.
+fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let compiler = req.get("compiler").and_then(|v| v.as_str()).unwrap_or("auto");
+    let out_dir = match req.get("out_dir").and_then(|v| v.as_str()) {
+        Some(d) if !d.trim().is_empty() => PathBuf::from(d),
+        _ => ctx
+            .model
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("build"),
+    };
+
+    let project = match sliced_for_main(ctx) {
+        Ok(p) => p,
+        Err(e) => return bad(&e),
+    };
+    let entry_name = match project.main.clone() {
+        Some(m) => m,
+        None => return bad("project has no `main` operator; set one first"),
+    };
+    let entry = match project.find_node(&entry_name) {
+        Some(n) => n.clone(),
+        None => return bad(&format!("main operator `{entry_name}` not found")),
+    };
+
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        return bad(&format!("creating {}: {e}", out_dir.display()));
+    }
+    let bundle = ol_clite_emit::emit_project(&project);
+    let has_contract = entry.contract.is_some();
+    let driver = if has_contract {
+        ol_clite_emit::harness::emit_csv_driver_with_monitor(&entry, entry.contract.as_deref())
+    } else {
+        ol_clite_emit::harness::emit_csv_driver(&entry)
+    };
+    let mut wrote = vec![
+        ("openlustre_generated.h", bundle.header),
+        ("openlustre_generated.c", bundle.source),
+        ("driver.c", driver),
+        ("Makefile", crate::makefile_for_entry(&entry_name)),
+    ];
+    let mut sources = vec!["openlustre_generated.c", "driver.c"];
+    if has_contract {
+        let mon = ol_clite_emit::monitor::emit_monitors(&project);
+        wrote.push(("openlustre_monitors.h", mon.header));
+        wrote.push(("openlustre_monitors.c", mon.source));
+        sources.push("openlustre_monitors.c");
+    }
+    for (name, text) in &wrote {
+        if let Err(e) = std::fs::write(out_dir.join(name), text) {
+            return bad(&format!("writing {name}: {e}"));
+        }
+    }
+
+    let exe_name = if cfg!(windows) {
+        format!("{entry_name}.exe")
+    } else {
+        entry_name.clone()
+    };
+    let compile_log =
+        crate::scenario::compile_in_dir(&out_dir, &sources, &exe_name, Some(compiler));
+    let (compiled, log) = match compile_log {
+        Ok(l) => (true, l),
+        Err(e) => (false, e),
+    };
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "out_dir": out_dir.display().to_string(),
+        "wrote": wrote.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+        "compiled": compiled,
+        "exe": if compiled { serde_json::Value::String(out_dir.join(&exe_name).display().to_string()) } else { serde_json::Value::Null },
+        "log": log,
+    });
+    (200, "application/json", value.to_string().into_bytes())
 }

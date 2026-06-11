@@ -505,6 +505,20 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen)?;
+                    // A "call" to a numeric type name is SCADE's numeric_cast:
+                    // `int16(x)`, `float64(x)`.
+                    if let Some(ty) = numeric_type_name(&name) {
+                        if args.len() != 1 {
+                            return Err(ParseError::Expected {
+                                expected: format!("exactly one argument for cast `{name}(...)`"),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        return Ok(Expr::Cast {
+                            to: ty,
+                            arg: Box::new(args.pop().unwrap()),
+                        });
+                    }
                     Ok(Expr::call(name, args))
                 } else {
                     Ok(Expr::var(name))
@@ -517,6 +531,25 @@ impl Parser {
             None => Err(ParseError::UnexpectedEof),
         }
     }
+}
+
+/// Numeric type names usable as casts (`int16(x)`). Booleans and named
+/// types are deliberately excluded — numeric_cast converts representations,
+/// not meanings.
+fn numeric_type_name(name: &str) -> Option<Type> {
+    Some(match name {
+        "int8" => Type::Int8,
+        "int16" => Type::Int16,
+        "int" | "int32" => Type::Int32,
+        "int64" => Type::Int64,
+        "uint8" => Type::Uint8,
+        "uint16" => Type::Uint16,
+        "uint32" => Type::Uint32,
+        "uint64" => Type::Uint64,
+        "float32" => Type::Float32,
+        "real" | "float64" => Type::Float64,
+        _ => return None,
+    })
 }
 
 /// Parse a textual OpenLustre expression into IR.

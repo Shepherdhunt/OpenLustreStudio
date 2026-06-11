@@ -113,6 +113,10 @@ name = "studio_workspace_types"
 path = "studio_workspace_types.rs"
 
 [[test]]
+name = "numeric_cast_and_operations"
+path = "numeric_cast_and_operations.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

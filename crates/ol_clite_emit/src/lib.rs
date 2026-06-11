@@ -210,9 +210,10 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
                 walk_call_targets(a, f);
             }
         }
-        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
-            walk_call_targets(arg, f)
-        }
+        Expr::Unary { arg, .. }
+        | Expr::Pre { arg }
+        | Expr::Field { base: arg, .. }
+        | Expr::Cast { arg, .. } => walk_call_targets(arg, f),
         Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
             walk_call_targets(lhs, f);
             walk_call_targets(rhs, f);
@@ -268,9 +269,10 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
         return;
     }
     match expr {
-        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
-            walk_calls_assign(arg, map, idx)
-        }
+        Expr::Unary { arg, .. }
+        | Expr::Pre { arg }
+        | Expr::Field { base: arg, .. }
+        | Expr::Cast { arg, .. } => walk_calls_assign(arg, map, idx),
         Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
             walk_calls_assign(lhs, map, idx);
             walk_calls_assign(rhs, map, idx);
@@ -455,9 +457,10 @@ fn collect_stateful(
         return;
     }
     match expr {
-        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Field { base: arg, .. } => {
-            collect_stateful(arg, call_sites, project, out)
-        }
+        Expr::Unary { arg, .. }
+        | Expr::Pre { arg }
+        | Expr::Field { base: arg, .. }
+        | Expr::Cast { arg, .. } => collect_stateful(arg, call_sites, project, out),
         Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
             collect_stateful(lhs, call_sites, project, out);
             collect_stateful(rhs, call_sites, project, out);
@@ -587,6 +590,10 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             (vec![], s)
         }
         Expr::Var { name } => (vec![], ctx.scope.ref_var(name)),
+        Expr::Cast { to, arg } => {
+            let (s, a) = lower_anf(arg, ctx);
+            (s, format!("(({}){a})", to.c_name()))
+        }
         Expr::Unary { op, arg } => {
             let (s, a) = lower_anf(arg, ctx);
             let r = match op {
@@ -758,7 +765,7 @@ fn collect_pre_vars(
                 collect_pre_vars(arg, env, out, seen);
             }
         }
-        Expr::Unary { arg, .. } => collect_pre_vars(arg, env, out, seen),
+        Expr::Unary { arg, .. } | Expr::Cast { arg, .. } => collect_pre_vars(arg, env, out, seen),
         Expr::Binary { lhs, rhs, .. } => {
             collect_pre_vars(lhs, env, out, seen);
             collect_pre_vars(rhs, env, out, seen);

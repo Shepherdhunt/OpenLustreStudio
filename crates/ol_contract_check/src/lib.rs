@@ -560,7 +560,7 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
             Expr::Const { .. } | Expr::Var { .. } => true,
             Expr::Pre { arg } => walk(arg, name, true),
             Expr::Arrow { init, body } => walk(init, name, in_pre) && walk(body, name, in_pre),
-            Expr::Unary { arg, .. } => walk(arg, name, in_pre),
+            Expr::Unary { arg, .. } | Expr::Cast { arg, .. } => walk(arg, name, in_pre),
             Expr::Binary { lhs, rhs, .. } => walk(lhs, name, in_pre) && walk(rhs, name, in_pre),
             Expr::IfThenElse {
                 cond,

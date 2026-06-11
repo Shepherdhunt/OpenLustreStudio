@@ -170,6 +170,9 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         Expr::Const { lit: Literal::Int { value } } => format!("({value})"),
         Expr::Const { lit: Literal::Float { value } } => format!("({value})"),
         Expr::Var { name } => scope.ref_name(name),
+        Expr::Cast { to, arg } => {
+            format!("(({}){})", to.c_name(), emit_mon_expr(arg, scope))
+        }
         Expr::Unary { op, arg } => {
             let a = emit_mon_expr(arg, scope);
             match op {

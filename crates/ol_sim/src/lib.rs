@@ -517,6 +517,39 @@ fn evaluate_monitor(
     }
 }
 
+/// C cast semantics for in-range values: integer narrowing wraps two's
+/// complement, float→int truncates toward zero, and float32 targets round
+/// through `f32` so the trace matches what the generated C computes.
+fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
+    let out = match (to, v) {
+        (Type::Float32, Value::Int(i)) => Value::Float((i as f32) as f64),
+        (Type::Float32, Value::Float(f)) => Value::Float((f as f32) as f64),
+        (Type::Float64, Value::Int(i)) => Value::Float(i as f64),
+        (Type::Float64, Value::Float(f)) => Value::Float(f),
+        (t, Value::Int(i)) if t.is_integer() => Value::Int(narrow_int(t, i)),
+        (t, Value::Float(f)) if t.is_integer() => Value::Int(narrow_int(t, f as i64)),
+        (t, v) => {
+            return Err(SimError::EvalError(format!(
+                "cannot cast {v:?} to {t:?}"
+            )))
+        }
+    };
+    Ok(out)
+}
+
+fn narrow_int(t: &Type, i: i64) -> i64 {
+    match t {
+        Type::Int8 => i as i8 as i64,
+        Type::Int16 => i as i16 as i64,
+        Type::Int32 => i as i32 as i64,
+        Type::Uint8 => i as u8 as i64,
+        Type::Uint16 => i as u16 as i64,
+        Type::Uint32 => i as u32 as i64,
+        // 64-bit targets keep the i64 carrier's bit pattern unchanged.
+        _ => i,
+    }
+}
+
 fn eval(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
@@ -592,6 +625,10 @@ fn eval(
             } else {
                 eval(body, env, state, call_states, project, cov)
             }
+        }
+        Expr::Cast { to, arg } => {
+            let v = eval(arg, env, state, call_states, project, cov)?;
+            cast_value(to, v)
         }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, cov),
         Expr::Field { base, field } => {

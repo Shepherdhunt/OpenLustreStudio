@@ -40,7 +40,7 @@ pub fn emit_package(pkg: &Package, out: &mut String) {
                 "const {} : {} = {};",
                 c.name,
                 c.ty.lustre_name(),
-                format_expr(&c.value)
+                format_expr_lustre(&c.value)
             );
         }
         out.push('\n');
@@ -113,21 +113,32 @@ pub fn emit_node(node: &NodeDef, out: &mut String) {
         } else {
             format!("({})", eq.lhs.join(", "))
         };
-        let _ = writeln!(out, "  {lhs} = {};", format_expr(&eq.rhs));
+        let _ = writeln!(out, "  {lhs} = {};", format_expr_lustre(&eq.rhs));
     }
     let _ = writeln!(out, "tel");
 }
 
+/// Surface formatter: round-trips through `ol_stdlib::parse_expr`, so the
+/// GUI can show and re-parse equations (casts print as `int16(x)`).
 pub fn format_expr(expr: &Expr) -> String {
-    format_expr_prec(expr, 0)
+    format_expr_prec(expr, 0, false)
 }
 
-fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
+/// Kind 2 formatter: identical except for constructs standard Lustre lacks.
+/// Casts emit as `int_cast(...)` / `real_cast(...)` function calls — the
+/// same convention as `bit_and`/`bit_or` — so a user can supply matching
+/// Lustre functions when proving models that convert between families.
+/// (Integer widths are already collapsed to unbounded `int` in this view.)
+pub fn format_expr_lustre(expr: &Expr) -> String {
+    format_expr_prec(expr, 0, true)
+}
+
+fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
     let (text, prec) = match expr {
         Expr::Const { lit } => (format_literal(lit), 100),
         Expr::Var { name } => (name.clone(), 100),
         Expr::Unary { op, arg } => {
-            let inner = format_expr_prec(arg, 90);
+            let inner = format_expr_prec(arg, 90, lustre);
             let t = match op {
                 UnaryOp::Not => format!("not {inner}"),
                 UnaryOp::Neg => format!("- {inner}"),
@@ -139,13 +150,13 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
             // function calls (`bit_and`, `bit_or`, ...) so a user can supply
             // matching imported Lustre functions for Kind 2.
             if let Some(fname) = bit_op_name(*op) {
-                let l = format_expr_prec(lhs, 0);
-                let r = format_expr_prec(rhs, 0);
+                let l = format_expr_prec(lhs, 0, lustre);
+                let r = format_expr_prec(rhs, 0, lustre);
                 (format!("{fname}({l}, {r})"), 100)
             } else {
                 let (sym, prec) = bin_op_syntax(*op);
-                let l = format_expr_prec(lhs, prec);
-                let r = format_expr_prec(rhs, prec + 1);
+                let l = format_expr_prec(lhs, prec, lustre);
+                let r = format_expr_prec(rhs, prec + 1, lustre);
                 (format!("{l} {sym} {r}"), prec)
             }
         }
@@ -154,45 +165,80 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8) -> String {
             then_branch,
             else_branch,
         } => {
-            let c = format_expr_prec(cond, 0);
-            let t = format_expr_prec(then_branch, 0);
-            let e = format_expr_prec(else_branch, 0);
+            let c = format_expr_prec(cond, 0, lustre);
+            let t = format_expr_prec(then_branch, 0, lustre);
+            let e = format_expr_prec(else_branch, 0, lustre);
             (format!("if {c} then {t} else {e}"), 5)
         }
-        Expr::Pre { arg } => (format!("pre {}", format_expr_prec(arg, 80)), 80),
+        Expr::Pre { arg } => (format!("pre {}", format_expr_prec(arg, 80, lustre)), 80),
         Expr::Arrow { init, body } => {
-            let i = format_expr_prec(init, 15);
-            let b = format_expr_prec(body, 14);
+            let i = format_expr_prec(init, 15, lustre);
+            let b = format_expr_prec(body, 14, lustre);
             (format!("{i} -> {b}"), 15)
         }
         Expr::Call { node, args } => {
             let parts = args
                 .iter()
-                .map(|a| format_expr_prec(a, 0))
+                .map(|a| format_expr_prec(a, 0, lustre))
                 .collect::<Vec<_>>()
                 .join(", ");
             (format!("{node}({parts})"), 100)
         }
         Expr::Field { base, field } => {
-            (format!("{}.{field}", format_expr_prec(base, 100)), 100)
+            (format!("{}.{field}", format_expr_prec(base, 100, lustre)), 100)
         }
         Expr::Index { base, index } => (
-            format!("{}[{}]", format_expr_prec(base, 100), format_expr_prec(index, 0)),
+            format!(
+                "{}[{}]",
+                format_expr_prec(base, 100, lustre),
+                format_expr_prec(index, 0, lustre)
+            ),
             100,
         ),
         Expr::Tuple { items } => {
             let parts = items
                 .iter()
-                .map(|i| format_expr_prec(i, 0))
+                .map(|i| format_expr_prec(i, 0, lustre))
                 .collect::<Vec<_>>()
                 .join(", ");
             (format!("({parts})"), 100)
+        }
+        Expr::Cast { to, arg } => {
+            let a = format_expr_prec(arg, 0, lustre);
+            let t = if lustre {
+                let f = if to.is_float() { "real_cast" } else { "int_cast" };
+                format!("{f}({a})")
+            } else {
+                format!("{}({a})", cast_type_name(to))
+            };
+            (t, 100)
         }
     };
     if prec < parent_prec {
         format!("({text})")
     } else {
         text
+    }
+}
+
+/// The surface token for a cast target — exactly what `parse_type` accepts,
+/// so a formatted cast parses back to the same IR.
+fn cast_type_name(t: &ol_ir::Type) -> &'static str {
+    use ol_ir::Type::*;
+    match t {
+        Int8 => "int8",
+        Int16 => "int16",
+        Int32 => "int32",
+        Int64 => "int64",
+        Uint8 => "uint8",
+        Uint16 => "uint16",
+        Uint32 => "uint32",
+        Uint64 => "uint64",
+        Float32 => "float32",
+        Float64 => "float64",
+        // Non-numeric targets are rejected by the typechecker; this arm only
+        // affects how an already-invalid model is displayed.
+        _ => "int32",
     }
 }
 
