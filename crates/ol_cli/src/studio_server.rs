@@ -414,10 +414,23 @@ fn run_sim(ctx: &ServerCtx, csv: &str, full: bool) -> Result<String, String> {
 
 // --- Diagram: a renderable dataflow view of one node ---
 
+/// Identifiers quoted in backticks inside a diagnostic message — the hook
+/// that lets the diagram map a typecheck error onto the boxes and wires that
+/// caused it.
+fn backticked(msg: &str) -> Vec<String> {
+    msg.split('`').skip(1).step_by(2).map(|s| s.to_string()).collect()
+}
+
 /// Build a diagram JSON for the requested node (or `main`). Inputs, locals,
 /// equations, and outputs become boxes; wires are derived from each
 /// equation's free variables (reads) and its lhs (writes). The front end
 /// lays these out in columns and draws SVG lines — no layout engine needed.
+///
+/// Every wire and box also carries validity: reads or writes of undeclared
+/// names become red "ghost" boxes with red wires, and typecheck errors for
+/// this node are mapped onto the equation boxes (and their defining wires)
+/// whose lhs the message names. Errors that cannot be pinned to an element
+/// are returned in `problems` and rendered as a banner.
 fn build_diagram(
     ctx: &ServerCtx,
     query: &std::collections::HashMap<String, String>,
@@ -440,16 +453,95 @@ fn build_diagram(
         .chain(node.locals.iter().map(|l| l.name.as_str()))
         .collect();
 
+    // Free variables that are global constants or enum variants are
+    // expression inputs, not wires — and not errors.
+    let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            globals.insert(c.name.clone());
+        }
+        for t in &pkg.types {
+            if let ol_ir::TypeBody::Enum(e) = &t.body {
+                globals.extend(e.variants.iter().cloned());
+            }
+        }
+    }
+
+    // Map this node's typecheck errors onto equations (by lhs name), onto
+    // never-assigned ports, or onto ghosts; the rest become banner problems.
+    let report = ol_typecheck::check_project(&project);
+    let node_ctx = format!("node {node_name}");
+    let mut eq_problems: Vec<Vec<String>> = vec![Vec::new(); node.equations.len()];
+    let mut box_problems: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut box_warnings: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut ghost_reasons: std::collections::BTreeMap<String, String> = Default::default();
+    let mut problems: Vec<String> = Vec::new();
+    for d in report
+        .diagnostics
+        .iter()
+        .filter(|d| d.context.iter().any(|c| c == &node_ctx))
+    {
+        let names = backticked(&d.message);
+        let mut mapped = false;
+        for n in &names {
+            if !known.contains(n.as_str()) {
+                if !globals.contains(n) && node.equations.iter().any(|eq| {
+                    eq.lhs.iter().any(|l| l == n) || eq.rhs.free_vars().iter().any(|v| v == n)
+                }) {
+                    ghost_reasons.insert(n.clone(), d.message.clone());
+                    mapped = true;
+                }
+                continue;
+            }
+            let mut assigned = false;
+            for (i, eq) in node.equations.iter().enumerate() {
+                if eq.lhs.iter().any(|l| l == n) {
+                    assigned = true;
+                    if d.severity == ol_ir::Severity::Error {
+                        eq_problems[i].push(d.message.clone());
+                        mapped = true;
+                    }
+                }
+            }
+            if !assigned {
+                // Declared but never assigned (E0050/W0051): the port box
+                // itself is the problem — an unconnected pin.
+                match d.severity {
+                    ol_ir::Severity::Error => {
+                        box_problems.entry(n.clone()).or_default().push(d.message.clone())
+                    }
+                    _ => box_warnings.entry(n.clone()).or_default().push(d.message.clone()),
+                }
+                mapped = true;
+            }
+        }
+        if !mapped && d.severity == ol_ir::Severity::Error {
+            problems.push(format!("[{}] {}", d.code, d.message));
+        }
+    }
+
+    let mut ghosts: std::collections::BTreeMap<String, String> = Default::default();
     let mut equations = Vec::new();
     let mut wires = Vec::new();
     for (i, eq) in node.equations.iter().enumerate() {
         let eq_id = format!("eq{i}");
-        let reads: Vec<String> = eq
-            .rhs
-            .free_vars()
-            .into_iter()
-            .filter(|v| known.contains(v.as_str()))
-            .collect();
+        let invalid = !eq_problems[i].is_empty();
+        let reason = eq_problems[i].join("; ");
+        let mut reads: Vec<String> = Vec::new();
+        for v in eq.rhs.free_vars() {
+            if known.contains(v.as_str()) {
+                reads.push(v);
+            } else if !globals.contains(&v) {
+                let why = ghost_reasons
+                    .get(&v)
+                    .cloned()
+                    .unwrap_or_else(|| format!("`{v}` is not declared as an input, output, or local"));
+                ghosts.insert(v.clone(), why.clone());
+                wires.push(serde_json::json!({
+                    "from": v, "to": eq_id, "invalid": true, "reason": why,
+                }));
+            }
+        }
         let mut calls: Vec<String> = Vec::new();
         eq.rhs.visit(|e| {
             if let ol_ir::Expr::Call { node: callee, .. } = e {
@@ -462,7 +554,22 @@ fn build_diagram(
             wires.push(serde_json::json!({ "from": r, "to": eq_id }));
         }
         for l in &eq.lhs {
-            wires.push(serde_json::json!({ "from": eq_id, "to": l }));
+            if !known.contains(l.as_str()) {
+                let why = ghost_reasons
+                    .get(l)
+                    .cloned()
+                    .unwrap_or_else(|| format!("`{l}` is not declared as an output or local"));
+                ghosts.insert(l.clone(), why.clone());
+                wires.push(serde_json::json!({
+                    "from": eq_id, "to": l, "invalid": true, "reason": why,
+                }));
+            } else if invalid {
+                wires.push(serde_json::json!({
+                    "from": eq_id, "to": l, "invalid": true, "reason": reason,
+                }));
+            } else {
+                wires.push(serde_json::json!({ "from": eq_id, "to": l }));
+            }
         }
         equations.push(serde_json::json!({
             "id": eq_id,
@@ -470,25 +577,38 @@ fn build_diagram(
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
             "reads": reads,
             "calls": calls,
+            "invalid": invalid,
+            "reason": if invalid { serde_json::Value::String(reason) } else { serde_json::Value::Null },
         }));
     }
+
+    let port_json = |name: &str, ty: &ol_ir::Type| {
+        let mut v = serde_json::json!({ "name": name, "type": ty });
+        if let Some(msgs) = box_problems.get(name) {
+            v["invalid"] = serde_json::Value::Bool(true);
+            v["reason"] = serde_json::Value::String(msgs.join("; "));
+        } else if let Some(msgs) = box_warnings.get(name) {
+            v["warn"] = serde_json::Value::Bool(true);
+            v["reason"] = serde_json::Value::String(msgs.join("; "));
+        }
+        v
+    };
 
     let value = serde_json::json!({
         "schema_version": 1,
         "node": node.name,
         "kind": format!("{:?}", node.kind),
         "positions": node.diagram.positions,
-        "inputs": node.inputs.iter().map(|p| serde_json::json!({
-            "name": p.name, "type": p.ty,
-        })).collect::<Vec<_>>(),
-        "outputs": node.outputs.iter().map(|p| serde_json::json!({
-            "name": p.name, "type": p.ty,
-        })).collect::<Vec<_>>(),
-        "locals": node.locals.iter().map(|l| serde_json::json!({
-            "name": l.name, "type": l.ty,
+        "grid": node.diagram.grid,
+        "inputs": node.inputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
+        "outputs": node.outputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
+        "locals": node.locals.iter().map(|l| port_json(&l.name, &l.ty)).collect::<Vec<_>>(),
+        "ghosts": ghosts.iter().map(|(name, reason)| serde_json::json!({
+            "name": name, "reason": reason,
         })).collect::<Vec<_>>(),
         "equations": equations,
         "wires": wires,
+        "problems": problems,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
@@ -843,8 +963,9 @@ fn prove_run(
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
 
-/// Persist free-form canvas positions for a node:
-/// `{ "node": "...", "positions": { "id": {"x": .., "y": ..}, ... } }`.
+/// Persist free-form canvas positions (and optionally the grid pitch) for a
+/// node: `{ "node": "...", "positions": { "id": {"x": .., "y": ..}, ... },
+/// "grid": 8 }`.
 fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
     let node_name = req
         .get("node")
@@ -855,6 +976,14 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
         .get("positions")
         .and_then(|v| v.as_object())
         .ok_or("missing object field `positions`")?;
+    let grid = match req.get("grid") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(v) => Some(
+            v.as_u64()
+                .filter(|g| (1..=256).contains(g))
+                .ok_or("grid must be an integer between 1 and 256")? as u32,
+        ),
+    };
     let mut map = std::collections::BTreeMap::new();
     for (id, pos) in positions {
         let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
@@ -864,6 +993,9 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
     for pkg in &mut project.packages {
         if let Some(n) = pkg.nodes.iter_mut().find(|n| n.name == node_name) {
             n.diagram.positions = map;
+            if grid.is_some() {
+                n.diagram.grid = grid;
+            }
             return Ok(());
         }
     }

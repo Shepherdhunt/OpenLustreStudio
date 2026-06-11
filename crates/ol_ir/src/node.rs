@@ -54,6 +54,12 @@ pub struct DiagramLayout {
     /// Absent entries fall back to the GUI's automatic column layout.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub positions: std::collections::BTreeMap<String, NodePos>,
+    /// Grid pitch in canvas units. Dragged boxes snap to multiples of this,
+    /// and saved positions land on it — the diagram's drawing metadata lives
+    /// in the model file, so it opens with the same grid it was drawn on.
+    /// `None` falls back to the GUI default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

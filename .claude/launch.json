@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "studio",
+      "runtimeExecutable": "cargo",
+      "runtimeArgs": ["run", "-q", "-p", "ol_cli", "--", "studio", "serve", "examples/release_logic/model/release_logic.json", "--port", "7341"],
+      "port": 7341
+    }
+  ]
+}

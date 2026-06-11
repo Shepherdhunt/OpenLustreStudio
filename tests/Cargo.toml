@@ -105,6 +105,10 @@ name = "critical_items"
 path = "critical_items.rs"
 
 [[test]]
+name = "diagram_validity"
+path = "diagram_validity.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

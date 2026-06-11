@@ -475,14 +475,64 @@ impl Drop for TempDir {
     }
 }
 
+/// A C compiler discovered on this machine: a POSIX-style driver on PATH
+/// (`cc`, `gcc`, `clang`), or — on Windows, where none of those usually
+/// exist — MSVC's `cl.exe` reached through the `vcvars64.bat` environment of
+/// the newest Visual Studio installation, found via `vswhere`.
+enum CompilerKind {
+    Posix(&'static str),
+    #[cfg(windows)]
+    Msvc(PathBuf),
+}
+
+fn find_compiler() -> Option<CompilerKind> {
+    for name in ["cc", "gcc", "clang"] {
+        let found = Command::new(name)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if found {
+            return Some(CompilerKind::Posix(name));
+        }
+    }
+    #[cfg(windows)]
+    if let Some(bat) = find_msvc_vcvars() {
+        return Some(CompilerKind::Msvc(bat));
+    }
+    None
+}
+
+#[cfg(windows)]
+fn find_msvc_vcvars() -> Option<PathBuf> {
+    let pf86 = std::env::var_os("ProgramFiles(x86)")?;
+    let vswhere = Path::new(&pf86).join("Microsoft Visual Studio\\Installer\\vswhere.exe");
+    if !vswhere.exists() {
+        return None;
+    }
+    let out = Command::new(&vswhere)
+        .args([
+            "-products", "*", "-latest",
+            "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property", "installationPath",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let install = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if install.is_empty() {
+        return None;
+    }
+    let bat = Path::new(&install).join("VC\\Auxiliary\\Build\\vcvars64.bat");
+    bat.exists().then_some(bat)
+}
+
 pub fn cc_available() -> bool {
-    Command::new("cc")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    find_compiler().is_some()
 }
 
 fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledModel, String> {
@@ -525,24 +575,58 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
         sources.push(d.join("openlustre_monitors.c"));
     }
 
-    let exe = d.join("model_under_test");
-    let cc = Command::new("cc")
-        .args([
-            "-std=c11",
-            "-Wall",
-            "-Wextra",
-            "-Wno-unused-but-set-variable",
-            "-Wno-unused-variable",
-            "-Werror",
-            "-o",
-        ])
-        .arg(&exe)
-        .args(&sources)
-        .arg(format!("-I{}", d.display()))
-        .output()
-        .map_err(|e| format!("invoking cc: {e}"))?;
+    let exe_name = if cfg!(windows) { "model_under_test.exe" } else { "model_under_test" };
+    let exe = d.join(exe_name);
+    let compiler = find_compiler()
+        .ok_or_else(|| "no C compiler found (cc/gcc/clang on PATH, or MSVC)".to_string())?;
+    let cc = match compiler {
+        CompilerKind::Posix(name) => Command::new(name)
+            .args([
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Wno-unused-but-set-variable",
+                "-Wno-unused-variable",
+                "-Werror",
+                "-o",
+            ])
+            .arg(&exe)
+            .args(&sources)
+            .arg(format!("-I{}", d.display()))
+            .output()
+            .map_err(|e| format!("invoking {name}: {e}"))?,
+        #[cfg(windows)]
+        CompilerKind::Msvc(vcvars) => {
+            // cl.exe needs the vcvars environment and writes .obj files into
+            // the working directory, so run `vcvars64.bat && cl` through cmd
+            // inside the temp dir with bare file names.
+            let mut cmdline = format!(
+                "\"{}\" >NUL 2>&1 && cl /nologo /std:c11 /W3 /Fe:{exe_name}",
+                vcvars.display()
+            );
+            for s in &sources {
+                let fname = s.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+                cmdline.push(' ');
+                cmdline.push_str(fname);
+            }
+            cmdline.push_str(" /I.");
+            use std::os::windows::process::CommandExt as _;
+            Command::new("cmd")
+                .current_dir(d)
+                .arg("/S")
+                .arg("/C")
+                .raw_arg(format!("\"{cmdline}\""))
+                .output()
+                .map_err(|e| format!("invoking cl via vcvars64: {e}"))?
+        }
+    };
     if !cc.status.success() {
-        return Err(String::from_utf8_lossy(&cc.stderr).to_string());
+        // MSVC reports errors on stdout, GNU-style compilers on stderr.
+        return Err(format!(
+            "{}{}",
+            String::from_utf8_lossy(&cc.stdout),
+            String::from_utf8_lossy(&cc.stderr)
+        ));
     }
     Ok(CompiledModel { dir, exe })
 }
