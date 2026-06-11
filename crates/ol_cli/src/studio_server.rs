@@ -32,6 +32,10 @@ pub struct ServerCtx {
     /// Directory of test scenarios (*.csv + *.golden.csv). Defaults to a
     /// `scenarios` directory next to the model file.
     pub scenarios: PathBuf,
+    /// The workspace's types file (`types.json` next to the model), when one
+    /// exists. Named type definitions created in the GUI are saved here —
+    /// the SCADE "types file" — and reach the model via its `includes`.
+    pub types_file: Option<PathBuf>,
 }
 
 /// Bind a listener on `addr`. The caller can pass port `0` to let the OS pick
@@ -197,6 +201,25 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/add_state_machine") => {
             apply_edit_response(ctx, body, edit_add_state_machine)
         }
+        ("GET", "/api/types") => match types_list(ctx) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/edit/add_type") => add_type_response(ctx, body),
+        ("POST", "/api/edit/remove_type") => remove_type_response(ctx, body),
+        ("POST", "/api/edit/update_port") => {
+            apply_edit_response(ctx, body, edit_update_port)
+        }
+        ("POST", "/api/edit/remove_port") => {
+            apply_edit_response(ctx, body, edit_remove_port)
+        }
+        ("POST", "/api/edit/update_equation") => {
+            apply_edit_response(ctx, body, edit_update_equation)
+        }
+        ("POST", "/api/edit/remove_equation") => {
+            apply_edit_response(ctx, body, edit_remove_equation)
+        }
+        ("POST", "/api/edit/add_block_call") => add_block_call_response(ctx, body),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -467,22 +490,40 @@ fn build_diagram(
         }
     }
 
-    // Map this node's typecheck errors onto equations (by lhs name), onto
-    // never-assigned ports, or onto ghosts; the rest become banner problems.
+    // Map this node's typecheck errors onto equations — directly via the
+    // `… · equation N` context the checker attaches, or by the lhs names the
+    // message quotes — onto never-assigned ports, or onto ghosts; the rest
+    // become banner problems.
     let report = ol_typecheck::check_project(&project);
     let node_ctx = format!("node {node_name}");
+    let eq_ctx_prefix = format!("{node_ctx} · equation ");
     let mut eq_problems: Vec<Vec<String>> = vec![Vec::new(); node.equations.len()];
     let mut box_problems: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut box_warnings: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut ghost_reasons: std::collections::BTreeMap<String, String> = Default::default();
     let mut problems: Vec<String> = Vec::new();
-    for d in report
-        .diagnostics
-        .iter()
-        .filter(|d| d.context.iter().any(|c| c == &node_ctx))
-    {
+    for d in report.diagnostics.iter().filter(|d| {
+        d.context
+            .iter()
+            .any(|c| c == &node_ctx || c.starts_with(&eq_ctx_prefix))
+    }) {
         let names = backticked(&d.message);
         let mut mapped = false;
+        // Equation-tagged diagnostics pin to their box outright.
+        if d.severity == ol_ir::Severity::Error {
+            for c in &d.context {
+                if let Some(i) = c
+                    .strip_prefix(&eq_ctx_prefix)
+                    .and_then(|s| s.parse::<usize>().ok())
+                {
+                    if let Some(slot) = eq_problems.get_mut(i) {
+                        slot.push(d.message.clone());
+                        mapped = true;
+                    }
+                }
+            }
+        }
+        let ctx_mapped = mapped;
         for n in &names {
             if !known.contains(n.as_str()) {
                 if !globals.contains(n) && node.equations.iter().any(|eq| {
@@ -497,7 +538,9 @@ fn build_diagram(
             for (i, eq) in node.equations.iter().enumerate() {
                 if eq.lhs.iter().any(|l| l == n) {
                     assigned = true;
-                    if d.severity == ol_ir::Severity::Error {
+                    // Already pinned via its equation context — don't repeat
+                    // the message on the same box.
+                    if d.severity == ol_ir::Severity::Error && !ctx_mapped {
                         eq_problems[i].push(d.message.clone());
                         mapped = true;
                     }
@@ -575,6 +618,7 @@ fn build_diagram(
             "id": eq_id,
             "lhs": eq.lhs,
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
+            "body": ol_lustre_emit::format_expr(&eq.rhs),
             "reads": reads,
             "calls": calls,
             "invalid": invalid,
@@ -615,15 +659,14 @@ fn build_diagram(
 
 // --- Editing: parse, mutate, save back, return refreshed inspect ---
 
-/// Parse the model file directly (single file, includes left untouched) so a
-/// save-back writes only what the user authored. The full pipeline —
-/// includes, stdlib merge, state-machine lowering — still runs on the *read*
-/// path (`load`), so diagnostics reflect the complete picture.
-fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
-    let data = std::fs::read_to_string(&ctx.model)
-        .map_err(|e| format!("reading {}: {e}", ctx.model.display()))?;
-    match ctx
-        .model
+/// Parse one file directly (includes left untouched) so a save-back writes
+/// only what the user authored. The full pipeline — includes, stdlib merge,
+/// state-machine lowering — still runs on the *read* path (`load`), so
+/// diagnostics reflect the complete picture.
+fn load_raw_path(path: &std::path::Path) -> Result<ol_ir::Project, String> {
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    match path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
@@ -637,9 +680,8 @@ fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
     }
 }
 
-fn save_raw(ctx: &ServerCtx, project: &ol_ir::Project) -> Result<(), String> {
-    let text = match ctx
-        .model
+fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(), String> {
+    let text = match path
         .extension()
         .and_then(|s| s.to_str())
         .map(|s| s.to_ascii_lowercase())
@@ -648,24 +690,43 @@ fn save_raw(ctx: &ServerCtx, project: &ol_ir::Project) -> Result<(), String> {
         Some("json") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
         _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
     };
-    std::fs::write(&ctx.model, text).map_err(|e| format!("writing {}: {e}", ctx.model.display()))
+    std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
+    load_raw_path(&ctx.model)
+}
+
+fn save_raw(ctx: &ServerCtx, project: &ol_ir::Project) -> Result<(), String> {
+    save_raw_path(&ctx.model, project)
 }
 
 type EditFn = fn(&mut ol_ir::Project, &serde_json::Value) -> Result<(), String>;
 
 fn apply_edit_response(ctx: &ServerCtx, body: &[u8], f: EditFn) -> (u16, &'static str, Vec<u8>) {
+    apply_edit_response_to(ctx, &ctx.model.clone(), body, f)
+}
+
+/// Apply an edit to a specific file in the workspace (the model file or the
+/// types file), then respond with a refreshed inspect of the whole project.
+fn apply_edit_response_to(
+    ctx: &ServerCtx,
+    path: &std::path::Path,
+    body: &[u8],
+    f: EditFn,
+) -> (u16, &'static str, Vec<u8>) {
     let req: serde_json::Value = match serde_json::from_slice(body) {
         Ok(v) => v,
         Err(e) => return (400, "application/json", json_error(&format!("bad JSON: {e}")).into_bytes()),
     };
-    let mut project = match load_raw(ctx) {
+    let mut project = match load_raw_path(path) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
     };
     if let Err(e) = f(&mut project, &req) {
         return (400, "application/json", json_error(&e).into_bytes());
     }
-    if let Err(e) = save_raw(ctx, &project) {
+    if let Err(e) = save_raw_path(path, &project) {
         return (500, "application/json", json_error(&e).into_bytes());
     }
     match build_inspect(ctx) {
@@ -1160,4 +1221,502 @@ fn edit_add_state_machine(
     }
     project.packages[0].state_machines.push(machine);
     Ok(())
+}
+
+// --- Types file: named types, structs, enums, arrays ------------------------
+
+/// Surface syntax for a type, matching what `parse_type` accepts so the GUI
+/// can round-trip everything it displays.
+fn type_str(t: &ol_ir::Type) -> String {
+    use ol_ir::Type::*;
+    match t {
+        Bool => "bool".into(),
+        Int8 => "int8".into(),
+        Int16 => "int16".into(),
+        Int32 => "int32".into(),
+        Int64 => "int64".into(),
+        Uint8 => "uint8".into(),
+        Uint16 => "uint16".into(),
+        Uint32 => "uint32".into(),
+        Uint64 => "uint64".into(),
+        Float32 => "float32".into(),
+        Float64 => "float64".into(),
+        Array { elem, len } => format!("{}[{}]", type_str(elem), len),
+        Named { name } => name.clone(),
+    }
+}
+
+/// The SCADE-style primitive palette every port/local type selector offers.
+const PRIMITIVE_TYPES: &[&str] = &[
+    "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+    "float32", "float64",
+];
+
+fn types_list(ctx: &ServerCtx) -> Result<String, String> {
+    let project = load(ctx)?;
+    let mut types: Vec<serde_json::Value> = Vec::new();
+    for pkg in &project.packages {
+        for t in &pkg.types {
+            let (kind, detail) = match &t.body {
+                ol_ir::TypeBody::Enum(e) => ("enum", e.variants.join(" | ")),
+                ol_ir::TypeBody::Record { fields, .. } => (
+                    "record",
+                    fields
+                        .iter()
+                        .map(|f| format!("{}: {}", f.name, type_str(&f.ty)))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+                ol_ir::TypeBody::Alias { target, .. } => ("alias", type_str(target)),
+            };
+            types.push(serde_json::json!({
+                "package": pkg.name,
+                "kind": kind,
+                "name": t.name(),
+                "detail": detail,
+            }));
+        }
+    }
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "primitives": PRIMITIVE_TYPES,
+        "types": types,
+        "types_file": ctx.types_file.as_ref().map(|p| p.display().to_string()),
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// Create a named type. Uniqueness is checked against the *full* loaded
+/// project (stdlib included), but the definition is saved into the workspace
+/// types file when one exists — the SCADE types-file experience — falling
+/// back to the model file itself.
+fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let name = match req.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return bad("missing string field `name`"),
+    };
+    if !is_identifier(&name) {
+        return bad(&format!("`{name}` is not a valid type name"));
+    }
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if full
+        .packages
+        .iter()
+        .any(|p| p.types.iter().any(|t| t.name() == name))
+    {
+        return bad(&format!("type `{name}` already exists"));
+    }
+
+    let body_def = match req.get("kind").and_then(|v| v.as_str()) {
+        Some("enum") => {
+            let variants: Vec<String> = req
+                .get("variants")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if variants.is_empty() {
+                return bad("enum needs at least one variant");
+            }
+            if let Some(v) = variants.iter().find(|v| !is_identifier(v)) {
+                return bad(&format!("`{v}` is not a valid variant name"));
+            }
+            ol_ir::TypeBody::Enum(ol_ir::EnumDef { name: name.clone(), variants })
+        }
+        Some("record") => {
+            let mut fields = Vec::new();
+            for f in req.get("fields").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+                let fname = match f.get("name").and_then(|v| v.as_str()) {
+                    Some(n) if is_identifier(n) => n.to_string(),
+                    Some(n) => return bad(&format!("`{n}` is not a valid field name")),
+                    None => return bad("record field missing `name`"),
+                };
+                let tstr = match f.get("type").and_then(|v| v.as_str()) {
+                    Some(t) => t,
+                    None => return bad("record field missing `type`"),
+                };
+                let ty = match ol_stdlib::parse_type(tstr) {
+                    Ok(t) => t,
+                    Err(e) => return bad(&format!("field `{fname}`: {e}")),
+                };
+                fields.push(ol_ir::RecordField { name: fname, ty });
+            }
+            if fields.is_empty() {
+                return bad("record needs at least one field");
+            }
+            ol_ir::TypeBody::Record { name: name.clone(), fields }
+        }
+        Some("alias") => {
+            let target = match req.get("target").and_then(|v| v.as_str()) {
+                Some(t) => t,
+                None => return bad("alias missing `target` (e.g. \"float32[3]\")"),
+            };
+            let ty = match ol_stdlib::parse_type(target) {
+                Ok(t) => t,
+                Err(e) => return bad(&format!("target `{target}`: {e}")),
+            };
+            ol_ir::TypeBody::Alias { name: name.clone(), target: ty }
+        }
+        other => return bad(&format!("kind must be enum|record|alias, got {other:?}")),
+    };
+
+    let target_path = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let mut doc = match load_raw_path(&target_path) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if doc.packages.is_empty() {
+        doc.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
+    }
+    doc.packages[0].types.push(ol_ir::TypeDef { body: body_def });
+    if let Err(e) = save_raw_path(&target_path, &doc) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Remove a named type from whichever editable file defines it (types file
+/// first, then the model file). Uses of a removed type surface as typecheck
+/// errors on the next refresh rather than blocking the removal.
+fn remove_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return (400, "application/json", json_error(&format!("bad JSON: {e}")).into_bytes()),
+    };
+    let name = match req.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return (400, "application/json", json_error("missing string field `name`").into_bytes()),
+    };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(t) = &ctx.types_file {
+        candidates.push(t.clone());
+    }
+    candidates.push(ctx.model.clone());
+    for path in candidates {
+        let mut doc = match load_raw_path(&path) {
+            Ok(p) => p,
+            Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+        };
+        let mut removed = false;
+        for pkg in &mut doc.packages {
+            let before = pkg.types.len();
+            pkg.types.retain(|t| t.name() != name);
+            removed |= pkg.types.len() != before;
+        }
+        if removed {
+            if let Err(e) = save_raw_path(&path, &doc) {
+                return (500, "application/json", json_error(&e).into_bytes());
+            }
+            return match build_inspect(ctx) {
+                Ok(b) => (200, "application/json", b.into_bytes()),
+                Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+            };
+        }
+    }
+    (400, "application/json", json_error(&format!(
+        "type `{name}` not found in the editable files (stdlib types cannot be removed)"
+    )).into_bytes())
+}
+
+// --- Variable properties + in-place equation editing -------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum Role {
+    Input,
+    Output,
+    Local,
+}
+
+fn role_of(node: &ol_ir::NodeDef, name: &str) -> Option<Role> {
+    if node.inputs.iter().any(|p| p.name == name) {
+        Some(Role::Input)
+    } else if node.outputs.iter().any(|p| p.name == name) {
+        Some(Role::Output)
+    } else if node.locals.iter().any(|l| l.name == name) {
+        Some(Role::Local)
+    } else {
+        None
+    }
+}
+
+/// Update a variable: rename (rewriting every use in the node's equations),
+/// retype, and/or change its role — the "treat this local as an output"
+/// option, and its inverses.
+fn edit_update_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let name = req_str(req, "name")?.to_string();
+    let node = find_node_mut(project, &node_name)?;
+    let role = role_of(node, &name)
+        .ok_or_else(|| format!("`{name}` is not a port or local of `{node_name}`"))?;
+
+    let new_name = req.get("new_name").and_then(|v| v.as_str()).map(str::to_string);
+    let new_type = req.get("new_type").and_then(|v| v.as_str()).map(str::to_string);
+    let new_role = req.get("new_role").and_then(|v| v.as_str()).map(str::to_string);
+
+    if let Some(n) = &new_name {
+        if n != &name {
+            if !is_identifier(n) {
+                return Err(format!("`{n}` is not a valid identifier"));
+            }
+            if role_of(node, n).is_some() {
+                return Err(format!("`{n}` already exists on `{node_name}`"));
+            }
+            let rename = |list_name: &mut String| {
+                if list_name == &name {
+                    *list_name = n.clone();
+                }
+            };
+            node.inputs.iter_mut().for_each(|p| rename(&mut p.name));
+            node.outputs.iter_mut().for_each(|p| rename(&mut p.name));
+            node.locals.iter_mut().for_each(|l| rename(&mut l.name));
+            for eq in &mut node.equations {
+                for l in &mut eq.lhs {
+                    if l == &name {
+                        *l = n.clone();
+                    }
+                }
+                eq.rhs.rename_var(&name, n);
+            }
+            // The persisted layout follows the rename too.
+            if let Some(pos) = node.diagram.positions.remove(&name) {
+                node.diagram.positions.insert(n.clone(), pos);
+            }
+        }
+    }
+    let cur_name = new_name.unwrap_or_else(|| name.clone());
+
+    if let Some(t) = &new_type {
+        let ty = ol_stdlib::parse_type(t).map_err(|e| format!("type `{t}`: {e}"))?;
+        node.inputs.iter_mut().filter(|p| p.name == cur_name).for_each(|p| p.ty = ty.clone());
+        node.outputs.iter_mut().filter(|p| p.name == cur_name).for_each(|p| p.ty = ty.clone());
+        node.locals.iter_mut().filter(|l| l.name == cur_name).for_each(|l| l.ty = ty.clone());
+    }
+
+    if let Some(r) = &new_role {
+        let want = match r.as_str() {
+            "input" => Role::Input,
+            "output" => Role::Output,
+            "local" => Role::Local,
+            other => return Err(format!("new_role must be input|output|local, got `{other}`")),
+        };
+        if want != role {
+            let ty = match role {
+                Role::Input => {
+                    let i = node.inputs.iter().position(|p| p.name == cur_name).unwrap();
+                    node.inputs.remove(i).ty
+                }
+                Role::Output => {
+                    let i = node.outputs.iter().position(|p| p.name == cur_name).unwrap();
+                    node.outputs.remove(i).ty
+                }
+                Role::Local => {
+                    let i = node.locals.iter().position(|l| l.name == cur_name).unwrap();
+                    node.locals.remove(i).ty
+                }
+            };
+            match want {
+                Role::Input => node.inputs.push(ol_ir::Port { name: cur_name, ty }),
+                Role::Output => node.outputs.push(ol_ir::Port { name: cur_name, ty }),
+                Role::Local => node.locals.push(ol_ir::Local { name: cur_name, ty }),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Remove a variable. Equations that still reference it keep working as
+/// red ghost pins on the canvas — visible, not silent.
+fn edit_remove_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let name = req_str(req, "name")?.to_string();
+    let node = find_node_mut(project, &node_name)?;
+    let before =
+        node.inputs.len() + node.outputs.len() + node.locals.len();
+    node.inputs.retain(|p| p.name != name);
+    node.outputs.retain(|p| p.name != name);
+    node.locals.retain(|l| l.name != name);
+    if node.inputs.len() + node.outputs.len() + node.locals.len() == before {
+        return Err(format!("`{name}` is not a port or local of `{node_name}`"));
+    }
+    node.diagram.positions.remove(&name);
+    Ok(())
+}
+
+fn req_index(req: &serde_json::Value) -> Result<usize, String> {
+    req.get("index")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
+        .ok_or_else(|| "missing integer field `index`".to_string())
+}
+
+fn edit_update_equation(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let index = req_index(req)?;
+    let lhs_str = req_str(req, "lhs")?;
+    let body = req_str(req, "body")?;
+    let lhs: Vec<String> = lhs_str
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if lhs.is_empty() {
+        return Err("lhs must name at least one variable".into());
+    }
+    for l in &lhs {
+        if !is_identifier(l) {
+            return Err(format!("`{l}` is not a valid identifier"));
+        }
+    }
+    let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("body: {e}"))?;
+    let node = find_node_mut(project, &node_name)?;
+    let eq = node
+        .equations
+        .get_mut(index)
+        .ok_or_else(|| format!("`{node_name}` has no equation #{index}"))?;
+    *eq = ol_ir::Equation { lhs, rhs };
+    Ok(())
+}
+
+fn edit_remove_equation(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let index = req_index(req)?;
+    let node = find_node_mut(project, &node_name)?;
+    if index >= node.equations.len() {
+        return Err(format!("`{node_name}` has no equation #{index}"));
+    }
+    node.equations.remove(index);
+    // Re-key the persisted layout: eqN ids above the removed index shift down.
+    let old = std::mem::take(&mut node.diagram.positions);
+    for (k, v) in old {
+        match k.strip_prefix("eq").and_then(|s| s.parse::<usize>().ok()) {
+            Some(n) if n == index => {}
+            Some(n) if n > index => {
+                node.diagram.positions.insert(format!("eq{}", n - 1), v);
+            }
+            _ => {
+                node.diagram.positions.insert(k, v);
+            }
+        }
+    }
+    Ok(())
+}
+
+// --- Draw-on-canvas: drop a block/operator instance at a position -----------
+
+/// Instantiate a callee on the host node's canvas at (x, y): fresh typed
+/// locals are created for each callee output, and the call's arguments are
+/// the callee's own input names — they bind to same-named host variables
+/// automatically and show as red unbound pins otherwise, exactly the
+/// drop-then-wire flow a SCADE user expects.
+fn add_block_call_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let host_name = match req.get("node").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return bad("missing string field `node`"),
+    };
+    let callee_name = match req.get("callee").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return bad("missing string field `callee`"),
+    };
+    if host_name == callee_name {
+        return bad("an operator cannot call itself");
+    }
+    let x = req.get("x").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let y = req.get("y").and_then(|v| v.as_f64()).unwrap_or(40.0);
+
+    // The callee usually lives in the stdlib, so its signature comes from the
+    // fully merged project; the edit itself only touches the model file.
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let callee = match full.find_node(&callee_name) {
+        Some(c) => c,
+        None => return bad(&format!("operator `{callee_name}` not found")),
+    };
+    let callee_inputs: Vec<String> = callee.inputs.iter().map(|p| p.name.clone()).collect();
+    let callee_outputs: Vec<(String, ol_ir::Type)> = callee
+        .outputs
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .collect();
+
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host_name) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
+        };
+        let mut known: std::collections::HashSet<String> = node
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(node.outputs.iter().map(|p| p.name.clone()))
+            .chain(node.locals.iter().map(|l| l.name.clone()))
+            .collect();
+        let mut lhs = Vec::new();
+        let mut fresh = Vec::new();
+        for (oname, oty) in &callee_outputs {
+            let base = format!("{}_{}", callee_name.to_lowercase(), oname);
+            let mut name = base.clone();
+            let mut n = 2;
+            while known.contains(&name) {
+                name = format!("{base}{n}");
+                n += 1;
+            }
+            known.insert(name.clone());
+            node.locals.push(ol_ir::Local { name: name.clone(), ty: oty.clone() });
+            lhs.push(name.clone());
+            fresh.push(name);
+        }
+        let args = callee_inputs.iter().map(ol_ir::Expr::var).collect();
+        let eq_index = node.equations.len();
+        node.equations.push(ol_ir::Equation {
+            lhs,
+            rhs: ol_ir::Expr::call(&callee_name, args),
+        });
+        node.diagram
+            .positions
+            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y });
+        for (i, l) in fresh.iter().enumerate() {
+            node.diagram.positions.insert(
+                l.clone(),
+                ol_ir::NodePos { x: x + 320.0, y: y + 44.0 * i as f64 },
+            );
+        }
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
 }

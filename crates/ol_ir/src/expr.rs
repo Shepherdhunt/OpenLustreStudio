@@ -242,6 +242,52 @@ impl Expr {
         found
     }
 
+    /// Rename every occurrence of variable `from` to `to` — the IR-level
+    /// support for renaming a port/local without breaking its readers.
+    pub fn rename_var(&mut self, from: &str, to: &str) {
+        match self {
+            Expr::Var { name } => {
+                if name == from {
+                    *name = to.to_string();
+                }
+            }
+            Expr::Const { .. } => {}
+            Expr::Unary { arg, .. } | Expr::Pre { arg } => arg.rename_var(from, to),
+            Expr::Binary { lhs, rhs, .. } => {
+                lhs.rename_var(from, to);
+                rhs.rename_var(from, to);
+            }
+            Expr::IfThenElse {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                cond.rename_var(from, to);
+                then_branch.rename_var(from, to);
+                else_branch.rename_var(from, to);
+            }
+            Expr::Arrow { init, body } => {
+                init.rename_var(from, to);
+                body.rename_var(from, to);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    a.rename_var(from, to);
+                }
+            }
+            Expr::Field { base, .. } => base.rename_var(from, to),
+            Expr::Index { base, index } => {
+                base.rename_var(from, to);
+                index.rename_var(from, to);
+            }
+            Expr::Tuple { items } => {
+                for item in items {
+                    item.rename_var(from, to);
+                }
+            }
+        }
+    }
+
     /// Collect free variable names referenced by this expression.
     pub fn free_vars(&self) -> Vec<String> {
         let mut out = Vec::new();

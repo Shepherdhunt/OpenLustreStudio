@@ -33,9 +33,9 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 
 | Gap | What SCADE does | What we need | Effort |
 |---|---|---|---|
-| **P0 — Wire drawing** | Drag from an output pin to an input pin creates a connection | Pin-level ports on boxes; drag pin→pin rewrites the target equation (today connections only come from equation text) | Medium |
-| **P0 — Palette drop** | Drag a library block onto the canvas to instantiate it | Drop target on canvas creates local + equation calling the block, at the drop position | Small-medium |
-| **P0 — Edit/delete in place** | Double-click a block to edit; delete removes it | Equation edit/delete endpoints + canvas affordances (today equations are append-only via the form) | Small |
+| ~~P0 — Palette drop~~ | Drag a library block onto the canvas to instantiate it | **Landed 2026-06-11**: drag a palette chip onto the canvas → placed call equation with fresh typed output locals and red unbound pins | done |
+| ~~P0 — Edit/delete in place~~ | Double-click a block to edit; delete removes it | **Landed 2026-06-11**: right-click any box → properties panel (equation edit/delete, variable rename/retype/role-change/delete, ghost-pin binding) | done |
+| **P0 — Pin-to-pin wire drawing** | Drag from an output pin to an input pin creates a connection | Pin-level ports on boxes; drag pin→pin rewrites the target call argument (today binding goes through the right-click Bind panel) | Medium |
 | **P1 — Undo/redo** | Standard | Edit-journal on the server (every edit endpoint already round-trips the file; keep N previous states) | Small |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
 | **P1 — Zoom/pan, multi-select, copy/paste** | Standard | SVG viewBox transforms + selection rectangle | Medium |
@@ -104,3 +104,26 @@ verification burden the qualified tool would otherwise discharge.
 * The GUI was restyled to the SCADE Suite shape: docked Workspace tree, MDI-style
   document tabs, bottom Messages dock (click a message to select the node), toolbar,
   and status bar.
+
+### Second slice, same day — the SCADE project workflow
+
+* **Workspaces**: opening a directory (`openlustre new <dir>` or `studio launch
+  <dir>`) creates the project folder — `project.json` (starter operator),
+  `types.json`, `scenarios/` — and serves it as one project.
+* **Types file**: a Types tab defines enums, structures (records), and array
+  aliases; definitions save into `types.json` and reach the model through
+  `includes`. Uniqueness is validated against everything loaded.
+* **Defined data types everywhere**: port/local type selectors list the full
+  primitive set (`int8`–`int64`, `uint8`–`uint64`, `float32/64`, `bool`) plus
+  every named type, defaulting to `bool` until changed; arrays via custom
+  entry (`uint8[4]`).
+* **Variable options**: right-click a variable on the canvas → rename (all
+  uses rewritten via IR-level `Expr::rename_var`), retype, change role
+  (input/output/local — "treat this local as an output"), or delete (readers
+  ghost red rather than failing silently).
+* **Draw on canvas**: drag operators/blocks from the diagram palette onto the
+  canvas; the instance lands at the drop point with typed fresh outputs and
+  red unbound input pins; right-click a red pin → Bind to wire it.
+* **Per-equation diagnostics**: the typechecker now tags equation-level
+  errors with `node X · equation N`, so the diagram pins *any* in-equation
+  error (even ones naming no variables) to the exact box.

@@ -109,6 +109,10 @@ name = "diagram_validity"
 path = "diagram_validity.rs"
 
 [[test]]
+name = "studio_workspace_types"
+path = "studio_workspace_types.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

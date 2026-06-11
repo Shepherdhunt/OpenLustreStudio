@@ -266,12 +266,15 @@ fn check_node(
     }
 
     let mut assigned: BTreeSet<String> = BTreeSet::new();
-    for eq in &node.equations {
+    for (eq_i, eq) in node.equations.iter().enumerate() {
+        // Per-equation context: lets a GUI map any in-equation diagnostic
+        // onto the exact diagram box that caused it.
+        let eq_ctx = format!("{ctx} · equation {eq_i}");
         for lhs in &eq.lhs {
             if !env.contains_key(lhs) {
                 diags.push(
                     Diagnostic::error("E0020", format!("equation defines unknown name `{lhs}`"))
-                        .with_context(ctx.clone()),
+                        .with_context(eq_ctx.clone()),
                 );
             }
             if !assigned.insert(lhs.clone()) {
@@ -280,7 +283,7 @@ fn check_node(
                         "E0021",
                         format!("name `{lhs}` is assigned by more than one equation"),
                     )
-                    .with_context(ctx.clone()),
+                    .with_context(eq_ctx.clone()),
                 );
             }
         }
@@ -291,11 +294,11 @@ fn check_node(
                     "E0030",
                     "function bodies may not use temporal operators (`pre`, `->`)",
                 )
-                .with_context(ctx.clone()),
+                .with_context(eq_ctx.clone()),
             );
         }
 
-        check_pre_initialization(&eq.rhs, false, diags, &ctx);
+        check_pre_initialization(&eq.rhs, false, diags, &eq_ctx);
 
         // For single-output equations we pass the LHS's declared type as a
         // bidirectional hint so integer literals adopt the target type when
@@ -312,7 +315,7 @@ fn check_node(
             sigs,
             node,
             diags,
-            &ctx,
+            &eq_ctx,
             tctx,
             lhs_hint.as_ref(),
         );
@@ -331,7 +334,7 @@ fn check_node(
                                         eq.lhs[0], rhs_ty, eq.lhs[0], expected
                                     ),
                                 )
-                                .with_context(ctx.clone()),
+                                .with_context(eq_ctx.clone()),
                             );
                         }
                     }
@@ -344,7 +347,7 @@ fn check_node(
                                 "E0041",
                                 "multi-output equation must bind to a node call returning a tuple",
                             )
-                            .with_context(ctx.clone()),
+                            .with_context(eq_ctx.clone()),
                         );
                     }
                 }

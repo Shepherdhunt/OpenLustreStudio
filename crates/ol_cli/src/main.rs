@@ -135,6 +135,13 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TestCmd,
     },
+    /// Create a new workspace folder: project.json (starter operator),
+    /// types.json (named type definitions), and scenarios/. Open it with
+    /// `openlustre studio launch <dir>`.
+    New {
+        /// Workspace directory (created if missing).
+        dir: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -325,6 +332,15 @@ fn main() -> Result<()> {
                 no_open,
             } => cmd_studio_launch(model, port, with_stdlib, no_stdlib, no_open),
         },
+        Cmd::New { dir } => {
+            std::fs::create_dir_all(&dir)
+                .with_context(|| format!("creating {}", dir.display()))?;
+            let project = resolve_workspace(&dir)?;
+            println!("new: workspace ready at {}", dir.display());
+            println!("new: project file {}", project.display());
+            println!("new: open it with `openlustre studio launch {}`", dir.display());
+            Ok(())
+        }
         Cmd::Test { cmd } => match cmd {
             TestCmd::Record {
                 model,
@@ -846,6 +862,9 @@ fn serve_studio(
     scenarios: Option<PathBuf>,
     open_browser: bool,
 ) -> Result<()> {
+    // Opening a directory opens it as a workspace: `<dir>/project.json`
+    // (created on first open along with types.json and scenarios/).
+    let model = &resolve_workspace(model)?;
     let use_embedded = with_stdlib.is_none() && !no_stdlib;
     // Eagerly load once to surface configuration errors before starting the
     // server — better to fail fast than to spin up a UI that only ever shows
@@ -869,14 +888,61 @@ fn serve_studio(
     if open_browser {
         open_in_browser(&url);
     }
+    // A `types.json` next to the model is the workspace types file: named
+    // type definitions created in the GUI are saved there.
+    let types_file = model
+        .parent()
+        .map(|p| p.join("types.json"))
+        .filter(|p| p.exists() && Some(p.as_path()) != Some(model));
+
     let ctx = studio_server::ServerCtx {
         model: model.to_path_buf(),
         with_stdlib,
         use_embedded,
         scenarios,
+        types_file,
     };
     studio_server::serve(listener, ctx)?;
     Ok(())
+}
+
+/// Resolve a model argument that may be a workspace directory. Opening a
+/// directory creates the project skeleton on first open — `project.json`
+/// (with a starter operator, including `types.json`), the types file, and a
+/// `scenarios/` directory — and resolves to the project file.
+fn resolve_workspace(path: &Path) -> Result<PathBuf> {
+    if !path.is_dir() {
+        return Ok(path.to_path_buf());
+    }
+    let project_path = path.join("project.json");
+    let types_path = path.join("types.json");
+    if !types_path.exists() {
+        let types_doc = ol_ir::Project {
+            name: "types".into(),
+            packages: vec![ol_ir::Package {
+                name: "user".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&types_path, serde_json::to_string_pretty(&types_doc)?)
+            .with_context(|| format!("writing {}", types_path.display()))?;
+    }
+    if !project_path.exists() {
+        let mut project = starter_project();
+        project.name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("project")
+            .to_string();
+        project.includes = vec!["types.json".into()];
+        std::fs::write(&project_path, serde_json::to_string_pretty(&project)?)
+            .with_context(|| format!("writing {}", project_path.display()))?;
+        println!("studio: created workspace project at {}", project_path.display());
+    }
+    std::fs::create_dir_all(path.join("scenarios"))
+        .with_context(|| format!("creating {}", path.join("scenarios").display()))?;
+    Ok(project_path)
 }
 
 fn cmd_studio_launch(

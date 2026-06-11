@@ -161,6 +161,7 @@
     <span class="tab active" data-tab="node">Node</span>
     <span class="tab" data-tab="diagram">Diagram</span>
     <span class="tab" data-tab="edit">Edit</span>
+    <span class="tab" data-tab="types">Types</span>
     <span class="tab" data-tab="step">Step</span>
     <span class="tab" data-tab="tests">Tests</span>
     <span class="tab" data-tab="verify">Verify</span>
@@ -174,8 +175,10 @@
   <div id="panel-node">Select a node from the Workspace pane.</div>
 
   <div id="panel-diagram" style="display:none">
-    <p>Dataflow view of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange the canvas — they snap to the grid and the layout persists to the model file. <span class="severity-Error">Red</span> wires and boxes mark invalid or problematic connections (hover for the reason). Click an equation that calls an operator to dive into it; use the breadcrumbs to come back.</p>
+    <p>Dataflow view of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange the canvas — they snap to the grid and the layout persists to the model file. <strong>Drag a block from the palette below onto the canvas</strong> to instantiate it; unbound pins show <span class="severity-Error">red</span> until you wire them. <strong>Right-click</strong> any box for properties (rename, type, role, bind, delete). Click an equation that calls an operator to dive into it; breadcrumbs come back.</p>
     <div id="diagram-crumbs" style="margin:4px 0"></div>
+    <h4 style="margin-top:8px">Palette — drag onto the canvas</h4>
+    <div class="palette" id="diagram-palette"></div>
     <div class="diagram-toolbar">
       grid
       <select id="grid-size" onchange="gridChanged()">
@@ -191,6 +194,7 @@
     </div>
     <div id="diagram-problems"></div>
     <div id="diagram-host"></div>
+    <div id="float-panel" style="display:none; position:fixed; z-index:50; background:#fff; border:1px solid #2b579a; box-shadow:2px 3px 8px rgba(0,0,0,0.25); padding:10px 12px; min-width:260px"></div>
   </div>
 
   <div id="panel-edit" style="display:none">
@@ -214,7 +218,9 @@
         <label>kind</label>
         <select id="port-side"><option value="input">input</option><option value="output">output</option><option value="local">local</option></select>
         <label>name</label><input id="port-name" placeholder="x">
-        <label>type</label><input id="port-type" value="bool" placeholder="bool | int32 | uint8[4]">
+        <label>type</label>
+        <select id="port-type"></select>
+        <input id="port-type-custom" placeholder="uint8[4]" style="display:none; width:110px">
         <button class="primary" onclick="editAddPort()">Add</button>
       </div>
     </div>
@@ -241,6 +247,40 @@
         <button class="primary" onclick="editSetMain()">Set main</button>
       </div>
     </div>
+  </div>
+
+  <div id="panel-types" style="display:none">
+    <p>Named types — enums, structures, and array aliases — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
+    <h4>Defined types</h4>
+    <div id="types-list"></div>
+
+    <div class="edit-form">
+      <h4>New enum</h4>
+      <div class="row">
+        <label>name</label><input id="type-enum-name" placeholder="Mode">
+        <label>variants</label><input id="type-enum-variants" style="flex:1" placeholder="OFF, ARMED, FIRING">
+        <button class="primary" onclick="typesAddEnum()">Create</button>
+      </div>
+    </div>
+
+    <div class="edit-form">
+      <h4>New structure (record)</h4>
+      <div class="row">
+        <label>name</label><input id="type-record-name" placeholder="Sample">
+        <label>fields</label><input id="type-record-fields" style="flex:1" placeholder="value: float32, valid: bool">
+        <button class="primary" onclick="typesAddRecord()">Create</button>
+      </div>
+    </div>
+
+    <div class="edit-form">
+      <h4>New alias / array type</h4>
+      <div class="row">
+        <label>name</label><input id="type-alias-name" placeholder="Vec3">
+        <label>target</label><input id="type-alias-target" style="flex:1" placeholder="float32[3]  (or any type: uint16, Sample[8], …)">
+        <button class="primary" onclick="typesAddAlias()">Create</button>
+      </div>
+    </div>
+    <div class="build-note" id="types-status"></div>
   </div>
 
   <div id="panel-step" style="display:none">
@@ -422,8 +462,8 @@ async function refresh() {
     const icon = d.severity === "Error" ? "✖" : d.severity === "Warning" ? "⚠" : "ℹ";
     x.innerHTML = icon + " <strong>[" + d.code + "]</strong> " + d.message +
       ' <span style="color:#888">' + (d.context || []).join(" · ") + "</span>";
-    // Clicking a message about `node X` selects X in the workspace.
-    const m = (d.context || []).map(c => /^node (\w+)$/.exec(c)).find(Boolean);
+    // Clicking a message about `node X` (or `node X · equation N`) selects X.
+    const m = (d.context || []).map(c => /^node (\w+)/.exec(c)).find(Boolean);
     if (m) {
       x.style.cursor = "pointer";
       x.onclick = () => { const n = findNode(m[1]); if (n) selectNode(n); };
@@ -439,6 +479,7 @@ async function refresh() {
   }
   populateStepInputs();
   populateEditSelectors();
+  loadTypes();
   const e = entryNode();
   document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
   document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
@@ -502,6 +543,7 @@ function showTab(name) {
   }
   if (name === "tests") loadTests();
   if (name === "fsm") loadFsmList();
+  if (name === "types") loadTypes();
 }
 document.querySelectorAll(".tab").forEach(t => t.onclick = () => showTab(t.dataset.tab));
 
@@ -545,6 +587,7 @@ async function loadDiagram(nodeName, push) {
   state.diagPos = computePositions(d);
   renderCrumbs();
   renderProblems();
+  renderDiagramPalette();
   renderDiagram();
 }
 
@@ -668,6 +711,7 @@ function renderDiagram() {
   svgEl.addEventListener("pointerdown", diagPointerDown);
   svgEl.addEventListener("pointermove", diagPointerMove);
   svgEl.addEventListener("pointerup", diagPointerUp);
+  svgEl.addEventListener("contextmenu", diagContextMenu);
 }
 
 function boxCls(base, p) {
@@ -915,6 +959,335 @@ function setFsmStatus(ok, msg) {
   el.textContent = msg;
 }
 
+// --- Types: the SCADE-style types file -------------------------------------
+
+async function loadTypes() {
+  let t;
+  try { t = await fetchJSON("/api/types"); } catch (e) { return; }
+  state.types = t;
+  document.getElementById("types-file-note").textContent = t.types_file
+    ? "Definitions save to " + t.types_file + "."
+    : "No types file in this workspace — definitions save into the model file.";
+  let html;
+  if (!t.types.length) {
+    html = '<span class="build-note">No named types yet — create one below.</span>';
+  } else {
+    html = "<table><thead><tr><th>name</th><th>kind</th><th>definition</th><th>package</th><th></th></tr></thead><tbody>";
+    for (const ty of t.types) {
+      const editable = ty.package !== "stdlib";
+      html += "<tr><td><code class='inline'>" + escapeHTML(ty.name) + "</code></td><td>" + ty.kind +
+        "</td><td>" + escapeHTML(ty.detail) + "</td><td>" + escapeHTML(ty.package) + "</td><td>" +
+        (editable ? '<button onclick="typesRemove(\'' + escapeAttr(ty.name) + '\')">Delete</button>' : "") +
+        "</td></tr>";
+    }
+    html += "</tbody></table>";
+  }
+  document.getElementById("types-list").innerHTML = html;
+  populateTypeSelect(document.getElementById("port-type"));
+}
+
+function typeOptions() {
+  const prims = state.types?.primitives ||
+    ["bool","int8","int16","int32","int64","uint8","uint16","uint32","uint64","float32","float64"];
+  return prims.concat((state.types?.types || []).map(t => t.name));
+}
+
+/// Fill a type selector: primitives, then named types, then "custom…".
+/// Every variable gets a defined data type — `bool` is the default until
+/// the user picks something else.
+function populateTypeSelect(sel, current) {
+  if (!sel) return;
+  const prev = current !== undefined ? current : sel.value;
+  sel.innerHTML = "";
+  for (const t of typeOptions()) {
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  }
+  const custom = document.createElement("option");
+  custom.value = "(custom)"; custom.textContent = "custom…";
+  sel.appendChild(custom);
+  sel.value = typeOptions().includes(prev) ? prev : "bool";
+}
+
+function selectedType(selId, customId) {
+  const sel = document.getElementById(selId);
+  if (sel.value === "(custom)") {
+    return document.getElementById(customId).value.trim() || "bool";
+  }
+  return sel.value || "bool";
+}
+
+function setTypesStatus(ok, msg) {
+  const el = document.getElementById("types-status");
+  el.style.color = ok ? "#107c10" : "#c42b1c";
+  el.textContent = msg;
+}
+
+async function postTypeEdit(payload) {
+  const r = await fetch("/api/edit/add_type", { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setTypesStatus(false, msg);
+    return;
+  }
+  setTypesStatus(true, "saved ✓");
+  await refresh();
+}
+
+function typesAddEnum() {
+  postTypeEdit({
+    kind: "enum",
+    name: document.getElementById("type-enum-name").value.trim(),
+    variants: document.getElementById("type-enum-variants").value
+      .split(",").map(s => s.trim()).filter(Boolean),
+  });
+}
+
+function typesAddRecord() {
+  postTypeEdit({
+    kind: "record",
+    name: document.getElementById("type-record-name").value.trim(),
+    fields: parsePortsSpec(document.getElementById("type-record-fields").value),
+  });
+}
+
+function typesAddAlias() {
+  postTypeEdit({
+    kind: "alias",
+    name: document.getElementById("type-alias-name").value.trim(),
+    target: document.getElementById("type-alias-target").value.trim(),
+  });
+}
+
+async function typesRemove(name) {
+  const r = await fetch("/api/edit/remove_type", { method: "POST", body: JSON.stringify({ name }) });
+  if (!r.ok) {
+    let msg = await r.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    setTypesStatus(false, msg);
+    return;
+  }
+  setTypesStatus(true, "removed `" + name + "`");
+  await refresh();
+}
+
+// --- Draw on canvas: palette drag-drop + right-click properties -------------
+
+function renderDiagramPalette() {
+  const host = document.getElementById("diagram-palette");
+  host.innerHTML = "";
+  if (!state.inspect) return;
+  const current = state.diagramData?.node;
+  for (const pkg of state.inspect.project.packages) {
+    for (const n of pkg.nodes) {
+      if (n.name === current) continue;
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = n.name;
+      chip.title = n.inputs.map(p => p.name + ": " + typeName(p.type)).join(", ") +
+        " — drag onto the canvas to instantiate";
+      chip.draggable = true;
+      chip.ondragstart = ev => ev.dataTransfer.setData("text/plain", n.name);
+      host.appendChild(chip);
+    }
+  }
+}
+
+const diagramHostEl = document.getElementById("diagram-host");
+diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
+diagramHostEl.addEventListener("drop", async ev => {
+  ev.preventDefault();
+  const callee = ev.dataTransfer.getData("text/plain");
+  if (!callee || !state.diagramData) return;
+  const svgEl = document.getElementById("diagram-svg");
+  const r = (svgEl || diagramHostEl).getBoundingClientRect();
+  const x = snap(Math.max(0, ev.clientX - r.left));
+  const y = snap(Math.max(0, ev.clientY - r.top));
+  const resp = await fetch("/api/edit/add_block_call", {
+    method: "POST",
+    body: JSON.stringify({ node: state.diagramData.node, callee, x, y }),
+  });
+  if (!resp.ok) {
+    let msg = await resp.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    document.getElementById("diagram-status").textContent = "drop failed: " + msg;
+    return;
+  }
+  document.getElementById("diagram-status").textContent =
+    "placed " + callee + " — bind its red pins (right-click them)";
+  await refresh();
+  loadDiagram(state.diagramData.node, false);
+});
+
+function escapeAttr(s) {
+  return escapeHTML(s).replace(/"/g, "&quot;");
+}
+
+function knownVarNames() {
+  const d = state.diagramData;
+  return d.inputs.map(p => p.name)
+    .concat(d.outputs.map(p => p.name))
+    .concat(d.locals.map(l => l.name));
+}
+
+function diagContextMenu(ev) {
+  const g = ev.target.closest("g.diag-item");
+  if (!g) return;
+  ev.preventDefault();
+  openProps(g.dataset.id, ev.clientX, ev.clientY);
+}
+
+function openProps(id, cx, cy) {
+  const d = state.diagramData;
+  const panel = document.getElementById("float-panel");
+  let html = "";
+  let varItem = null;
+  const eqMatch = /^eq(\d+)$/.exec(id);
+  const ghost = (d.ghosts || []).find(g => g.name === id);
+  if (eqMatch && d.equations[+eqMatch[1]]) {
+    const i = +eqMatch[1], eq = d.equations[i];
+    state.props = { kind: "eq", index: i };
+    html = "<h4>Equation eq" + i + "</h4>" +
+      '<div class="row">lhs <input id="prop-lhs" style="width:180px" value="' + escapeAttr(eq.lhs.join(", ")) + '"></div>' +
+      '<div class="row" style="align-items:flex-start">body <textarea id="prop-body" rows="2" style="width:100%">' + escapeHTML(eq.body) + "</textarea></div>" +
+      '<button class="primary" onclick="propsApplyEq()">Apply</button>' +
+      '<button onclick="propsDeleteEq()">Delete equation</button>';
+  } else if (ghost) {
+    state.props = { kind: "ghost", name: id };
+    html = "<h4>Unbound pin " + escapeHTML(id) + "</h4>" +
+      '<p class="build-note">' + escapeHTML(ghost.reason) + "</p>" +
+      '<div class="row">bind to <select id="prop-bind">' +
+      knownVarNames().map(v => '<option value="' + escapeAttr(v) + '">' + escapeHTML(v) + "</option>").join("") +
+      "</select></div>" +
+      '<button class="primary" onclick="propsBindGhost()">Bind</button>';
+  } else {
+    const role = d.inputs.find(p => p.name === id) ? "input"
+      : d.outputs.find(p => p.name === id) ? "output"
+      : d.locals.find(l => l.name === id) ? "local" : null;
+    if (!role) return;
+    varItem = (role === "input" ? d.inputs : role === "output" ? d.outputs : d.locals)
+      .find(p => p.name === id);
+    state.props = { kind: "var", name: id, role };
+    html = "<h4>" + escapeHTML(id) + " <span class='badge'>" + role + "</span></h4>" +
+      '<div class="row">name <input id="prop-name" style="width:150px" value="' + escapeAttr(id) + '"></div>' +
+      '<div class="row">type <select id="prop-type"></select> <input id="prop-type-custom" style="display:none;width:90px"></div>' +
+      '<div class="row">role <select id="prop-role">' +
+      ["input", "output", "local"].map(r =>
+        '<option value="' + r + '"' + (r === role ? " selected" : "") + ">" + r + "</option>").join("") +
+      '</select></div>' +
+      '<p class="build-note">role change = e.g. treat this local as an output</p>' +
+      '<button class="primary" onclick="propsApplyVar()">Apply</button>' +
+      '<button onclick="propsDeleteVar()">Delete</button>';
+  }
+  html += '<div style="margin-top:4px"><a href="#" onclick="propsClose();return false">close</a></div>';
+  panel.innerHTML = html;
+  panel.style.left = Math.min(cx, window.innerWidth - 320) + "px";
+  panel.style.top = Math.min(cy, window.innerHeight - 280) + "px";
+  panel.style.display = "";
+  if (state.props.kind === "var" && varItem) {
+    const sel = document.getElementById("prop-type");
+    const cur = typeName(varItem.type);
+    populateTypeSelect(sel, cur);
+    sel.addEventListener("change", () => {
+      document.getElementById("prop-type-custom").style.display =
+        sel.value === "(custom)" ? "" : "none";
+    });
+    if (!typeOptions().includes(cur)) {
+      sel.value = "(custom)";
+      const c = document.getElementById("prop-type-custom");
+      c.style.display = "";
+      c.value = cur;
+    }
+  }
+}
+
+function propsClose() {
+  document.getElementById("float-panel").style.display = "none";
+  state.props = null;
+}
+
+async function propsPost(path, payload) {
+  const r = await fetch(path, { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    document.getElementById("diagram-status").textContent = msg;
+    return false;
+  }
+  propsClose();
+  await refresh();
+  if (state.diagramData) loadDiagram(state.diagramData.node, false);
+  return true;
+}
+
+function propsApplyVar() {
+  propsPost("/api/edit/update_port", {
+    node: state.diagramData.node,
+    name: state.props.name,
+    new_name: document.getElementById("prop-name").value.trim(),
+    new_type: selectedType("prop-type", "prop-type-custom"),
+    new_role: document.getElementById("prop-role").value,
+  });
+}
+
+function propsDeleteVar() {
+  propsPost("/api/edit/remove_port", {
+    node: state.diagramData.node,
+    name: state.props.name,
+  });
+}
+
+function propsApplyEq() {
+  propsPost("/api/edit/update_equation", {
+    node: state.diagramData.node,
+    index: state.props.index,
+    lhs: document.getElementById("prop-lhs").value.trim(),
+    body: document.getElementById("prop-body").value.trim(),
+  });
+}
+
+function propsDeleteEq() {
+  propsPost("/api/edit/remove_equation", {
+    node: state.diagramData.node,
+    index: state.props.index,
+  });
+}
+
+function replaceIdent(text, from, to) {
+  const esc = from.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp("\\b" + esc + "\\b", "g"), to);
+}
+
+/// Bind an unbound (ghost) pin: rewrite every equation that mentions it.
+async function propsBindGhost() {
+  const from = state.props.name;
+  const to = document.getElementById("prop-bind").value;
+  const d = state.diagramData;
+  for (let i = 0; i < d.equations.length; i++) {
+    const eq = d.equations[i];
+    const lhs = eq.lhs.join(", ");
+    const newLhs = replaceIdent(lhs, from, to);
+    const newBody = replaceIdent(eq.body, from, to);
+    if (newLhs !== lhs || newBody !== eq.body) {
+      const r = await fetch("/api/edit/update_equation", {
+        method: "POST",
+        body: JSON.stringify({ node: d.node, index: i, lhs: newLhs, body: newBody }),
+      });
+      if (!r.ok) {
+        document.getElementById("diagram-status").textContent = await r.text();
+        return;
+      }
+    }
+  }
+  propsClose();
+  await refresh();
+  loadDiagram(d.node, false);
+}
+
 // --- Editing ---
 
 function populateEditSelectors() {
@@ -993,7 +1366,7 @@ function editAddPort() {
   const payload = {
     node: document.getElementById("port-node").value,
     name: document.getElementById("port-name").value.trim(),
-    type: document.getElementById("port-type").value.trim(),
+    type: selectedType("port-type", "port-type-custom"),
   };
   if (side === "local") {
     postEdit("/api/edit/add_local", payload);
@@ -1210,6 +1583,11 @@ async function downloadBuild() {
     document.body.removeChild(a);
   }
 }
+
+document.getElementById("port-type").addEventListener("change", () => {
+  document.getElementById("port-type-custom").style.display =
+    document.getElementById("port-type").value === "(custom)" ? "" : "none";
+});
 
 refresh();
 // Live-reload — the model file may be edited externally.
