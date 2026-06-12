@@ -260,7 +260,7 @@ impl Parser {
     }
 
     fn parse_arrow(&mut self) -> Result<Expr, ParseError> {
-        let init = self.parse_implies()?;
+        let init = self.parse_when()?;
         if matches!(self.peek(), Some(Tok::Arrow)) {
             self.bump();
             let body = self.parse_arrow()?;
@@ -268,6 +268,28 @@ impl Parser {
         } else {
             Ok(init)
         }
+    }
+
+    /// `e when c` / `e when not c` — clock sampling. Left-associative so
+    /// `x when c when d` nests the sampling. The condition must be a plain
+    /// variable name (the classic Lustre restriction).
+    fn parse_when(&mut self) -> Result<Expr, ParseError> {
+        let mut e = self.parse_implies()?;
+        while self.eat_kw("when") {
+            let on = !self.eat_kw("not");
+            match self.bump() {
+                Some(Tok::Ident(clock)) => {
+                    e = Expr::when(e, clock, on);
+                }
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: "clock variable name after `when`".into(),
+                        found: other.map(|t| t.describe()).unwrap_or_else(|| "<eof>".into()),
+                    })
+                }
+            }
+        }
+        Ok(e)
     }
 
     fn parse_implies(&mut self) -> Result<Expr, ParseError> {
@@ -505,6 +527,29 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen)?;
+                    // `merge(c, a, b)` joins two complementary clocked
+                    // streams; the clock must be a variable name.
+                    if name == "merge" {
+                        if args.len() != 3 {
+                            return Err(ParseError::Expected {
+                                expected: "merge(clock, on_true, on_false)".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        let on_false = args.pop().unwrap();
+                        let on_true = args.pop().unwrap();
+                        let clock = match args.pop().unwrap() {
+                            Expr::Var { name } => name,
+                            other => {
+                                return Err(ParseError::Expected {
+                                    expected: "a clock variable name as merge's first argument"
+                                        .into(),
+                                    found: ol_ir_expr_describe(&other),
+                                })
+                            }
+                        };
+                        return Ok(Expr::merge(clock, on_true, on_false));
+                    }
                     // A "call" to a numeric type name is SCADE's numeric_cast:
                     // `int16(x)`, `float64(x)`.
                     if let Some(ty) = numeric_type_name(&name) {
@@ -530,6 +575,15 @@ impl Parser {
             }),
             None => Err(ParseError::UnexpectedEof),
         }
+    }
+}
+
+/// A short description of an expression for parse-error messages.
+fn ol_ir_expr_describe(e: &Expr) -> String {
+    match e {
+        Expr::Const { .. } => "a literal".into(),
+        Expr::Call { node, .. } => format!("a call to `{node}`"),
+        _ => "a compound expression".into(),
     }
 }
 

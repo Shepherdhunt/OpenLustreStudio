@@ -1,6 +1,6 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-11.*
+*Updated 2026-06-12.*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove
@@ -46,8 +46,8 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 
 | Gap | Notes | Priority |
 |---|---|---|
-| Source spans in diagnostics | `Diagnostic.span` exists but is never populated; GUI cannot jump to file:line:col | P0 |
-| Clocks (`when` / `merge`) | The single biggest Lustre-language omission; Kind 2 and codegen both support clocked code | P1 |
+| Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
+| ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
 | Hierarchical/parallel automata | Our FSMs are flat Moore-style; SCADE automata nest, run in parallel, carry history and signals | P1 |
 | Array iterators (`map`/`fold`) | Needed for vector-heavy avionics models; today arrays exist but loops must be unrolled | P1 |
 | MC/DC proper | Decision coverage landed; MC/DC needs per-condition masking analysis on the same substrate | P1 |
@@ -88,7 +88,38 @@ verification burden the qualified tool would otherwise discharge.
 | winget/MSIX distribution | `winget install OpenLustreStudio` once the repo publishes releases | P2 |
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
-## 6. What closed this session (2026-06-11)
+## 6. What closed recently
+
+### 2026-06-12 — boolean clocks (`when` / `merge`), the biggest language gap
+
+* **Clock calculus** (`ol_ir::clocks`, shared by typecheck/sim/codegen so all
+  three agree): every expression runs on the base clock or a chain of boolean
+  conditions; `e when c` / `e when not c` samples down, `merge(c, a, b)` joins
+  complementary streams back up. Conditions are variable names (the classic
+  restriction). Locals infer their clock from their defining equation;
+  inputs/outputs stay base-clocked. Violations are E0130–E0135, pinned to
+  their equations: mixed-clock operands, non-bool clocks, clocked outputs
+  (with a "use merge" hint), clocked equations in functions, clocked arrays.
+* **Semantics: held values + first-tick temporals.** A clocked equation runs
+  only on its clock's active cycles; its lhs holds the last value through
+  inactive ones (the deterministic watch-view trace). A clocked `->` counts
+  ticks of *its* clock — `0 -> pre cnt + one` on clock `tick` yields 0 on the
+  first true cycle of `tick`, whenever that arrives. The simulator tracks
+  per-chain tick counts; the generated C mirrors it with guarded equation
+  blocks, `held_*` state fields, and per-chain `clkN_ticked` flags. The
+  dual-backend scenario test pins IR and compiled C cell-by-cell on gating
+  patterns (off-start, bursts, long holds).
+* **Authoring**: `when` / `when not` / `merge` blocks in the Time/Statefuls
+  toolbox family with pin contracts; WHEN/WHEN¬/MERGE diagram symbols; the
+  Kind 2 view emits Lustre V6 merge-case syntax.
+* Conscious v1 limits (all loud, none silent): stateful calls finer than
+  their equation's clock are rejected (E0133), clocked arrays are roadmap
+  (E0135), and merge branches don't count toward decision coverage yet.
+* **Also this session**: operation pin contracts in the toolbox + variadic
+  input counts (2..=12) for the associative operations, resizable from the
+  Properties sheet (`/api/edit/set_operation_inputs`, journaled in undo).
+
+### 2026-06-11
 
 * Windows 11 is now a first-class build/test platform: the scenario harness's C
   backend discovers MSVC via `vswhere`/`vcvars64.bat` when no `cc`/`gcc`/`clang`

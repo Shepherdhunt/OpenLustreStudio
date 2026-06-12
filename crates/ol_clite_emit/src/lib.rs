@@ -236,6 +236,11 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
                 walk_call_targets(i, f);
             }
         }
+        Expr::When { arg, .. } => walk_call_targets(arg, f),
+        Expr::Merge { on_true, on_false, .. } => {
+            walk_call_targets(on_true, f);
+            walk_call_targets(on_false, f);
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -295,6 +300,11 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
                 walk_calls_assign(i, map, idx);
             }
         }
+        Expr::When { arg, .. } => walk_calls_assign(arg, map, idx),
+        Expr::Merge { on_true, on_false, .. } => {
+            walk_calls_assign(on_true, map, idx);
+            walk_calls_assign(on_false, map, idx);
+        }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
     }
 }
@@ -334,6 +344,13 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
     }
     for (idx, callee) in &stateful_subs {
         let _ = writeln!(out, "  {callee}_State sub_{idx};");
+    }
+    let clocks = node_clocks(node);
+    for (name, ty) in clocks.held_fields(node) {
+        let _ = writeln!(out, "  {}; /* held through inactive cycles */", type_decl(&ty, &name));
+    }
+    for (i, ck) in clocks.info.chains.iter().enumerate() {
+        let _ = writeln!(out, "  bool clk{i}_ticked; /* {} */", ck.key());
     }
     let _ = writeln!(out, "}} {prefix}_State;");
     out.push('\n');
@@ -402,10 +419,12 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         is_stateful: node.kind != NodeKind::Function,
     };
 
+    let clocks = node_clocks(node);
     let mut ctx = EmitCtx {
         scope: &scope,
         project,
         call_sites: &call_sites,
+        clocks: &clocks,
     };
 
     // C assignments execute top-to-bottom, so equations must be emitted in
@@ -417,13 +436,43 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         .unwrap_or_else(|_| (0..node.equations.len()).collect());
     for &i in &order {
         let eq = &node.equations[i];
-        emit_equation_body(eq, &mut ctx, out);
+        let eq_clock = clocks
+            .info
+            .equation_clocks
+            .get(i)
+            .cloned()
+            .unwrap_or(ol_ir::Clock::Base);
+        if eq_clock.is_base() || node.kind == NodeKind::Function {
+            emit_equation_body(eq, &mut ctx, out);
+            continue;
+        }
+        // Clocked equation: run only on active cycles, hold the lhs through
+        // inactive ones — exactly the simulator's gating.
+        let cond = clocks.chain_cond(&eq_clock, &scope);
+        let _ = writeln!(out, "  if ({cond}) {{");
+        let mut body = String::new();
+        emit_equation_body(eq, &mut ctx, &mut body);
+        for line in body.lines() {
+            let _ = writeln!(out, "  {line}");
+        }
+        for l in &eq.lhs {
+            let _ = writeln!(out, "    self->held_{} = {};", c_ident(l), scope.ref_var(l));
+        }
+        let _ = writeln!(out, "  }} else {{");
+        for l in &eq.lhs {
+            let _ = writeln!(out, "    {} = self->held_{};", scope.ref_var(l), c_ident(l));
+        }
+        let _ = writeln!(out, "  }}");
     }
 
     if node.kind != NodeKind::Function {
         for (sname, _) in &state_fields {
             let driver = state_driver_name(sname, &scope);
             let _ = writeln!(out, "  self->{sname} = {driver};");
+        }
+        for (i, ck) in clocks.info.chains.iter().enumerate() {
+            let cond = clocks.chain_cond(ck, &scope);
+            let _ = writeln!(out, "  if ({cond}) self->clk{i}_ticked = true;");
         }
         let _ = writeln!(out, "  self->initialized = true;");
     }
@@ -491,7 +540,92 @@ fn collect_stateful(
                 collect_stateful(i, call_sites, project, out);
             }
         }
+        Expr::When { arg, .. } => collect_stateful(arg, call_sites, project, out),
+        Expr::Merge { on_true, on_false, .. } => {
+            collect_stateful(on_true, call_sites, project, out);
+            collect_stateful(on_false, call_sites, project, out);
+        }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
+    }
+}
+
+/// Clock support for the generated C, mirroring the simulator exactly:
+/// a clocked equation becomes a guarded `if` whose lhs holds its previous
+/// value through inactive cycles (a `held_*` state field), and a clocked
+/// `->` consults a per-chain `clkN_ticked` flag instead of the node-wide
+/// `initialized` flag — `init` on the chain's first tick, `body` after.
+struct NodeClocks {
+    info: ol_ir::ClockInfo,
+    /// Chain key ([`ol_ir::Clock::key`]) -> state-field name.
+    chain_fields: HashMap<String, String>,
+}
+
+fn node_clocks(node: &NodeDef) -> NodeClocks {
+    let info = if ol_ir::node_uses_clocks(node) {
+        ol_ir::infer_clocks(node)
+    } else {
+        ol_ir::ClockInfo::default()
+    };
+    let chain_fields = info
+        .chains
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.key(), format!("clk{i}_ticked")))
+        .collect();
+    NodeClocks { info, chain_fields }
+}
+
+impl NodeClocks {
+    /// Held-value state fields: one per lhs of every clocked equation.
+    fn held_fields(&self, node: &NodeDef) -> Vec<(String, Type)> {
+        let env: HashMap<&str, &Type> = node
+            .inputs
+            .iter()
+            .map(|p| (p.name.as_str(), &p.ty))
+            .chain(node.outputs.iter().map(|p| (p.name.as_str(), &p.ty)))
+            .chain(node.locals.iter().map(|l| (l.name.as_str(), &l.ty)))
+            .collect();
+        let mut out = Vec::new();
+        let mut seen = BTreeSet::new();
+        for (i, eq) in node.equations.iter().enumerate() {
+            let clocked = self
+                .info
+                .equation_clocks
+                .get(i)
+                .map(|c| !c.is_base())
+                .unwrap_or(false);
+            if !clocked {
+                continue;
+            }
+            for l in &eq.lhs {
+                if seen.insert(l.clone()) {
+                    let ty = env.get(l.as_str()).copied().cloned().unwrap_or(Type::Bool);
+                    out.push((format!("held_{}", c_ident(l)), ty));
+                }
+            }
+        }
+        out
+    }
+
+    /// C condition for "this chain is active this cycle".
+    fn chain_cond(&self, ck: &ol_ir::Clock, scope: &Scope) -> String {
+        let parts: Vec<String> = ck
+            .conditions()
+            .iter()
+            .map(|(var, on)| {
+                let r = scope.ref_var(var);
+                if *on {
+                    r
+                } else {
+                    format!("!{r}")
+                }
+            })
+            .collect();
+        if parts.is_empty() {
+            "true".to_string()
+        } else {
+            parts.join(" && ")
+        }
     }
 }
 
@@ -522,6 +656,7 @@ struct EmitCtx<'a> {
     scope: &'a Scope,
     project: &'a Project,
     call_sites: &'a HashMap<usize, CallSite>,
+    clocks: &'a NodeClocks,
 }
 
 fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
@@ -662,8 +797,18 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let (mut s, i) = lower_anf(init, ctx);
             let (sb, b) = lower_anf(body, ctx);
             s.extend(sb);
-            let prefix = if ctx.scope.is_stateful { "self->initialized" } else { "false" };
-            (s, format!("(!{prefix} ? ({i}) : ({b}))"))
+            // A clocked arrow counts ticks of ITS clock: init on the chain's
+            // first active cycle, body afterwards. Base-clocked arrows keep
+            // the node-wide initialized flag (same thing for the base chain).
+            let key = expr as *const Expr as usize;
+            let first = match ctx.clocks.info.site_clocks.get(&key) {
+                Some(ck) if !ck.is_base() => {
+                    format!("!self->{}", ctx.clocks.chain_fields[&ck.key()])
+                }
+                _ if ctx.scope.is_stateful => "!self->initialized".to_string(),
+                _ => "!false".to_string(),
+            };
+            (s, format!("({first} ? ({i}) : ({b}))"))
         }
         Expr::Call { args, .. } => {
             let key = expr as *const Expr as usize;
@@ -707,6 +852,16 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             (s, format!("{b}[{i}]"))
         }
         Expr::Tuple { .. } => (vec![], "/* tuple */ 0".into()),
+        // Sampling is pure evaluation here: the equation guard (or the merge
+        // ternary) already decides which cycles reach this expression.
+        Expr::When { arg, .. } => lower_anf(arg, ctx),
+        Expr::Merge { clock, on_true, on_false } => {
+            let (mut s, t) = lower_anf(on_true, ctx);
+            let (sf, f) = lower_anf(on_false, ctx);
+            s.extend(sf);
+            let c = ctx.scope.ref_var(clock);
+            (s, format!("({c} ? ({t}) : ({f}))"))
+        }
     }
 }
 
@@ -831,6 +986,11 @@ fn collect_pre_vars(
             for i in items {
                 collect_pre_vars(i, env, out, seen);
             }
+        }
+        Expr::When { arg, .. } => collect_pre_vars(arg, env, out, seen),
+        Expr::Merge { on_true, on_false, .. } => {
+            collect_pre_vars(on_true, env, out, seen);
+            collect_pre_vars(on_false, env, out, seen);
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }

@@ -8,7 +8,8 @@
 //!
 //! * No higher-order operators.
 //! * No anonymous nodes.
-//! * No clocks beyond the base clock (Phase 0 profile).
+//! * Boolean clocks only: `e when c` / `e when not c` / `merge(c, a, b)`
+//!   with variable-name conditions (see [`clocks`]).
 //! * Arrays are fixed-size and statically typed.
 //! * Records are nominal and declared.
 //! * `pre` always has an initial value supplied via `->`.
@@ -22,7 +23,9 @@ pub mod slice;
 pub mod state_machine;
 pub mod diag;
 pub mod loader;
+pub mod clocks;
 
+pub use clocks::{infer_clocks, node_uses_clocks, Clock, ClockError, ClockInfo};
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, Literal, UnaryOp};
 pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port};

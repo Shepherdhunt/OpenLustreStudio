@@ -449,6 +449,40 @@ fn variadic_operations_declare_contracts_and_resize_their_pins() {
     assert!(body.contains("fixed number of inputs"), "{body}");
 }
 
+// --- Clock blocks in the toolbox -----------------------------------------------
+
+#[test]
+fn when_and_merge_drop_from_the_time_family() {
+    let g = start_server_on_workspace("ops_clock");
+    let port = g.port;
+
+    let cat = get_json(port, "/api/operations");
+    let time = cat["categories"].as_array().unwrap().iter()
+        .find(|c| c["name"] == "Time/Statefuls").unwrap();
+    let ids: Vec<&str> = time["items"].as_array().unwrap()
+        .iter().map(|i| i["id"].as_str().unwrap()).collect();
+    for id in ["when", "when_not", "merge"] {
+        assert!(ids.contains(&id), "Time/Statefuls missing {id}: {ids:?}");
+    }
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Clocked","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Clocked","op":"when","x":40.0,"y":40.0}"#);
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Clocked","op":"merge","x":40.0,"y":120.0}"#);
+    let d = get_json(port, "/api/diagram?node=Clocked");
+    assert_eq!(d["equations"][0]["body"], "p0_1 when p0_2");
+    assert_eq!(d["equations"][0]["symbol"]["text"], "WHEN");
+    assert_eq!(d["equations"][1]["body"], "merge(p1_1, p1_2, p1_3)");
+    assert_eq!(d["equations"][1]["symbol"]["text"], "MERGE");
+    // All three merge pins are red unbound ghosts awaiting wires.
+    let ghosts: Vec<&str> = d["ghosts"].as_array().unwrap()
+        .iter().map(|g| g["name"].as_str().unwrap()).collect();
+    for pin in ["p1_1", "p1_2", "p1_3"] {
+        assert!(ghosts.contains(&pin), "{ghosts:?}");
+    }
+}
+
 // --- Compile C-Lite from the GUI ----------------------------------------------
 
 #[test]

@@ -54,6 +54,17 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
                 same_cycle_reads(i, out);
             }
         }
+        // Clock conditions are same-cycle reads: an equation must not run
+        // before its clock variable has this cycle's value.
+        Expr::When { arg, clock, .. } => {
+            out.insert(clock.clone());
+            same_cycle_reads(arg, out);
+        }
+        Expr::Merge { clock, on_true, on_false } => {
+            out.insert(clock.clone());
+            same_cycle_reads(on_true, out);
+            same_cycle_reads(on_false, out);
+        }
     }
 }
 

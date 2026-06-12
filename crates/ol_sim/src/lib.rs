@@ -126,6 +126,11 @@ pub enum SimError {
 pub struct State {
     cycle: usize,
     prev: HashMap<String, Value>,
+    /// Completed active cycles per non-base clock chain (keyed by
+    /// [`ol_ir::Clock::key`]). A clocked `->` takes its init branch while
+    /// its chain's count is still zero — the clocked analogue of
+    /// `cycle == 0`.
+    clock_ticks: HashMap<String, usize>,
 }
 
 pub struct Sim<'a> {
@@ -142,6 +147,9 @@ pub struct Sim<'a> {
     /// Dependency order for the entry node's equations — declaration order is
     /// not sufficient (forward references would read stale defaults).
     eq_order: Vec<usize>,
+    /// Clock inference for the entry node: which cycles each equation runs,
+    /// which clock every `pre`/`->` site counts, and the chains to tick.
+    clock_info: ol_ir::ClockInfo,
     /// Decision-coverage collector; populated by [`Sim::enable_coverage`].
     coverage: Option<Coverage>,
 }
@@ -175,6 +183,7 @@ impl<'a> Sim<'a> {
                     &mut throwaway_state,
                     &mut throwaway_calls,
                     project,
+                    None,
                     &mut None,
                 )
                 .map_err(|e| SimError::EvalError(format!("constant `{}`: {e}", c.name)))?;
@@ -183,6 +192,11 @@ impl<'a> Sim<'a> {
         }
 
         let eq_order = ol_ir::evaluation_order(node).map_err(SimError::EvalError)?;
+        let clock_info = if ol_ir::node_uses_clocks(node) {
+            ol_ir::infer_clocks(node)
+        } else {
+            ol_ir::ClockInfo::default()
+        };
 
         Ok(Sim {
             project,
@@ -192,6 +206,7 @@ impl<'a> Sim<'a> {
             call_states: HashMap::new(),
             consts,
             eq_order,
+            clock_info,
             coverage: None,
         })
     }
@@ -247,25 +262,47 @@ impl<'a> Sim<'a> {
         for (k, v) in inputs {
             env.insert(k.clone(), v.clone());
         }
+        // Outputs/locals seed from their previous value when one exists:
+        // a clocked variable HOLDS its last value through inactive cycles
+        // (the deterministic watch-view semantics). Base-clocked variables
+        // are overwritten by their equations every cycle regardless.
         for p in &self.node.outputs {
-            env.entry(p.name.clone())
-                .or_insert_with(|| default_value(&p.ty, self.project));
+            env.entry(p.name.clone()).or_insert_with(|| {
+                self.state
+                    .prev
+                    .get(&p.name)
+                    .cloned()
+                    .unwrap_or_else(|| default_value(&p.ty, self.project))
+            });
         }
         for l in &self.node.locals {
-            env.entry(l.name.clone())
-                .or_insert_with(|| default_value(&l.ty, self.project));
+            env.entry(l.name.clone()).or_insert_with(|| {
+                self.state
+                    .prev
+                    .get(&l.name)
+                    .cloned()
+                    .unwrap_or_else(|| default_value(&l.ty, self.project))
+            });
         }
 
         // Dependency order, not declaration order: a forward reference like
         // `n = constant1 + 1; constant1 = 1;` must see this cycle's value.
+        // A clocked equation runs only on its clock's active cycles — the
+        // order guarantees clock variables compute before they gate anyone.
         for &i in &self.eq_order {
             let eq = &self.node.equations[i];
+            if let Some(ck) = self.clock_info.equation_clocks.get(i) {
+                if !clock_active(ck, &env)? {
+                    continue;
+                }
+            }
             let value = eval(
                 &eq.rhs,
                 &env,
                 &mut self.state,
                 &mut self.call_states,
                 self.project,
+                Some(&self.clock_info.site_clocks),
                 &mut self.coverage,
             )?;
             if eq.lhs.len() == 1 {
@@ -281,6 +318,13 @@ impl<'a> Sim<'a> {
             }
         }
 
+        // Count this cycle for every chain that was active, so clocked
+        // `->` sites know their first tick has passed.
+        for ck in &self.clock_info.chains {
+            if clock_active(ck, &env)? {
+                *self.state.clock_ticks.entry(ck.key()).or_insert(0) += 1;
+            }
+        }
         for (k, v) in &env {
             self.state.prev.insert(k.clone(), v.clone());
         }
@@ -487,7 +531,7 @@ fn evaluate_monitor(
     // Guarantees are always required to hold.
     for (i, g) in c.guarantees.iter().enumerate() {
         let label = g.name.clone().unwrap_or_else(|| format!("guarantee#{i}"));
-        match eval(&g.expr, &env, &mut state, &mut call_states, &project, &mut None) {
+        match eval(&g.expr, &env, &mut state, &mut call_states, &project, None, &mut None) {
             Ok(Value::Bool(true)) => {}
             _ => violations.push(label),
         }
@@ -498,7 +542,7 @@ fn evaluate_monitor(
     for m in &c.modes {
         let mut hit = true;
         for r in &m.requires {
-            match eval(r, &env, &mut state, &mut call_states, &project, &mut None) {
+            match eval(r, &env, &mut state, &mut call_states, &project, None, &mut None) {
                 Ok(Value::Bool(true)) => {}
                 _ => {
                     hit = false;
@@ -510,7 +554,7 @@ fn evaluate_monitor(
             active.push(m.name.clone());
             for (j, e) in m.ensures.iter().enumerate() {
                 let label = format!("{}::ensure#{j}", m.name);
-                match eval(e, &env, &mut state, &mut call_states, &project, &mut None) {
+                match eval(e, &env, &mut state, &mut call_states, &project, None, &mut None) {
                     Ok(Value::Bool(true)) => {}
                     _ => violations.push(label),
                 }
@@ -557,12 +601,50 @@ fn narrow_int(t: &Type, i: i64) -> i64 {
     }
 }
 
+/// True on the cycles where every condition along `ck`'s chain holds.
+fn clock_active(ck: &ol_ir::Clock, env: &BTreeMap<String, Value>) -> Result<bool, SimError> {
+    for (var, on) in ck.conditions() {
+        match env.get(&var) {
+            Some(Value::Bool(b)) => {
+                if *b != on {
+                    return Ok(false);
+                }
+            }
+            Some(other) => {
+                return Err(SimError::EvalError(format!(
+                    "clock `{var}` must be bool, got {other:?}"
+                )))
+            }
+            None => {
+                return Err(SimError::EvalError(format!(
+                    "clock variable `{var}` has no value this cycle"
+                )))
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Whether a `pre`/`->` site is on its first tick: cycle 0 for base-clocked
+/// sites, "chain never active before" for clocked ones.
+fn first_tick(
+    expr: &Expr,
+    state: &State,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
+) -> bool {
+    match site_clocks.and_then(|m| m.get(&(expr as *const Expr as usize))) {
+        None | Some(ol_ir::Clock::Base) => state.cycle == 0,
+        Some(ck) => state.clock_ticks.get(&ck.key()).copied().unwrap_or(0) == 0,
+    }
+}
+
 fn eval(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
     state: &mut State,
     call_states: &mut HashMap<usize, State>,
     project: &Project,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
     cov: &mut Option<Coverage>,
 ) -> Result<Value, SimError> {
     match expr {
@@ -577,7 +659,7 @@ fn eval(
                 .ok_or_else(|| SimError::EvalError(format!("unbound variable `{name}`"))),
         },
         Expr::Unary { op, arg } => {
-            let v = eval(arg, env, state, call_states, project, cov)?;
+            let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             Ok(match (op, v) {
                 (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
                 (UnaryOp::Neg, Value::Int(i)) => Value::Int(-i),
@@ -590,8 +672,8 @@ fn eval(
             })
         }
         Expr::Binary { op, lhs, rhs } => {
-            let l = eval(lhs, env, state, call_states, project, cov)?;
-            let r = eval(rhs, env, state, call_states, project, cov)?;
+            let l = eval(lhs, env, state, call_states, project, site_clocks, cov)?;
+            let r = eval(rhs, env, state, call_states, project, site_clocks, cov)?;
             eval_binary(*op, l, r)
         }
         Expr::IfThenElse {
@@ -599,24 +681,26 @@ fn eval(
             then_branch,
             else_branch,
         } => {
-            let c = eval(cond, env, state, call_states, project, cov)?;
+            let c = eval(cond, env, state, call_states, project, site_clocks, cov)?;
             if let (Some(coverage), Value::Bool(b)) = (cov.as_mut(), &c) {
                 coverage.mark(cond.as_ref() as *const Expr as usize, *b);
             }
             match c {
-                Value::Bool(true) => eval(then_branch, env, state, call_states, project, cov),
-                Value::Bool(false) => eval(else_branch, env, state, call_states, project, cov),
+                Value::Bool(true) => eval(then_branch, env, state, call_states, project, site_clocks, cov),
+                Value::Bool(false) => eval(else_branch, env, state, call_states, project, site_clocks, cov),
                 other => Err(SimError::EvalError(format!(
                     "if-condition is not bool: {other:?}"
                 ))),
             }
         }
         Expr::Pre { arg } => {
-            if state.cycle == 0 {
+            if first_tick(expr, state, site_clocks) {
                 Err(SimError::EvalError(
-                    "uninitialized `pre` evaluated on the first cycle (missing `->`)".into(),
+                    "uninitialized `pre` evaluated on its first tick (missing `->`)".into(),
                 ))
             } else if let Expr::Var { name } = arg.as_ref() {
+                // A clocked variable holds its value through inactive cycles,
+                // so the previous-cycle snapshot IS its value at the last tick.
                 state.prev.get(name).cloned().ok_or_else(|| {
                     SimError::EvalError(format!("no previous value for `{name}`"))
                 })
@@ -627,19 +711,39 @@ fn eval(
             }
         }
         Expr::Arrow { init, body } => {
-            if state.cycle == 0 {
-                eval(init, env, state, call_states, project, cov)
+            if first_tick(expr, state, site_clocks) {
+                eval(init, env, state, call_states, project, site_clocks, cov)
             } else {
-                eval(body, env, state, call_states, project, cov)
+                eval(body, env, state, call_states, project, site_clocks, cov)
             }
         }
+        // The clock checker guarantees a `when` is only reached on cycles
+        // where its condition already holds (its equation or merge branch is
+        // gated), so sampling is just evaluation here.
+        Expr::When { arg, .. } => eval(arg, env, state, call_states, project, site_clocks, cov),
+        // Only the active branch evaluates: state under the inactive branch
+        // (clocked arrows, stateful calls) must not advance on its off cycles.
+        Expr::Merge { clock, on_true, on_false } => match env.get(clock) {
+            Some(Value::Bool(true)) => {
+                eval(on_true, env, state, call_states, project, site_clocks, cov)
+            }
+            Some(Value::Bool(false)) => {
+                eval(on_false, env, state, call_states, project, site_clocks, cov)
+            }
+            Some(other) => Err(SimError::EvalError(format!(
+                "merge clock `{clock}` must be bool, got {other:?}"
+            ))),
+            None => Err(SimError::EvalError(format!(
+                "merge clock `{clock}` has no value this cycle"
+            ))),
+        },
         Expr::Cast { to, arg } => {
-            let v = eval(arg, env, state, call_states, project, cov)?;
+            let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             cast_value(to, v)
         }
-        Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, cov),
+        Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, site_clocks, cov),
         Expr::Field { base, field } => {
-            let bv = eval(base, env, state, call_states, project, cov)?;
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
             match bv {
                 Value::Record(m) => m.get(field).cloned().ok_or_else(|| {
                     SimError::EvalError(format!("record has no field `{field}`"))
@@ -650,8 +754,8 @@ fn eval(
             }
         }
         Expr::Index { base, index } => {
-            let bv = eval(base, env, state, call_states, project, cov)?;
-            let iv = eval(index, env, state, call_states, project, cov)?;
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
+            let iv = eval(index, env, state, call_states, project, site_clocks, cov)?;
             let i = iv.as_int().ok_or_else(|| {
                 SimError::EvalError(format!("array index must be int, got {iv:?}"))
             })?;
@@ -674,7 +778,7 @@ fn eval(
         Expr::Tuple { items } => {
             let mut vs = Vec::with_capacity(items.len());
             for it in items {
-                vs.push(eval(it, env, state, call_states, project, cov)?);
+                vs.push(eval(it, env, state, call_states, project, site_clocks, cov)?);
             }
             Ok(Value::Tuple(vs))
         }
@@ -689,6 +793,7 @@ fn eval_call(
     state: &mut State,
     call_states: &mut HashMap<usize, State>,
     project: &Project,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
     cov: &mut Option<Coverage>,
 ) -> Result<Value, SimError> {
     let callee = project
@@ -711,7 +816,7 @@ fn eval_call(
     // Evaluate arguments in the OUTER scope (caller's state).
     let mut arg_values: Vec<Value> = Vec::with_capacity(args.len());
     for a in args {
-        arg_values.push(eval(a, env, state, call_states, project, cov)?);
+        arg_values.push(eval(a, env, state, call_states, project, site_clocks, cov)?);
     }
 
     // Project-wide constants are visible inside every callee body. We
@@ -729,6 +834,7 @@ fn eval_call(
                 &mut throw_state,
                 &mut throw_calls,
                 project,
+                None,
                 &mut None,
             ) {
                 callee_env.insert(c.name.clone(), v);
@@ -748,6 +854,11 @@ fn eval_call(
     // Callee bodies need the same dependency-ordered walk as the entry node.
     let callee_order = ol_ir::evaluation_order(callee)
         .map_err(|e| SimError::EvalError(format!("`{}`: {e}", callee.name)))?;
+    let callee_clocks = if ol_ir::node_uses_clocks(callee) {
+        ol_ir::infer_clocks(callee)
+    } else {
+        ol_ir::ClockInfo::default()
+    };
 
     match callee.kind {
         NodeKind::Function => {
@@ -755,7 +866,20 @@ fn eval_call(
             let mut throwaway = State::default();
             for &i in &callee_order {
                 let eq = &callee.equations[i];
-                let v = eval(&eq.rhs, &callee_env, &mut throwaway, call_states, project, cov)?;
+                if let Some(ck) = callee_clocks.equation_clocks.get(i) {
+                    if !clock_active(ck, &callee_env)? {
+                        continue;
+                    }
+                }
+                let v = eval(
+                    &eq.rhs,
+                    &callee_env,
+                    &mut throwaway,
+                    call_states,
+                    project,
+                    Some(&callee_clocks.site_clocks),
+                    cov,
+                )?;
                 bind_lhs(&mut callee_env, eq, v)?;
             }
             extract_output(callee, &mut callee_env)
@@ -766,10 +890,35 @@ fn eval_call(
             // address of the `Expr::Call` node — stable for Sim's lifetime.
             let key = call_expr as *const Expr as usize;
             let mut sub_state = call_states.remove(&key).unwrap_or_default();
+            // Clocked locals/outputs hold their last value through inactive
+            // cycles — reseed them from the instance's previous snapshot.
+            for p in callee.outputs.iter().map(|p| &p.name).chain(callee.locals.iter().map(|l| &l.name)) {
+                if let Some(v) = sub_state.prev.get(p) {
+                    callee_env.insert(p.clone(), v.clone());
+                }
+            }
             for &i in &callee_order {
                 let eq = &callee.equations[i];
-                let v = eval(&eq.rhs, &callee_env, &mut sub_state, call_states, project, cov)?;
+                if let Some(ck) = callee_clocks.equation_clocks.get(i) {
+                    if !clock_active(ck, &callee_env)? {
+                        continue;
+                    }
+                }
+                let v = eval(
+                    &eq.rhs,
+                    &callee_env,
+                    &mut sub_state,
+                    call_states,
+                    project,
+                    Some(&callee_clocks.site_clocks),
+                    cov,
+                )?;
                 bind_lhs(&mut callee_env, eq, v)?;
+            }
+            for ck in &callee_clocks.chains {
+                if clock_active(ck, &callee_env)? {
+                    *sub_state.clock_ticks.entry(ck.key()).or_insert(0) += 1;
+                }
             }
             for (k, v) in &callee_env {
                 sub_state.prev.insert(k.clone(), v.clone());

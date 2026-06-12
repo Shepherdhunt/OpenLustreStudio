@@ -121,6 +121,23 @@ pub enum Expr {
         to: crate::types::Type,
         arg: Box<Expr>,
     },
+    /// `arg when clock` / `arg when not clock`: sample a stream on the cycles
+    /// where the boolean variable `clock` is true (`on: true`) or false.
+    /// Clock conditions are variable names — the classic Lustre restriction —
+    /// so every backend can test them cheaply and statically.
+    When {
+        arg: Box<Expr>,
+        clock: String,
+        on: bool,
+    },
+    /// `merge(clock, on_true, on_false)`: join two complementary clocked
+    /// streams (`on_true` on `clock`'s true cycles, `on_false` on its false
+    /// cycles) back onto the clock `clock` itself runs on.
+    Merge {
+        clock: String,
+        on_true: Box<Expr>,
+        on_false: Box<Expr>,
+    },
 }
 
 impl Expr {
@@ -187,6 +204,16 @@ impl Expr {
     pub fn cast(to: crate::types::Type, arg: Expr) -> Self {
         Expr::Cast { to, arg: Box::new(arg) }
     }
+    pub fn when<S: Into<String>>(arg: Expr, clock: S, on: bool) -> Self {
+        Expr::When { arg: Box::new(arg), clock: clock.into(), on }
+    }
+    pub fn merge<S: Into<String>>(clock: S, on_true: Expr, on_false: Expr) -> Self {
+        Expr::Merge {
+            clock: clock.into(),
+            on_true: Box::new(on_true),
+            on_false: Box::new(on_false),
+        }
+    }
 
     /// `false -> pre e` — the canonical "edge buffer" pattern.
     pub fn pre_with_init(init: Expr, body: Expr) -> Self {
@@ -237,6 +264,11 @@ impl Expr {
                     }
                 }
                 Expr::Cast { arg, .. } => walk(arg, f),
+                Expr::When { arg, .. } => walk(arg, f),
+                Expr::Merge { on_true, on_false, .. } => {
+                    walk(on_true, f);
+                    walk(on_false, f);
+                }
             }
         }
         walk(self, &mut f);
@@ -298,17 +330,36 @@ impl Expr {
                     item.rename_var(from, to);
                 }
             }
+            Expr::When { arg, clock, .. } => {
+                if clock == from {
+                    *clock = to.to_string();
+                }
+                arg.rename_var(from, to);
+            }
+            Expr::Merge { clock, on_true, on_false } => {
+                if clock == from {
+                    *clock = to.to_string();
+                }
+                on_true.rename_var(from, to);
+                on_false.rename_var(from, to);
+            }
         }
     }
 
-    /// Collect free variable names referenced by this expression.
+    /// Collect free variable names referenced by this expression. Clock
+    /// conditions of `when`/`merge` are variable reads and count too.
     pub fn free_vars(&self) -> Vec<String> {
         let mut out = Vec::new();
         self.visit(|e| {
-            if let Expr::Var { name } = e {
+            let mut push = |name: &String| {
                 if !out.contains(name) {
                     out.push(name.clone());
                 }
+            };
+            match e {
+                Expr::Var { name } => push(name),
+                Expr::When { clock, .. } | Expr::Merge { clock, .. } => push(clock),
+                _ => {}
             }
         });
         out

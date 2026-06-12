@@ -213,6 +213,28 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             };
             (t, 100)
         }
+        // `when` sits between `->` (15) and `=>` (18); left-associative so
+        // nested sampling prints as `x when c when d`.
+        Expr::When { arg, clock, on } => {
+            let a = format_expr_prec(arg, 16, lustre);
+            let t = if *on {
+                format!("{a} when {clock}")
+            } else {
+                format!("{a} when not {clock}")
+            };
+            (t, 16)
+        }
+        Expr::Merge { clock, on_true, on_false } => {
+            let t = format_expr_prec(on_true, 0, lustre);
+            let f = format_expr_prec(on_false, 0, lustre);
+            let s = if lustre {
+                // Lustre V6 / Kind 2 boolean merge-case syntax.
+                format!("merge {clock} (true -> {t}) (false -> {f})")
+            } else {
+                format!("merge({clock}, {t}, {f})")
+            };
+            (s, 100)
+        }
     };
     if prec < parent_prec {
         format!("({text})")

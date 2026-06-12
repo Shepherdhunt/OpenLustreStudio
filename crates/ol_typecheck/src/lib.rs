@@ -389,6 +389,96 @@ fn check_node(
             );
         }
     }
+
+    // Clock discipline: every operand on one clock, clock variables sampling
+    // the clock they live on, outputs back on the base clock. The same
+    // inference drives the simulator and the C emitter, so anything that
+    // passes here executes identically in both.
+    if ol_ir::node_uses_clocks(node) {
+        let cinfo = ol_ir::infer_clocks(node);
+        for e in &cinfo.errors {
+            let ectx = match e.equation {
+                Some(i) => format!("{ctx} · equation {i}"),
+                None => ctx.clone(),
+            };
+            diags.push(Diagnostic::error("E0132", e.message.clone()).with_context(ectx));
+        }
+        for (i, ck) in cinfo.equation_clocks.iter().enumerate() {
+            if ck.is_base() {
+                continue;
+            }
+            // A clocked equation holds its lhs through inactive cycles —
+            // that is state, which functions do not have.
+            if node.is_function() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0134",
+                        format!(
+                            "function `{}` has an equation on {} — holding a value \
+                             through inactive cycles is state; make this a node",
+                            node.name,
+                            ck.describe()
+                        ),
+                    )
+                    .with_context(format!("{ctx} · equation {i}")),
+                );
+            }
+            // Held values are plain C assignments; arrays cannot be assigned.
+            for l in &node.equations[i].lhs {
+                if let Some(t) = env.get(l) {
+                    if matches!(tctx.resolve(t), Type::Array { .. }) {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0135",
+                                format!(
+                                    "`{l}` has an array type and cannot be clocked yet — \
+                                     held array values are roadmap"
+                                ),
+                            )
+                            .with_context(format!("{ctx} · equation {i}")),
+                        );
+                    }
+                }
+            }
+        }
+        // Stateful callees must run on their whole equation's clock: that is
+        // the granularity the generated C can guard. Finer placement (a node
+        // call inside one merge branch) would silently step state on the
+        // wrong cycles in C, so it is rejected loudly here.
+        let mut call_kinds: HashMap<usize, String> = HashMap::new();
+        for (i, eq) in node.equations.iter().enumerate() {
+            eq.rhs.visit(|e| {
+                if let Expr::Call { node: callee, .. } = e {
+                    if matches!(sigs.get(callee), Some((_, _, NodeKind::Operator))) {
+                        call_kinds.insert(e as *const Expr as usize, format!("{i}:{callee}"));
+                    }
+                }
+            });
+        }
+        for (site, tag) in &call_kinds {
+            if let Some(call_clock) = cinfo.call_clocks.get(site) {
+                let (i, callee) = tag.split_once(':').unwrap_or(("0", tag));
+                let eq_i: usize = i.parse().unwrap_or(0);
+                if let Some(eq_clock) = cinfo.equation_clocks.get(eq_i) {
+                    if call_clock != eq_clock {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0133",
+                                format!(
+                                    "stateful operator `{callee}` is called on {} inside an \
+                                     equation on {} — move the call into its own equation \
+                                     so its activation clock is explicit",
+                                    call_clock.describe(),
+                                    eq_clock.describe()
+                                ),
+                            )
+                            .with_context(format!("{ctx} · equation {eq_i}")),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn check_pre_initialization(
@@ -444,6 +534,13 @@ fn check_pre_initialization(
             for i in items {
                 check_pre_initialization(i, under_arrow_body, diags, ctx);
             }
+        }
+        // Sampling does not initialize anything: a `pre` under a `when` or a
+        // merge branch still needs its own `->`.
+        Expr::When { arg, .. } => check_pre_initialization(arg, under_arrow_body, diags, ctx),
+        Expr::Merge { on_true, on_false, .. } => {
+            check_pre_initialization(on_true, under_arrow_body, diags, ctx);
+            check_pre_initialization(on_false, under_arrow_body, diags, ctx);
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
@@ -847,6 +944,57 @@ pub fn infer_expr_type(
             }
         }
         Expr::Tuple { .. } => Some(Type::named("__tuple__")),
+        Expr::When { arg, clock, .. } => {
+            check_clock_var_is_bool(clock, env, node, diags, ctx, tctx);
+            // Sampling changes the clock, not the data type.
+            infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, hint)
+        }
+        Expr::Merge { clock, on_true, on_false } => {
+            check_clock_var_is_bool(clock, env, node, diags, ctx, tctx);
+            let t = infer_expr_type(on_true, env, sigs, node, diags, ctx, tctx, hint)?;
+            let else_hint = if hint.is_some() { hint } else { Some(&t) };
+            let f = infer_expr_type(on_false, env, sigs, node, diags, ctx, tctx, else_hint)?;
+            if !types_compatible(tctx, &t, &f) {
+                diags.push(
+                    Diagnostic::error(
+                        "E0131",
+                        format!("merge branches must agree in type, got {t:?} and {f:?}"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            Some(t)
+        }
+    }
+}
+
+/// The condition of a `when`/`merge` must be a declared boolean variable.
+fn check_clock_var_is_bool(
+    clock: &str,
+    env: &BTreeMap<String, Type>,
+    _node: &NodeDef,
+    diags: &mut Vec<Diagnostic>,
+    ctx: &str,
+    tctx: &TypeContext,
+) {
+    match env.get(clock) {
+        Some(t) if tctx.resolve(t).is_bool() => {}
+        Some(t) => {
+            diags.push(
+                Diagnostic::error(
+                    "E0130",
+                    format!("clock `{clock}` must be bool, got {t:?}"),
+                )
+                .with_context(ctx.to_string()),
+            );
+        }
+        None => {
+            diags.push(
+                Diagnostic::error("E0080", format!("unknown identifier `{clock}`"))
+                    .with_context(ctx.to_string()),
+            );
+        }
     }
 }
 
@@ -943,6 +1091,15 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
             for i in items {
                 collect_immediate_deps(i, out);
             }
+        }
+        Expr::When { arg, clock, .. } => {
+            out.insert(clock.clone());
+            collect_immediate_deps(arg, out);
+        }
+        Expr::Merge { clock, on_true, on_false } => {
+            out.insert(clock.clone());
+            collect_immediate_deps(on_true, out);
+            collect_immediate_deps(on_false, out);
         }
     }
 }

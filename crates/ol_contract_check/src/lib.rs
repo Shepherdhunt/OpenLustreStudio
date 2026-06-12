@@ -575,6 +575,10 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
             Expr::Field { base, .. } => walk(base, name, in_pre),
             Expr::Index { base, index } => walk(base, name, in_pre) && walk(index, name, in_pre),
             Expr::Tuple { items } => items.iter().all(|i| walk(i, name, in_pre)),
+            Expr::When { arg, .. } => walk(arg, name, in_pre),
+            Expr::Merge { on_true, on_false, .. } => {
+                walk(on_true, name, in_pre) && walk(on_false, name, in_pre)
+            }
         }
     }
     walk(expr, name, false)

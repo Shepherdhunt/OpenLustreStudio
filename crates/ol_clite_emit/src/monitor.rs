@@ -221,6 +221,15 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         ),
         Expr::Pre { .. } | Expr::Arrow { .. } => "1 /* temporal in monitor: lowered to true */".into(),
         Expr::Call { node, .. } => format!("/* call {node} elided */ 1"),
+        // Contracts are base-clocked; a sampled stream in a monitor reads its
+        // held value, and a merge is the plain conditional it computes.
+        Expr::When { arg, .. } => emit_mon_expr(arg, scope),
+        Expr::Merge { clock, on_true, on_false } => format!(
+            "({} ? {} : {})",
+            scope.ref_name(clock),
+            emit_mon_expr(on_true, scope),
+            emit_mon_expr(on_false, scope)
+        ),
         Expr::Field { base, field } => format!("{}.{field}", emit_mon_expr(base, scope)),
         Expr::Index { base, index } => format!(
             "{}[{}]",
