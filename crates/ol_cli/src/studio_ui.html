@@ -1368,7 +1368,11 @@ function renderToolbox() {
       const item = document.createElement("div");
       item.className = "op-item" + (op.enabled ? "" : " disabled");
       item.textContent = op.label;
-      item.title = op.hint || (op.pins + " input pin" + (op.pins === 1 ? "" : "s"));
+      // Tooltip = the pin contract (e.g. "bool × 2…12 → bool"), then the hint.
+      const sig = op.signature
+        ? op.signature + (op.variadic ? " · input count adjustable in Properties" : "")
+        : op.pins + " input pin" + (op.pins === 1 ? "" : "s");
+      item.title = op.hint ? sig + "\n" + op.hint : sig;
       if (op.enabled) {
         item.draggable = true;
         item.ondragstart = ev =>
@@ -1444,6 +1448,28 @@ function knownVarNames() {
     .concat(d.locals.map(l => l.name));
 }
 
+/// Find one operation in the toolbox catalog by id.
+function opCatalogItem(id) {
+  for (const cat of (state.ops?.categories || [])) {
+    const hit = cat.items.find(o => o.id === id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/// Map a fixed-arity block symbol back to its catalog id, for the contract
+/// note. "=" is ambiguous (equal vs. passthrough) and stays unmapped.
+function symbolOpId(eq) {
+  return {
+    "−": "minus", "/": "divide", "mod": "modulo",
+    "≠": "not_equal", "<": "less_than", "≤": "less_equal",
+    ">": "greater_than", "≥": "greater_equal",
+    "NOT": "not", "⇒": "implies",
+    "FBY": "init_pre", "->": "arrow", "ITE": "if_then_else",
+    "<<": "shift_left", ">>": "shift_right",
+  }[eq.symbol.text] || null;
+}
+
 function diagContextMenu(ev) {
   const g = ev.target.closest("g.diag-item");
   if (!g) return;
@@ -1485,8 +1511,23 @@ function renderProps() {
       : eq.symbol.kind === "const" ? "constant" : "operation " + eq.symbol.text) : "equation";
     html = "<h4 style='margin-top:2px'>" + escapeHTML(what) + " <span class='badge'>eq" + i + "</span></h4>" +
       '<div class="row"><label>defines</label><input id="prop-lhs" style="flex:1" value="' + escapeAttr(eq.lhs.join(", ")) + '"></div>' +
-      '<div class="row" style="align-items:flex-start"><label>expression</label><textarea id="prop-body" rows="2" style="flex:1">' + escapeHTML(eq.body) + "</textarea></div>" +
-      '<button class="primary" onclick="propsApplyEq()">Apply</button>' +
+      '<div class="row" style="align-items:flex-start"><label>expression</label><textarea id="prop-body" rows="2" style="flex:1">' + escapeHTML(eq.body) + "</textarea></div>";
+    // Variadic blocks (and, or, +, ×, …) expose their pin count: 2 up to 12.
+    if (eq.nary) {
+      const cat = opCatalogItem(eq.nary.op);
+      html += '<div class="row"><label>inputs</label>' +
+        '<input id="prop-nary" type="number" min="' + eq.nary.min + '" max="' + eq.nary.max +
+        '" value="' + eq.nary.inputs + '" style="width:64px"> ' +
+        '<span class="build-note">' + escapeHTML(cat && cat.signature
+          ? cat.signature : eq.nary.min + "–" + eq.nary.max + " inputs") + "</span></div>";
+    } else if (eq.symbol && eq.symbol.kind === "op") {
+      const cat = opCatalogItem(symbolOpId(eq));
+      if (cat && cat.signature) {
+        html += '<div class="row"><label>contract</label><span class="build-note">' +
+          escapeHTML(cat.signature) + "</span></div>";
+      }
+    }
+    html += '<button class="primary" onclick="propsApplyEq()">Apply</button>' +
       '<button onclick="propsDeleteEq()">Delete</button>';
   } else if (ghost) {
     html = "<h4 style='margin-top:2px'>Unbound pin <span class='badge'>" + escapeHTML(id) + "</span></h4>" +
@@ -1605,13 +1646,23 @@ async function propsDeleteVar() {
 
 async function propsApplyEq() {
   const i = +/^eq(\d+)$/.exec(state.selection)[1];
-  const ok = await propsFetch("/api/edit/update_equation", {
-    node: state.diagramData.node,
-    index: i,
-    lhs: document.getElementById("prop-lhs").value.trim(),
-    body: document.getElementById("prop-body").value.trim(),
-  });
-  if (ok) await propsReload();
+  const d = state.diagramData;
+  const eq = d.equations[i];
+  const lhs = document.getElementById("prop-lhs").value.trim();
+  const body = document.getElementById("prop-body").value.trim();
+  if (lhs !== eq.lhs.join(", ") || body !== eq.body) {
+    const ok = await propsFetch("/api/edit/update_equation",
+      { node: d.node, index: i, lhs, body });
+    if (!ok) return;
+  }
+  // Variadic blocks: grow appends fresh red pins, shrink drops the last ones.
+  const nary = document.getElementById("prop-nary");
+  if (nary && eq.nary && +nary.value !== eq.nary.inputs) {
+    const ok = await propsFetch("/api/edit/set_operation_inputs",
+      { node: d.node, index: i, inputs: +nary.value });
+    if (!ok) return;
+  }
+  await propsReload();
 }
 
 async function propsDeleteEq() {

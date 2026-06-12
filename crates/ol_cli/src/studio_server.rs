@@ -296,6 +296,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             operations_catalog().to_string().into_bytes(),
         ),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
+        ("POST", "/api/edit/set_operation_inputs") => {
+            apply_edit_response(ctx, body, edit_set_operation_inputs)
+        }
         ("POST", "/api/edit/undo") => history_response(ctx, true),
         ("POST", "/api/edit/redo") => history_response(ctx, false),
         ("POST", "/api/clite/compile") => clite_compile_response(ctx, body),
@@ -745,12 +748,27 @@ fn build_diagram(
                 wires.push(serde_json::json!({ "from": eq_id, "to": l }));
             }
         }
+        // Variadic operation chains advertise their adjustable pin count so
+        // the Properties sheet can offer an inputs control.
+        let nary = flatten_nary(&eq.rhs)
+            .and_then(|(op, operands)| {
+                variadic_op_id(op).map(|id| {
+                    serde_json::json!({
+                        "op": id,
+                        "inputs": operands.len(),
+                        "min": MIN_VARIADIC_INPUTS,
+                        "max": MAX_VARIADIC_INPUTS,
+                    })
+                })
+            })
+            .unwrap_or(serde_json::Value::Null);
         equations.push(serde_json::json!({
             "id": eq_id,
             "lhs": eq.lhs,
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
             "body": ol_lustre_emit::format_expr(&eq.rhs),
             "symbol": eq_symbol(&eq.rhs),
+            "nary": nary,
             "reads": reads,
             "calls": calls,
             "invalid": invalid,
@@ -1876,6 +1894,95 @@ struct OpDef {
     hint: &'static str,
 }
 
+/// Variadic (associative) operation blocks carry between 2 and 12 input
+/// pins; 12 is a sanity ceiling — beyond it a block stops being readable.
+const MIN_VARIADIC_INPUTS: usize = 2;
+const MAX_VARIADIC_INPUTS: usize = 12;
+
+/// The associative operations whose blocks may grow extra input pins,
+/// with their IR operator and surface-syntax separator.
+const VARIADIC_OPS: &[(&str, ol_ir::BinOp, &str)] = &[
+    ("plus", ol_ir::BinOp::Add, " + "),
+    ("multiply", ol_ir::BinOp::Mul, " * "),
+    ("and", ol_ir::BinOp::And, " and "),
+    ("or", ol_ir::BinOp::Or, " or "),
+    ("xor", ol_ir::BinOp::Xor, " xor "),
+    ("bit_and", ol_ir::BinOp::BitAnd, " & "),
+    ("bit_or", ol_ir::BinOp::BitOr, " | "),
+    ("bit_xor", ol_ir::BinOp::BitXor, " ^ "),
+];
+
+fn variadic_sep(id: &str) -> Option<&'static str> {
+    VARIADIC_OPS.iter().find(|(i, _, _)| *i == id).map(|(_, _, s)| *s)
+}
+
+fn variadic_op_id(op: ol_ir::BinOp) -> Option<&'static str> {
+    VARIADIC_OPS.iter().find(|(_, b, _)| *b == op).map(|(i, _, _)| *i)
+}
+
+/// The connection-point contract an operation presents to the engineer:
+/// per-pin input types and the produced type. `T` means any type,
+/// `number`/`integer` any numeric/integer type — the exact rules live in
+/// the typechecker; this is the guidance the GUI displays on pins.
+fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
+    let n = |t: &'static str| vec![t; o.pins as usize];
+    match o.id {
+        "constant" => (vec![], "literal type"),
+        "plus" | "minus" | "multiply" | "divide" | "modulo" | "squared" | "cubed"
+        | "to_nth_power" => (n("number"), "number"),
+        "numeric_cast" => (vec!["number"], "target type"),
+        "square_root" => (vec!["float"], "float"),
+        "equal" | "not_equal" => (vec!["T", "T"], "bool"),
+        "greater_than" | "greater_equal" | "less_than" | "less_equal" => {
+            (vec!["number", "number"], "bool")
+        }
+        "and" | "or" | "xor" => (n("bool"), "bool"),
+        "not" => (vec!["bool"], "bool"),
+        "implies" => (vec!["bool", "bool"], "bool"),
+        "record_field" => (vec!["structure"], "field type"),
+        "array_index" => (vec!["array"], "element type"),
+        "init_pre" | "arrow" => (vec!["T", "T"], "T"),
+        "if_then_else" => (vec!["bool", "T", "T"], "T"),
+        "bit_and" | "bit_or" | "bit_xor" => (n("integer"), "integer"),
+        "shift_left" | "shift_right" => (vec!["integer", "integer"], "integer"),
+        _ => (n("T"), "T"),
+    }
+}
+
+/// If `rhs` is a chain of one associative toolbox operator, return that
+/// operator and the operands in surface order. Only the top-level chain is
+/// the block: `a and (b or c)` flattens to two operands, not three.
+fn flatten_nary(rhs: &ol_ir::Expr) -> Option<(ol_ir::BinOp, Vec<ol_ir::Expr>)> {
+    let ol_ir::Expr::Binary { op, .. } = rhs else { return None };
+    variadic_op_id(*op)?;
+    fn walk(e: &ol_ir::Expr, op: ol_ir::BinOp, out: &mut Vec<ol_ir::Expr>) {
+        match e {
+            ol_ir::Expr::Binary { op: o, lhs, rhs } if *o == op => {
+                walk(lhs, op, out);
+                walk(rhs, op, out);
+            }
+            _ => out.push(e.clone()),
+        }
+    }
+    let mut operands = Vec::new();
+    walk(rhs, *op, &mut operands);
+    Some((*op, operands))
+}
+
+/// Human-readable pin contract, e.g. `bool × 2…12 → bool` for a variadic
+/// operation or `bool, T, T → T` for a fixed one.
+fn signature_text(o: &OpDef) -> String {
+    let (ins, out) = operation_signature(o);
+    if variadic_sep(o.id).is_some() {
+        let t = ins.first().copied().unwrap_or("T");
+        format!("{t} × {MIN_VARIADIC_INPUTS}…{MAX_VARIADIC_INPUTS} → {out}")
+    } else if ins.is_empty() {
+        format!("→ {out}")
+    } else {
+        format!("{} → {out}", ins.join(", "))
+    }
+}
+
 const fn op(id: &'static str, label: &'static str, pins: u8, out_type: &'static str) -> OpDef {
     OpDef { id, label, pins, out_type, param: None, enabled: true, hint: "" }
 }
@@ -1952,14 +2059,24 @@ fn operations_catalog() -> serde_json::Value {
         .map(|(name, items)| {
             serde_json::json!({
                 "name": name,
-                "items": items.iter().map(|o| serde_json::json!({
-                    "id": o.id,
-                    "label": o.label,
-                    "pins": o.pins,
-                    "param": o.param,
-                    "enabled": o.enabled,
-                    "hint": o.hint,
-                })).collect::<Vec<_>>(),
+                "items": items.iter().map(|o| {
+                    let (ins, out) = operation_signature(o);
+                    let variadic = variadic_sep(o.id).is_some();
+                    serde_json::json!({
+                        "id": o.id,
+                        "label": o.label,
+                        "pins": o.pins,
+                        "param": o.param,
+                        "enabled": o.enabled,
+                        "hint": o.hint,
+                        "inputs": ins,
+                        "output": out,
+                        "signature": signature_text(o),
+                        "variadic": variadic,
+                        "min_pins": if variadic { MIN_VARIADIC_INPUTS } else { o.pins as usize },
+                        "max_pins": if variadic { MAX_VARIADIC_INPUTS } else { o.pins as usize },
+                    })
+                }).collect::<Vec<_>>(),
             })
         })
         .collect();
@@ -1996,9 +2113,11 @@ fn operation_body(
             };
             return Ok((v, ty.to_string()));
         }
-        "plus" => format!("{a} + {b}"),
+        // Associative operations join every pin: `a + b + c + …`.
+        "plus" | "multiply" | "and" | "or" | "xor" | "bit_and" | "bit_or" | "bit_xor" => {
+            pins.join(variadic_sep(opdef.id).expect("listed in VARIADIC_OPS"))
+        }
         "minus" => format!("{a} - {b}"),
-        "multiply" => format!("{a} * {b}"),
         "divide" => format!("{a} / {b}"),
         "modulo" => format!("{a} mod {b}"),
         "squared" => format!("{a} * {a}"),
@@ -2027,9 +2146,6 @@ fn operation_body(
         "greater_equal" => format!("{a} >= {b}"),
         "less_than" => format!("{a} < {b}"),
         "less_equal" => format!("{a} <= {b}"),
-        "and" => format!("{a} and {b}"),
-        "or" => format!("{a} or {b}"),
-        "xor" => format!("{a} xor {b}"),
         "not" => format!("not {a}"),
         "implies" => format!("{a} => {b}"),
         "record_field" => {
@@ -2048,9 +2164,6 @@ fn operation_body(
         "init_pre" => format!("{a} -> pre {b}"),
         "arrow" => format!("{a} -> {b}"),
         "if_then_else" => format!("if {a} then {b} else {c}"),
-        "bit_and" => format!("{a} & {b}"),
-        "bit_or" => format!("{a} | {b}"),
-        "bit_xor" => format!("{a} ^ {b}"),
         "shift_left" => format!("{a} << {b}"),
         "shift_right" => format!("{a} >> {b}"),
         other => return Err(format!("unknown operation `{other}`")),
@@ -2090,6 +2203,23 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     if !opdef.enabled {
         return bad(&format!("`{op_id}` is not implemented yet: {}", opdef.hint));
     }
+    // Variadic operations may be dropped with extra pins right away;
+    // everything else has a fixed contract.
+    let pin_count = match req.get("inputs").and_then(|v| v.as_u64()) {
+        None => opdef.pins as usize,
+        Some(n) => {
+            if variadic_sep(&op_id).is_none() {
+                return bad(&format!("`{op_id}` has a fixed number of inputs ({})", opdef.pins));
+            }
+            let n = n as usize;
+            if !(MIN_VARIADIC_INPUTS..=MAX_VARIADIC_INPUTS).contains(&n) {
+                return bad(&format!(
+                    "inputs must be between {MIN_VARIADIC_INPUTS} and {MAX_VARIADIC_INPUTS}"
+                ));
+            }
+            n
+        }
+    };
 
     let before = take_snapshot(ctx);
     let mut project = match load_raw(ctx) {
@@ -2102,7 +2232,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
             Err(e) => return bad(&e),
         };
         let eq_index = node.equations.len();
-        let pins: Vec<String> = (1..=opdef.pins)
+        let pins: Vec<String> = (1..=pin_count)
             .map(|k| format!("p{eq_index}_{k}"))
             .collect();
         let (body_text, out_type) = match operation_body(&opdef, &pins, param.as_deref()) {
@@ -2148,6 +2278,71 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
     }
+}
+
+/// Change the input-pin count of a variadic operation block in place
+/// (`{node, index, inputs}`): growing appends fresh red ghost pins so the
+/// engineer sees exactly what still needs wiring, shrinking drops the
+/// trailing operands. Bound pins keep their wiring. 2..=12.
+fn edit_set_operation_inputs(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let index = req_index(req)?;
+    let want = req
+        .get("inputs")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing integer field `inputs`")? as usize;
+    if !(MIN_VARIADIC_INPUTS..=MAX_VARIADIC_INPUTS).contains(&want) {
+        return Err(format!(
+            "inputs must be between {MIN_VARIADIC_INPUTS} and {MAX_VARIADIC_INPUTS}"
+        ));
+    }
+    let node = find_node_mut(project, &node_name)?;
+    // Every name visible in this node — fresh ghost pins must not collide
+    // with a declared variable (silent binding) or another ghost (merged pins).
+    let mut used: std::collections::HashSet<String> = node
+        .inputs
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(node.outputs.iter().map(|p| p.name.clone()))
+        .chain(node.locals.iter().map(|l| l.name.clone()))
+        .collect();
+    for eq in &node.equations {
+        used.extend(eq.lhs.iter().cloned());
+        used.extend(eq.rhs.free_vars());
+    }
+    let eq = node
+        .equations
+        .get_mut(index)
+        .ok_or_else(|| format!("node `{node_name}` has no equation {index}"))?;
+    let (op, mut operands) = flatten_nary(&eq.rhs).ok_or(
+        "this block has a fixed number of inputs — edit its expression instead",
+    )?;
+    if operands.len() == want {
+        return Ok(());
+    }
+    if want < operands.len() {
+        operands.truncate(want);
+    } else {
+        let mut k = operands.len() + 1;
+        while operands.len() < want {
+            let mut name = format!("p{index}_{k}");
+            while used.contains(&name) {
+                k += 1;
+                name = format!("p{index}_{k}");
+            }
+            used.insert(name.clone());
+            operands.push(ol_ir::Expr::Var { name });
+            k += 1;
+        }
+    }
+    // Rebuild a left-associative chain — the shape the parser produces.
+    let mut it = operands.into_iter();
+    let first = it.next().expect("at least MIN_VARIADIC_INPUTS operands");
+    eq.rhs = it.fold(first, |acc, e| ol_ir::Expr::bin(op, acc, e));
+    Ok(())
 }
 
 // --- Compile C-Lite: emit + compile into a user directory --------------------

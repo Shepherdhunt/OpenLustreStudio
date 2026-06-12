@@ -360,6 +360,95 @@ fn constant_blocks_are_typed_literals_and_equations_carry_symbols() {
     assert_eq!(d["equations"][3]["symbol"]["text"], "FBY");
 }
 
+// --- Variadic operations: pin contracts + adjustable input counts -------------
+
+#[test]
+fn variadic_operations_declare_contracts_and_resize_their_pins() {
+    let g = start_server_on_workspace("ops_nary");
+    let port = g.port;
+
+    // The catalog publishes each operation's connection-point contract so
+    // the GUI can guide the engineer: and = bool pins in, one bool out.
+    let cat = get_json(port, "/api/operations");
+    let logical = cat["categories"].as_array().unwrap().iter()
+        .find(|c| c["name"] == "Logical").unwrap();
+    let and = logical["items"].as_array().unwrap().iter()
+        .find(|i| i["id"] == "and").unwrap();
+    assert_eq!(and["variadic"], true);
+    assert_eq!(and["min_pins"], 2);
+    assert_eq!(and["max_pins"], 12);
+    assert_eq!(and["inputs"], serde_json::json!(["bool", "bool"]));
+    assert_eq!(and["output"], "bool");
+    assert_eq!(and["signature"], "bool × 2…12 → bool");
+    let not = logical["items"].as_array().unwrap().iter()
+        .find(|i| i["id"] == "not").unwrap();
+    assert_eq!(not["variadic"], false);
+    assert_eq!(not["signature"], "bool → bool");
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Gate","kind":"operator"}"#);
+
+    // A variadic operation may be dropped with extra pins right away, and
+    // its result local is typed by the contract (bool for `and`).
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Gate","op":"and","inputs":4,"x":40.0,"y":40.0}"#);
+    let d = get_json(port, "/api/diagram?node=Gate");
+    assert_eq!(d["equations"][0]["body"], "p0_1 and p0_2 and p0_3 and p0_4");
+    assert_eq!(d["equations"][0]["nary"]["op"], "and");
+    assert_eq!(d["equations"][0]["nary"]["inputs"], 4);
+    assert_eq!(d["equations"][0]["nary"]["max"], 12);
+    let and_local = d["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "and0").expect("result local");
+    assert_eq!(and_local["type"]["kind"], "Bool", "and must produce a bool");
+
+    // Out-of-range and fixed-arity drops are rejected, with the reason.
+    let (s, _) = request(port, "POST", "/api/edit/add_operation",
+        r#"{"node":"Gate","op":"and","inputs":13,"x":0,"y":0}"#).unwrap();
+    assert_eq!(s, 400, "13 pins is past the sanity ceiling");
+    let (s, body) = request(port, "POST", "/api/edit/add_operation",
+        r#"{"node":"Gate","op":"not","inputs":3,"x":0,"y":0}"#).unwrap();
+    assert_eq!(s, 400, "`not` has a fixed contract");
+    assert!(body.contains("fixed number of inputs"), "{body}");
+
+    // Bind the first pin to a real input, then grow in place: the wiring
+    // survives and the new pins arrive as fresh red ghosts.
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"Gate","name":"enable","side":"input","type":"bool"}"#);
+    post_ok(port, "/api/edit/update_equation",
+        r#"{"node":"Gate","index":0,"lhs":"and0","body":"enable and p0_2 and p0_3 and p0_4"}"#);
+    post_ok(port, "/api/edit/set_operation_inputs",
+        r#"{"node":"Gate","index":0,"inputs":6}"#);
+    let d = get_json(port, "/api/diagram?node=Gate");
+    assert_eq!(d["equations"][0]["body"],
+        "enable and p0_2 and p0_3 and p0_4 and p0_5 and p0_6");
+    let ghosts: Vec<&str> = d["ghosts"].as_array().unwrap()
+        .iter().map(|g| g["name"].as_str().unwrap()).collect();
+    assert!(ghosts.contains(&"p0_5") && ghosts.contains(&"p0_6"), "{ghosts:?}");
+
+    // Shrinking drops the trailing pins only; the bound input stays.
+    post_ok(port, "/api/edit/set_operation_inputs",
+        r#"{"node":"Gate","index":0,"inputs":2}"#);
+    let d = get_json(port, "/api/diagram?node=Gate");
+    assert_eq!(d["equations"][0]["body"], "enable and p0_2");
+    assert_eq!(d["equations"][0]["nary"]["inputs"], 2);
+
+    // Resizes are journaled edits like any other: undo restores six pins.
+    post_ok(port, "/api/edit/undo", "");
+    let d = get_json(port, "/api/diagram?node=Gate");
+    assert_eq!(d["equations"][0]["body"],
+        "enable and p0_2 and p0_3 and p0_4 and p0_5 and p0_6");
+
+    // Out-of-range resizes and fixed-shape equations are refused.
+    let (s, _) = request(port, "POST", "/api/edit/set_operation_inputs",
+        r#"{"node":"Gate","index":0,"inputs":1}"#).unwrap();
+    assert_eq!(s, 400, "one pin is below the minimum of 2");
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Gate","op":"numeric_cast","param":"int16","x":40.0,"y":160.0}"#);
+    let (s, body) = request(port, "POST", "/api/edit/set_operation_inputs",
+        r#"{"node":"Gate","index":1,"inputs":3}"#).unwrap();
+    assert_eq!(s, 400, "{body}");
+    assert!(body.contains("fixed number of inputs"), "{body}");
+}
+
 // --- Compile C-Lite from the GUI ----------------------------------------------
 
 #[test]
