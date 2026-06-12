@@ -139,6 +139,9 @@ pub struct Sim<'a> {
     /// Project-wide constants, pre-evaluated once at construction time. Seeded
     /// into every step's env so equations can name them directly.
     consts: BTreeMap<String, Value>,
+    /// Dependency order for the entry node's equations — declaration order is
+    /// not sufficient (forward references would read stale defaults).
+    eq_order: Vec<usize>,
     /// Decision-coverage collector; populated by [`Sim::enable_coverage`].
     coverage: Option<Coverage>,
 }
@@ -179,6 +182,8 @@ impl<'a> Sim<'a> {
             }
         }
 
+        let eq_order = ol_ir::evaluation_order(node).map_err(SimError::EvalError)?;
+
         Ok(Sim {
             project,
             node,
@@ -186,6 +191,7 @@ impl<'a> Sim<'a> {
             contract,
             call_states: HashMap::new(),
             consts,
+            eq_order,
             coverage: None,
         })
     }
@@ -250,9 +256,10 @@ impl<'a> Sim<'a> {
                 .or_insert_with(|| default_value(&l.ty, self.project));
         }
 
-        // Combinational cycles have been ruled out at typecheck time, so a
-        // single pass in declaration order suffices for the Phase 0 profile.
-        for eq in &self.node.equations {
+        // Dependency order, not declaration order: a forward reference like
+        // `n = constant1 + 1; constant1 = 1;` must see this cycle's value.
+        for &i in &self.eq_order {
+            let eq = &self.node.equations[i];
             let value = eval(
                 &eq.rhs,
                 &env,
@@ -738,11 +745,16 @@ fn eval_call(
         callee_env.insert(l.name.clone(), default_value(&l.ty, project));
     }
 
+    // Callee bodies need the same dependency-ordered walk as the entry node.
+    let callee_order = ol_ir::evaluation_order(callee)
+        .map_err(|e| SimError::EvalError(format!("`{}`: {e}", callee.name)))?;
+
     match callee.kind {
         NodeKind::Function => {
             // Stateless: a single pass over the body with a throwaway state.
             let mut throwaway = State::default();
-            for eq in &callee.equations {
+            for &i in &callee_order {
+                let eq = &callee.equations[i];
                 let v = eval(&eq.rhs, &callee_env, &mut throwaway, call_states, project, cov)?;
                 bind_lhs(&mut callee_env, eq, v)?;
             }
@@ -754,7 +766,8 @@ fn eval_call(
             // address of the `Expr::Call` node — stable for Sim's lifetime.
             let key = call_expr as *const Expr as usize;
             let mut sub_state = call_states.remove(&key).unwrap_or_default();
-            for eq in &callee.equations {
+            for &i in &callee_order {
+                let eq = &callee.equations[i];
                 let v = eval(&eq.rhs, &callee_env, &mut sub_state, call_states, project, cov)?;
                 bind_lhs(&mut callee_env, eq, v)?;
             }

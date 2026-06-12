@@ -65,9 +65,16 @@
   #sidetext .dock-title span[data-pane].active { font-weight: 700; color: #2b579a; }
   #sidetext pre { flex: 1; margin: 0; border: none; }
   #bottomdock {
-    grid-column: 1 / -1; grid-row: 4; background: #f5f5f5;
+    grid-column: 1 / 3; grid-row: 4; background: #f5f5f5;
     border-top: 1px solid #c5c5c5; overflow: auto; display: flex; flex-direction: column;
   }
+  #propsdock {
+    grid-column: 3; grid-row: 4; background: #f5f5f5;
+    border-top: 1px solid #c5c5c5; border-left: 1px solid #c5c5c5; overflow: auto;
+  }
+  #props-body { padding: 8px 10px; }
+  #props-body .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+  #props-body label { color: #555; min-width: 78px; font-size: 11px; }
   #bottomdock .dock-title { display: flex; gap: 2px; align-items: center; }
   #bottomdock .dock-title .dock-tab {
     cursor: pointer; padding: 2px 12px; text-transform: none; font-weight: 400;
@@ -151,6 +158,9 @@
   svg .box.invalid { stroke: #d11a1a; stroke-width: 2; fill: #fdeeee; }
   svg .box.warn { stroke: #c98a00; stroke-width: 1.6; fill: #fdf6e7; }
   svg .box.ghost { stroke: #d11a1a; stroke-width: 1.6; stroke-dasharray: 5 3; fill: #fdeeee; }
+  svg .box.selected { stroke: #2b579a; stroke-width: 2.6; }
+  svg text.sym { font-size: 13px; font-weight: 600; }
+  svg text.wire-label { fill: #6b7c8d; font-size: 9px; }
   svg text { fill: #1e1e1e; font-size: 11px; font-family: "Segoe UI", sans-serif; }
   svg .wire { stroke: #4a4a4a; stroke-width: 1.2; fill: none; }
   svg .wire:hover { stroke-width: 2.4; }
@@ -219,6 +229,7 @@
       </div>
       <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="setSidePane('lustre')">Lustre Text Pane</div>
       <div class="mi" onclick="setSidePane('c')">Generated C Pane</div>
@@ -276,7 +287,6 @@
   </div>
   <div id="diagram-problems"></div>
   <div id="diagram-host"></div>
-  <div id="float-panel" style="display:none; position:fixed; z-index:50; background:#fff; border:1px solid #2b579a; box-shadow:2px 3px 8px rgba(0,0,0,0.25); padding:10px 12px; min-width:260px"></div>
 </div>
 
 <div id="rightdock">
@@ -332,6 +342,11 @@
       <div id="verify-results"></div>
     </div>
   </div>
+</div>
+
+<div id="propsdock">
+  <div class="dock-title">Properties</div>
+  <div id="props-body">No selection — click a box on the canvas.</div>
 </div>
 
 <div id="statusbar">
@@ -865,9 +880,19 @@ async function loadDiagram(nodeName, push) {
   if (d.grid) document.getElementById("grid-size").value = String(d.grid);
   document.getElementById("status-grid").textContent = "grid: " + gridPitch() + " px";
   state.diagPos = computePositions(d);
+  // Drop a selection that no longer exists (deleted, renamed, other node).
+  if (state.selection) {
+    const known = new Set([
+      ...d.inputs.map(p => p.name), ...d.outputs.map(p => p.name),
+      ...d.locals.map(l => l.name), ...(d.ghosts || []).map(g => g.name),
+      ...d.equations.map(e => e.id),
+    ]);
+    if (!known.has(state.selection)) state.selection = null;
+  }
   renderCrumbs();
   renderProblems();
   renderDiagram();
+  renderProps();
 }
 
 function renderCrumbs() {
@@ -897,6 +922,15 @@ function renderProblems() {
 const DIAG = { ROW: 44, BOXH: 30, INW: 150, EQW: 280, OUTW: 170,
                X_IN: 16, X_EQ: 230, X_OUT: 580 };
 
+// SCADE-style compact widths for symbol blocks; free-form text keeps the
+// wide box.
+function eqWidth(e) {
+  if (!e.symbol) return DIAG.EQW;
+  const t = e.symbol.text || "";
+  if (e.symbol.kind === "call") return Math.max(74, t.length * 7 + 26);
+  return Math.max(46, t.length * 9 + 22);
+}
+
 function computePositions(d) {
   // Automatic column layout, overridden by any persisted positions.
   const pos = {};
@@ -904,7 +938,7 @@ function computePositions(d) {
   // Ghosts (reads/writes of undeclared names) sit below the inputs, dashed red.
   (d.ghosts || []).forEach((g, i) =>
     pos[g.name] = { x: DIAG.X_IN, y: 16 + (d.inputs.length + i) * DIAG.ROW, w: DIAG.INW });
-  d.equations.forEach((e, i) => pos[e.id] = { x: DIAG.X_EQ, y: 16 + i * DIAG.ROW, w: DIAG.EQW });
+  d.equations.forEach((e, i) => pos[e.id] = { x: DIAG.X_EQ, y: 16 + i * DIAG.ROW, w: eqWidth(e) });
   const right = d.outputs.map(p => p.name).concat(d.locals.map(l => l.name));
   right.forEach((id, i) => pos[id] = { x: DIAG.X_OUT, y: 16 + i * DIAG.ROW, w: DIAG.OUTW });
   for (const [id, p] of Object.entries(d.positions || {})) {
@@ -931,15 +965,24 @@ function renderDiagram() {
     cls: "box ghost", reason: g.reason }));
   d.equations.forEach(e => items.push({
     id: e.id,
-    label: e.text,
-    cls: e.invalid ? "box eq invalid" : "box eq",
-    reason: e.reason,
+    // Recognizable shapes render as compact SCADE-style operator blocks;
+    // the full equation text stays one hover away.
+    label: e.symbol ? e.symbol.text : e.text,
+    sym: !!e.symbol,
+    cls: (e.invalid ? "box eq invalid" : "box eq") + (e.symbol && e.symbol.kind === "const" ? " const" : ""),
+    reason: (e.reason ? e.reason + " — " : "") + e.text,
     calls: e.calls || [],
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
     cls: boxCls("box", p), reason: p.reason }));
   d.locals.forEach(l => items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
     cls: boxCls("box", l), reason: l.reason }));
+
+  // name -> type text, for SCADE-style wire labels.
+  const typeOf = {};
+  d.inputs.forEach(p => typeOf[p.name] = typeName(p.type));
+  d.outputs.forEach(p => typeOf[p.name] = typeName(p.type));
+  d.locals.forEach(l => typeOf[l.name] = typeName(l.type));
 
   const g = gridPitch();
   let svg = '<svg id="diagram-svg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
@@ -954,6 +997,7 @@ function renderDiagram() {
       '</defs>';
     svg += '<rect width="' + W + '" height="' + H + '" fill="url(#grid-major)" pointer-events="none"/>';
   }
+  const showLabels = document.getElementById("wire-labels").checked;
   for (const w of d.wires) {
     const a = pos[w.from], b = pos[w.to];
     if (!a || !b) continue;
@@ -963,19 +1007,33 @@ function renderDiagram() {
     const cls = w.invalid ? "wire invalid" : "wire";
     svg += '<path class="' + cls + '" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '">' +
       (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
+    if (showLabels) {
+      // The SCADE wire annotation: the carried variable and its type.
+      const v = /^eq\d+$/.test(w.from) ? w.to : w.from;
+      const t = typeOf[v] || "?";
+      svg += '<text class="wire-label" x="' + mx + '" y="' + ((y1 + y2) / 2 - 4) +
+        '" text-anchor="middle">' + escapeHTML(v + ": " + t) + '</text>';
+    }
   }
   for (const it of items) {
     const p = pos[it.id];
     if (!p) continue;
     const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
     const divable = it.calls && it.calls.length;
+    const selected = state.selection === it.id;
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
-    svg += '<rect class="' + it.cls + '" x="' + p.x + '" y="' + p.y + '" width="' + p.w + '" height="' + DIAG.BOXH + '" rx="2"/>';
-    svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + 19) + '">' + escapeHTML(label) + '</text>';
+    svg += '<rect class="' + it.cls + (selected ? ' selected' : '') + '" x="' + p.x + '" y="' + p.y +
+      '" width="' + p.w + '" height="' + DIAG.BOXH + '" rx="2"/>';
+    if (it.sym) {
+      svg += '<text class="sym" text-anchor="middle" x="' + (p.x + p.w / 2) + '" y="' + (p.y + 20) + '">' +
+        escapeHTML(label) + '</text>';
+    } else {
+      svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + 19) + '">' + escapeHTML(label) + '</text>';
+    }
     if (divable) {
-      svg += '<text class="label" x="' + (p.x + p.w - 14) + '" y="' + (p.y + 19) + '">▸</text>';
+      svg += '<text class="label" x="' + (p.x + p.w - 12) + '" y="' + (p.y + 10) + '">▸</text>';
     }
     if (it.reason) {
       svg += '<title>' + escapeHTML(it.reason) + '</title>';
@@ -1036,7 +1094,12 @@ async function diagPointerUp() {
     loadDiagram(drag.call, true);
     return;
   }
-  if (drag.moved) saveLayout();
+  if (!drag.moved) {
+    // A plain click selects: the Properties dock shows the element's sheet.
+    setSelection(drag.id);
+    return;
+  }
+  saveLayout();
 }
 
 // Persist the whole layout (positions + grid pitch) for the current node.
@@ -1154,13 +1217,14 @@ diagramHostEl.addEventListener("drop", async ev => {
     return;
   }
   document.getElementById("diagram-status").textContent =
-    "placed — bind any red pins (right-click them)";
+    "placed — click any red pin to bind it in Properties";
   await refresh();
   loadDiagram(state.diagramData.node, false);
 });
 
 function promptForParam(opId, kind) {
   switch (kind) {
+    case "value": return prompt("constant value (e.g. 2, 2.5, true):", "0");
     case "type": return prompt("numeric_cast target type (int8…int64, uint8…uint64, float32, float64):", "int32");
     case "n": return prompt("to_nth_power: exponent n (2–8):", "2");
     case "field": return prompt("field name to read:", "value");
@@ -1186,57 +1250,90 @@ function diagContextMenu(ev) {
   const g = ev.target.closest("g.diag-item");
   if (!g) return;
   ev.preventDefault();
-  openProps(g.dataset.id, ev.clientX, ev.clientY);
+  setSelection(g.dataset.id);
 }
 
-function openProps(id, cx, cy) {
+// --- Selection + the Properties dock (the SCADE Properties pane) ------------
+
+function setSelection(id) {
+  state.selection = id;
+  renderDiagram();
+  renderProps();
+}
+
+/// The defining equation of a single-output variable, if any.
+function definingEq(name) {
   const d = state.diagramData;
-  const panel = document.getElementById("float-panel");
-  let html = "";
-  let varItem = null;
+  const i = d.equations.findIndex(e => e.lhs.length === 1 && e.lhs[0] === name);
+  return i < 0 ? null : { index: i, eq: d.equations[i] };
+}
+
+function renderProps() {
+  const host = document.getElementById("props-body");
+  const d = state.diagramData;
+  const id = state.selection;
+  if (!d || !id) {
+    host.innerHTML = '<span class="build-note">No selection — click a box on the canvas.</span>';
+    return;
+  }
   const eqMatch = /^eq(\d+)$/.exec(id);
   const ghost = (d.ghosts || []).find(g => g.name === id);
+  let html = "";
+  let varItem = null;
+  let role = null;
   if (eqMatch && d.equations[+eqMatch[1]]) {
     const i = +eqMatch[1], eq = d.equations[i];
-    state.props = { kind: "eq", index: i };
-    html = "<h4>Equation eq" + i + "</h4>" +
-      '<div class="row">lhs <input id="prop-lhs" style="width:180px" value="' + escapeAttr(eq.lhs.join(", ")) + '"></div>' +
-      '<div class="row" style="align-items:flex-start">body <textarea id="prop-body" rows="2" style="width:100%">' + escapeHTML(eq.body) + "</textarea></div>" +
+    const what = eq.symbol ? (eq.symbol.kind === "call" ? "operator call " + eq.symbol.text
+      : eq.symbol.kind === "const" ? "constant" : "operation " + eq.symbol.text) : "equation";
+    html = "<h4 style='margin-top:2px'>" + escapeHTML(what) + " <span class='badge'>eq" + i + "</span></h4>" +
+      '<div class="row"><label>defines</label><input id="prop-lhs" style="flex:1" value="' + escapeAttr(eq.lhs.join(", ")) + '"></div>' +
+      '<div class="row" style="align-items:flex-start"><label>expression</label><textarea id="prop-body" rows="2" style="flex:1">' + escapeHTML(eq.body) + "</textarea></div>" +
       '<button class="primary" onclick="propsApplyEq()">Apply</button>' +
-      '<button onclick="propsDeleteEq()">Delete equation</button>';
+      '<button onclick="propsDeleteEq()">Delete</button>';
   } else if (ghost) {
-    state.props = { kind: "ghost", name: id };
-    html = "<h4>Unbound pin " + escapeHTML(id) + "</h4>" +
+    html = "<h4 style='margin-top:2px'>Unbound pin <span class='badge'>" + escapeHTML(id) + "</span></h4>" +
       '<p class="build-note">' + escapeHTML(ghost.reason) + "</p>" +
-      '<div class="row">bind to <select id="prop-bind">' +
+      '<div class="row"><label>bind to</label><select id="prop-bind">' +
       knownVarNames().map(v => '<option value="' + escapeAttr(v) + '">' + escapeHTML(v) + "</option>").join("") +
       "</select></div>" +
       '<button class="primary" onclick="propsBindGhost()">Bind</button>';
   } else {
-    const role = d.inputs.find(p => p.name === id) ? "input"
+    role = d.inputs.find(p => p.name === id) ? "input"
       : d.outputs.find(p => p.name === id) ? "output"
       : d.locals.find(l => l.name === id) ? "local" : null;
-    if (!role) return;
+    if (!role) {
+      host.innerHTML = '<span class="build-note">No selection — click a box on the canvas.</span>';
+      return;
+    }
     varItem = (role === "input" ? d.inputs : role === "output" ? d.outputs : d.locals)
       .find(p => p.name === id);
-    state.props = { kind: "var", name: id, role };
-    html = "<h4>" + escapeHTML(id) + " <span class='badge'>" + role + "</span></h4>" +
-      '<div class="row">name <input id="prop-name" style="width:150px" value="' + escapeAttr(id) + '"></div>' +
-      '<div class="row">type <select id="prop-type"></select> <input id="prop-type-custom" style="display:none;width:90px"></div>' +
-      '<div class="row">role <select id="prop-role">' +
+    html = "<h4 style='margin-top:2px'>" + escapeHTML(id) + " <span class='badge'>" + role + "</span></h4>" +
+      '<div class="row"><label>name</label><input id="prop-name" style="flex:1" value="' + escapeAttr(id) + '"></div>' +
+      '<div class="row"><label>data type</label><select id="prop-type"></select>' +
+      ' <input id="prop-type-custom" style="display:none;width:80px"></div>' +
+      '<div class="row"><label>usage</label><select id="prop-role">' +
       ["input", "output", "local"].map(r =>
         '<option value="' + r + '"' + (r === role ? " selected" : "") + ">" + r + "</option>").join("") +
-      '</select></div>' +
-      '<p class="build-note">role change = e.g. treat this local as an output</p>' +
-      '<button class="primary" onclick="propsApplyVar()">Apply</button>' +
+      '</select></div>';
+    if (role === "input") {
+      html += '<div class="row"><label>default value</label><span class="build-note">driven by the environment</span></div>';
+    } else {
+      const def = definingEq(id);
+      if (!def) {
+        html += '<div class="row"><label>default value</label><input id="prop-default" style="width:90px" placeholder="e.g. 0">' +
+          ' <span class="build-note">creates ' + escapeHTML(id) + ' = value</span></div>';
+      } else if (def.eq.symbol && def.eq.symbol.kind === "const") {
+        html += '<div class="row"><label>default value</label><input id="prop-default" style="width:90px" value="' +
+          escapeAttr(def.eq.body) + '"></div>';
+      } else {
+        html += '<div class="row"><label>default value</label><span class="build-note">defined by eq' + def.index + '</span></div>';
+      }
+    }
+    html += '<button class="primary" onclick="propsApplyVar()">Apply</button>' +
       '<button onclick="propsDeleteVar()">Delete</button>';
   }
-  html += '<div style="margin-top:4px"><a href="#" onclick="propsClose();return false">close</a></div>';
-  panel.innerHTML = html;
-  panel.style.left = Math.min(cx, window.innerWidth - 320) + "px";
-  panel.style.top = Math.min(cy, window.innerHeight - 280) + "px";
-  panel.style.display = "";
-  if (state.props.kind === "var" && varItem) {
+  host.innerHTML = html;
+  if (varItem) {
     const sel = document.getElementById("prop-type");
     const cur = typeName(varItem.type);
     populateTypeSelect(sel, cur);
@@ -1253,57 +1350,82 @@ function openProps(id, cx, cy) {
   }
 }
 
-function propsClose() {
-  document.getElementById("float-panel").style.display = "none";
-  state.props = null;
-}
-
-async function propsPost(path, payload) {
+async function propsFetch(path, payload) {
   const r = await fetch(path, { method: "POST", body: JSON.stringify(payload) });
-  const text = await r.text();
-  if (!r.ok) {
-    let msg = text;
-    try { msg = JSON.parse(text).error || text; } catch (_) {}
-    document.getElementById("diagram-status").textContent = msg;
-    return false;
-  }
-  propsClose();
-  await refresh();
-  if (state.diagramData) loadDiagram(state.diagramData.node, false);
-  return true;
+  if (r.ok) return true;
+  let msg = await r.text();
+  try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+  document.getElementById("diagram-status").textContent = msg;
+  return false;
 }
 
-function propsApplyVar() {
-  propsPost("/api/edit/update_port", {
-    node: state.diagramData.node,
-    name: state.props.name,
-    new_name: document.getElementById("prop-name").value.trim(),
+async function propsReload() {
+  await refresh();
+  if (state.diagramData) await loadDiagram(state.diagramData.node, false);
+}
+
+/// Apply the variable sheet: rename/retype/usage first, then the default
+/// value (which is the variable's constant defining equation in the model).
+async function propsApplyVar() {
+  const node = state.diagramData.node;
+  const oldName = state.selection;
+  const newName = document.getElementById("prop-name").value.trim() || oldName;
+  const ok = await propsFetch("/api/edit/update_port", {
+    node,
+    name: oldName,
+    new_name: newName,
     new_type: selectedType("prop-type", "prop-type-custom"),
     new_role: document.getElementById("prop-role").value,
   });
+  if (!ok) return;
+  const defInput = document.getElementById("prop-default");
+  if (defInput) {
+    const v = defInput.value.trim();
+    const def = definingEq(oldName);
+    if (v && !def) {
+      await propsFetch("/api/edit/add_equation", { node, lhs: newName, body: v });
+    } else if (v && def && def.eq.body !== v) {
+      await propsFetch("/api/edit/update_equation", {
+        node, index: def.index, lhs: newName, body: v,
+      });
+    }
+  }
+  state.selection = newName;
+  await propsReload();
 }
 
-function propsDeleteVar() {
-  propsPost("/api/edit/remove_port", {
+async function propsDeleteVar() {
+  const ok = await propsFetch("/api/edit/remove_port", {
     node: state.diagramData.node,
-    name: state.props.name,
+    name: state.selection,
   });
+  if (ok) {
+    state.selection = null;
+    await propsReload();
+  }
 }
 
-function propsApplyEq() {
-  propsPost("/api/edit/update_equation", {
+async function propsApplyEq() {
+  const i = +/^eq(\d+)$/.exec(state.selection)[1];
+  const ok = await propsFetch("/api/edit/update_equation", {
     node: state.diagramData.node,
-    index: state.props.index,
+    index: i,
     lhs: document.getElementById("prop-lhs").value.trim(),
     body: document.getElementById("prop-body").value.trim(),
   });
+  if (ok) await propsReload();
 }
 
-function propsDeleteEq() {
-  propsPost("/api/edit/remove_equation", {
+async function propsDeleteEq() {
+  const i = +/^eq(\d+)$/.exec(state.selection)[1];
+  const ok = await propsFetch("/api/edit/remove_equation", {
     node: state.diagramData.node,
-    index: state.props.index,
+    index: i,
   });
+  if (ok) {
+    state.selection = null;
+    await propsReload();
+  }
 }
 
 function replaceIdent(text, from, to) {
@@ -1313,7 +1435,7 @@ function replaceIdent(text, from, to) {
 
 // Bind an unbound (ghost) pin: rewrite every equation that mentions it.
 async function propsBindGhost() {
-  const from = state.props.name;
+  const from = state.selection;
   const to = document.getElementById("prop-bind").value;
   const d = state.diagramData;
   for (let i = 0; i < d.equations.length; i++) {
@@ -1322,19 +1444,13 @@ async function propsBindGhost() {
     const newLhs = replaceIdent(lhs, from, to);
     const newBody = replaceIdent(eq.body, from, to);
     if (newLhs !== lhs || newBody !== eq.body) {
-      const r = await fetch("/api/edit/update_equation", {
-        method: "POST",
-        body: JSON.stringify({ node: d.node, index: i, lhs: newLhs, body: newBody }),
-      });
-      if (!r.ok) {
-        document.getElementById("diagram-status").textContent = await r.text();
-        return;
-      }
+      const ok = await propsFetch("/api/edit/update_equation",
+        { node: d.node, index: i, lhs: newLhs, body: newBody });
+      if (!ok) return;
     }
   }
-  propsClose();
-  await refresh();
-  loadDiagram(d.node, false);
+  state.selection = null;
+  await propsReload();
 }
 
 // --- Verify (Kind 2) ------------------------------------------------------------

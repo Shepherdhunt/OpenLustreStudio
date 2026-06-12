@@ -117,6 +117,10 @@ name = "numeric_cast_and_operations"
 path = "numeric_cast_and_operations.rs"
 
 [[test]]
+name = "evaluation_order"
+path = "evaluation_order.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

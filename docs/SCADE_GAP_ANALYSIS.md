@@ -124,15 +124,49 @@ verification burden the qualified tool would otherwise discharge.
   from CSV on stdin. The tool authors, simulates, generates, and compiles
   real C from a blank workspace without touching a text editor.
 
+### Fifth slice — Properties dock, constants, symbols, wire labels; the
+### evaluation-order soundness fix
+
+* **Properties dock** (SCADE's bottom-right pane): clicking any canvas box
+  selects it (blue highlight) and the docked pane shows its sheet — name,
+  data type (dropdown of primitives + named types), usage
+  (input/output/local), and **default value**, which maps honestly onto the
+  model: it is the variable's constant defining equation (created on first
+  entry, edited thereafter; "defined by eqN" when the variable is computed;
+  "driven by the environment" for inputs). Equations edit lhs/expression;
+  red pins bind — all in the dock, the floating panel is gone.
+* **Constants on canvas** (was P0): `constant (literal)` heads the
+  Mathematics family; dropping prompts for the value and lands a typed
+  literal source block (`2` → int32, `2.5` → float64, `true` → bool).
+* **Block symbols**: equations with recognizable shapes draw as compact
+  SCADE-style blocks — `+ − × / mod`, comparisons, `AND OR XOR NOT ⇒`,
+  bitwise, `FBY` (init→pre), `->`, `pre`, `ITE`, cast targets, callee names,
+  constant values — full equation text on hover. Free-form bodies keep the
+  wide text box.
+* **Typed wire labels**: every wire carries its variable and type
+  (`n: int32`), toggleable in the View menu — the `_L2: bool` look.
+* **Soundness fix found by drawing**: stepping a freshly drawn counter
+  exposed that both the IR simulator *and* the generated C walked equations
+  in **declaration order**, silently reading stale zero-defaults for forward
+  references (`n = constant1 + …; constant1 = 1;`) — the exact shape canvas
+  drops produce. Both backends had agreed on identically wrong traces. New
+  `ol_ir::evaluation_order` (same-cycle reads, `pre` excluded, both `->`
+  arms included) now drives the simulator (entry + called nodes) and the C
+  emitter; true combinational cycles are a loud simulator error instead of
+  a wrong answer. Four regression tests pin it, including golden-content
+  checks so the dual-backend comparison can never again "pass" on matching
+  wrong values.
+
 ### Alignment gaps visible against a real SCADE Suite session (screenshot-reviewed)
 
 | Gap | SCADE | Ours today | Priority |
 |---|---|---|---|
-| Constants on canvas | A literal/constant is a droppable source block | Constants must be typed into equation text (hit this in the walkthrough: `/ 2` required an equation edit) | **P0** |
-| Block symbols | Gates, comparators, FBY draw as distinct shapes | All equations are uniform text boxes | P1 |
-| Typed wire labels | Every wire is named and typed inline (`_L2: bool`) | Wires are anonymous; types only on variable boxes | P1 |
+| ~~Constants on canvas~~ | Droppable literal source block | **Landed** — `constant (literal)` in the toolbox | done |
+| ~~Block symbols~~ | Gates, comparators, FBY draw as distinct shapes | **Landed** — compact operator blocks, text on hover | done |
+| ~~Typed wire labels~~ | Every wire named and typed inline (`_L2: bool`) | **Landed** — `name: type` labels, View-menu toggle | done |
+| ~~Properties dock~~ | Persistent bottom-right pane for the selection | **Landed** — name/type/usage/default value sheets | done |
 | Edit menu, undo/redo | Standard | Missing (edit journal is the planned approach) | P1 |
-| Properties dock | Persistent bottom-right pane reflecting the selection | Right-click floating panel | P2 |
+| Pin-to-pin wire drag | Drag output pin to input pin to connect | Click red pin → Bind in Properties | P1 |
 | MDI document tabs | Several diagrams open side by side | One diagram at a time + breadcrumbs | P2 |
 | Tree organization | Operators/Types/Observers folders per package; libraries as tree roots; FileView/Scade tabs | Flat package → node list | P2 |
 | Output dock: Build tab | Compile output is a dock tab | Compile log lives in the dialog | P3 |

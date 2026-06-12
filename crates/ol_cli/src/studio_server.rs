@@ -451,6 +451,53 @@ fn backticked(msg: &str) -> Vec<String> {
     msg.split('`').skip(1).step_by(2).map(|s| s.to_string()).collect()
 }
 
+/// The SCADE-style block symbol an equation renders as: a compact operator
+/// box (`+`, `×`, `FBY`, `pre`, `ITE`, a cast type, a callee name, a literal)
+/// when the rhs has a recognizable shape, or null for free-form text.
+fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
+    use ol_ir::{BinOp, Expr, UnaryOp};
+    let op = |s: &str| serde_json::json!({ "kind": "op", "text": s });
+    match rhs {
+        Expr::Const { .. } => serde_json::json!({
+            "kind": "const",
+            "text": ol_lustre_emit::format_expr(rhs),
+        }),
+        Expr::Var { .. } => op("="),
+        Expr::Binary { op: b, .. } => op(match b {
+            BinOp::Add => "+",
+            BinOp::Sub => "−",
+            BinOp::Mul => "×",
+            BinOp::Div => "/",
+            BinOp::Mod => "mod",
+            BinOp::Eq => "=",
+            BinOp::Neq => "≠",
+            BinOp::Lt => "<",
+            BinOp::Le => "≤",
+            BinOp::Gt => ">",
+            BinOp::Ge => "≥",
+            BinOp::And => "AND",
+            BinOp::Or => "OR",
+            BinOp::Xor => "XOR",
+            BinOp::Implies => "⇒",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+        }),
+        Expr::Unary { op: UnaryOp::Not, .. } => op("NOT"),
+        Expr::Unary { op: UnaryOp::Neg, .. } => op("−"),
+        // `init -> pre x` is SCADE's followed-by.
+        Expr::Arrow { body, .. } if matches!(body.as_ref(), Expr::Pre { .. }) => op("FBY"),
+        Expr::Arrow { .. } => op("->"),
+        Expr::Pre { .. } => op("pre"),
+        Expr::IfThenElse { .. } => op("ITE"),
+        Expr::Cast { to, .. } => op(&type_str(to)),
+        Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
+        _ => serde_json::Value::Null,
+    }
+}
+
 /// Build a diagram JSON for the requested node (or `main`). Inputs, locals,
 /// equations, and outputs become boxes; wires are derived from each
 /// equation's free variables (reads) and its lhs (writes). The front end
@@ -626,6 +673,7 @@ fn build_diagram(
             "lhs": eq.lhs,
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
             "body": ol_lustre_emit::format_expr(&eq.rhs),
+            "symbol": eq_symbol(&eq.rhs),
             "reads": reads,
             "calls": calls,
             "invalid": invalid,
@@ -1751,6 +1799,9 @@ const fn op(id: &'static str, label: &'static str, pins: u8, out_type: &'static 
 fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
     vec![
         ("Mathematics", vec![
+            OpDef { id: "constant", label: "constant (literal)", pins: 0, out_type: "int32",
+                    param: Some("value"), enabled: true,
+                    hint: "a literal source block: 2, 2.5, true" },
             op("plus", "plus (+)", 2, "int32"),
             op("minus", "minus (-)", 2, "int32"),
             op("multiply", "multiply (*)", 2, "int32"),
@@ -1841,6 +1892,25 @@ fn operation_body(
     let b = pins.get(1).cloned().unwrap_or_default();
     let c = pins.get(2).cloned().unwrap_or_default();
     let body = match opdef.id {
+        "constant" => {
+            let v = param.ok_or("constant needs parameter `value`")?.trim().to_string();
+            let parsed = ol_stdlib::parse_expr(&v).map_err(|e| format!("value `{v}`: {e}"))?;
+            // A constant block is a literal source — nothing else.
+            let lit = match &parsed {
+                ol_ir::Expr::Const { lit } => lit.clone(),
+                ol_ir::Expr::Unary { op: ol_ir::UnaryOp::Neg, arg } => match arg.as_ref() {
+                    ol_ir::Expr::Const { lit } => lit.clone(),
+                    _ => return Err(format!("`{v}` is not a literal")),
+                },
+                _ => return Err(format!("`{v}` is not a literal (e.g. 2, 2.5, true)")),
+            };
+            let ty = match lit {
+                ol_ir::Literal::Bool { .. } => "bool",
+                ol_ir::Literal::Int { .. } => "int32",
+                ol_ir::Literal::Float { .. } => "float64",
+            };
+            return Ok((v, ty.to_string()));
+        }
         "plus" => format!("{a} + {b}"),
         "minus" => format!("{a} - {b}"),
         "multiply" => format!("{a} * {b}"),

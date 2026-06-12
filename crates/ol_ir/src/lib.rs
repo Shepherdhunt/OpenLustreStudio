@@ -16,6 +16,7 @@
 pub mod types;
 pub mod expr;
 pub mod node;
+pub mod order;
 pub mod project;
 pub mod slice;
 pub mod state_machine;
@@ -25,6 +26,7 @@ pub mod loader;
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, Literal, UnaryOp};
 pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port};
+pub use order::evaluation_order;
 pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
 pub use slice::slice_for_root;
 pub use state_machine::{lower as lower_state_machine, LoweredMachine, StateDef, StateMachineDef, Transition};

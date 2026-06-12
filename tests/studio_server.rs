@@ -190,4 +190,5 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("data-dock=\"simulation\""), "Simulation dock missing");
     assert!(html.contains("mi-code-compile"), "Compile C-Lite menu item missing");
     assert!(html.contains("toolbox"), "Operations toolbox missing");
+    assert!(html.contains("propsdock"), "Properties dock missing");
 }

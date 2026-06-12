@@ -315,6 +315,51 @@ fn dropping_operations_creates_placed_equations_with_red_pins() {
     assert!(body.contains("roadmap"), "{body}");
 }
 
+// --- Constant blocks + SCADE-style symbol descriptors -------------------------
+
+#[test]
+fn constant_blocks_are_typed_literals_and_equations_carry_symbols() {
+    let g = start_server_on_workspace("const_sym");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Sym","kind":"operator"}"#);
+
+    // A dropped constant is a typed literal source block.
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Sym","op":"constant","param":"2.5","x":40.0,"y":40.0}"#);
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Sym","op":"plus","x":40.0,"y":120.0}"#);
+    let (s, body) = request(port, "GET", "/api/diagram?node=Sym", "").unwrap();
+    assert_eq!(s, 200, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][0]["symbol"]["kind"], "const");
+    assert_eq!(d["equations"][0]["symbol"]["text"], "2.5");
+    let c = d["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "constant0").expect("constant local");
+    assert_eq!(c["type"]["kind"], "Float64", "2.5 must infer float64");
+    // Operations render as compact operator symbols.
+    assert_eq!(d["equations"][1]["symbol"]["kind"], "op");
+    assert_eq!(d["equations"][1]["symbol"]["text"], "+");
+
+    // Bool literal infers bool; non-literals are rejected.
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Sym","op":"constant","param":"true","x":40.0,"y":200.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Sym", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let b = d["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "constant2").expect("bool constant local");
+    assert_eq!(b["type"]["kind"], "Bool");
+    let (s, _) = request(port, "POST", "/api/edit/add_operation",
+        r#"{"node":"Sym","op":"constant","param":"x + 1","x":0,"y":0}"#).unwrap();
+    assert_eq!(s, 400, "non-literal constant must be rejected");
+
+    // The followed-by pattern renders as FBY, SCADE's name for it.
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Sym","op":"init_pre","x":40.0,"y":280.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Sym", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][3]["symbol"]["text"], "FBY");
+}
+
 // --- Compile C-Lite from the GUI ----------------------------------------------
 
 #[test]

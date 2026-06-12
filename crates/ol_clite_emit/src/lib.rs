@@ -408,7 +408,15 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         call_sites: &call_sites,
     };
 
-    for eq in &node.equations {
+    // C assignments execute top-to-bottom, so equations must be emitted in
+    // dependency order — declaration order would read stale values for
+    // forward references. On a genuine combinational cycle (already an error
+    // at typecheck time) fall back to declaration order so the emitter still
+    // produces inspectable output.
+    let order = ol_ir::evaluation_order(node)
+        .unwrap_or_else(|_| (0..node.equations.len()).collect());
+    for &i in &order {
+        let eq = &node.equations[i];
         emit_equation_body(eq, &mut ctx, out);
     }
 
