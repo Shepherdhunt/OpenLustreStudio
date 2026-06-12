@@ -105,6 +105,39 @@ verification burden the qualified tool would otherwise discharge.
   document tabs, bottom Messages dock (click a message to select the node), toolbar,
   and status bar.
 
+### Fourth slice, same day — declutter, dialog fix, end-to-end walkthrough
+
+* Canvas header clutter removed: grid size / show grid / snap to grid moved
+  into a **View** menu (with keep-open items, native mouse-down menu
+  behavior, hover-switching); the instructional paragraph is gone; layout
+  status moved to the status bar.
+* Fixed: modal dialogs never displayed (`style.display = ""` fell back to
+  the stylesheet's `none`) — this is why operators could not be created
+  from the menus. Also fixed a diagram-load race that left the old canvas
+  on screen after creating an operator.
+* Verified the **complete developer loop through real UI event paths**:
+  Insert > Operator (AvgFilter) → Insert > Input a/b : int32, Output
+  avg : int32 → drag `plus` from the toolbox, bind its red pins to a/b via
+  right-click → drag `divide`, edit to `plus0 / 2`, route to `avg` →
+  File > Set Main → Simulation Build/Run/Step (a=10, b=20 ⇒ avg=15) →
+  Code > Compile C-Lite ⇒ `AvgFilter.exe`, which computes correct averages
+  from CSV on stdin. The tool authors, simulates, generates, and compiles
+  real C from a blank workspace without touching a text editor.
+
+### Alignment gaps visible against a real SCADE Suite session (screenshot-reviewed)
+
+| Gap | SCADE | Ours today | Priority |
+|---|---|---|---|
+| Constants on canvas | A literal/constant is a droppable source block | Constants must be typed into equation text (hit this in the walkthrough: `/ 2` required an equation edit) | **P0** |
+| Block symbols | Gates, comparators, FBY draw as distinct shapes | All equations are uniform text boxes | P1 |
+| Typed wire labels | Every wire is named and typed inline (`_L2: bool`) | Wires are anonymous; types only on variable boxes | P1 |
+| Edit menu, undo/redo | Standard | Missing (edit journal is the planned approach) | P1 |
+| Properties dock | Persistent bottom-right pane reflecting the selection | Right-click floating panel | P2 |
+| MDI document tabs | Several diagrams open side by side | One diagram at a time + breadcrumbs | P2 |
+| Tree organization | Operators/Types/Observers folders per package; libraries as tree roots; FileView/Scade tabs | Flat package → node list | P2 |
+| Output dock: Build tab | Compile output is a dock tab | Compile log lives in the dialog | P3 |
+| Icon toolbars | Multiple icon strips under the menus | Menus only | P3, cosmetic |
+
 ### Third slice, same day — the SCADE shell: menus, toolbox, numeric_cast
 
 * **Menu-driven GUI**: the tab strip is gone. File / Insert (Operator, Input,

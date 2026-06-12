@@ -205,6 +205,30 @@
       <div class="mi" id="mi-insert-fsm" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machine…</div>
     </div>
   </div>
+  <div class="menu" data-menu="view">
+    <span class="menu-title">View</span>
+    <div class="dropdown">
+      <div class="mi keep-open">grid size
+        <select id="grid-size" onchange="gridChanged()" style="margin-left:8px">
+          <option value="4">4 px</option>
+          <option value="8" selected>8 px</option>
+          <option value="10">10 px</option>
+          <option value="16">16 px</option>
+          <option value="20">20 px</option>
+        </select>
+      </div>
+      <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="setSidePane('lustre')">Lustre Text Pane</div>
+      <div class="mi" onclick="setSidePane('c')">Generated C Pane</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="showDock('messages')">Messages</div>
+      <div class="mi" onclick="showDock('simulation')">Simulation</div>
+      <div class="mi" onclick="showDock('tests')">Tests</div>
+      <div class="mi" onclick="showDock('verify')">Verify</div>
+    </div>
+  </div>
   <div class="menu" data-menu="simulation">
     <span class="menu-title">Simulation</span>
     <div class="dropdown">
@@ -246,20 +270,9 @@
 </div>
 
 <div id="center">
-  <p style="margin:4px 0">Diagram of <strong id="diagram-node-name">…</strong>. Drag boxes to arrange (grid-snapped, persisted). Drag an <strong>operation or operator from the toolbox</strong> on the right onto the canvas to instantiate it; unbound pins show <span class="severity-Error">red</span>. <strong>Right-click</strong> any box for properties; click a calling equation to dive in.</p>
-  <div id="diagram-crumbs" style="margin:4px 0"></div>
-  <div class="diagram-toolbar">
-    grid
-    <select id="grid-size" onchange="gridChanged()">
-      <option value="4">4 px</option>
-      <option value="8" selected>8 px</option>
-      <option value="10">10 px</option>
-      <option value="16">16 px</option>
-      <option value="20">20 px</option>
-    </select>
-    <label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label>
-    <label><input type="checkbox" id="grid-snap" checked> snap to grid</label>
-    <span class="build-note" id="diagram-status"></span>
+  <div style="display:flex; align-items:center; gap:10px; margin:2px 0 6px">
+    <strong id="diagram-node-name">…</strong>
+    <div id="diagram-crumbs"></div>
   </div>
   <div id="diagram-problems"></div>
   <div id="diagram-host"></div>
@@ -326,6 +339,7 @@
   <span class="warn" id="warn-count">0 warnings</span>
   <span id="status-grid"></span>
   <span class="simstate" id="status-sim"></span>
+  <span id="diagram-status"></span>
   <span style="margin-left:auto">/api/inspect every 5 s</span>
 </div>
 
@@ -517,21 +531,38 @@ function typeKind(t) { return (t && typeof t === "object" ? t.kind : null) || "B
 
 // --- Menus -------------------------------------------------------------------
 
-document.querySelectorAll("#menubar .menu > .menu-title").forEach(t => {
-  t.onclick = ev => {
-    const m = ev.target.parentElement;
-    const was = m.classList.contains("open");
-    document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
-    if (!was) m.classList.add("open");
-    ev.stopPropagation();
-  };
-});
-document.addEventListener("click", () => {
+function closeMenus() {
   document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
+}
+document.querySelectorAll("#menubar .menu > .menu-title").forEach(t => {
+  const menu = t.parentElement;
+  // Native Windows menu feel: open on mouse-down, and with one menu open,
+  // hovering another title switches to it.
+  t.addEventListener("mousedown", ev => {
+    const was = menu.classList.contains("open");
+    closeMenus();
+    if (!was) menu.classList.add("open");
+    ev.stopPropagation();
+    ev.preventDefault();
+  });
+  t.addEventListener("mouseenter", () => {
+    if (document.querySelector("#menubar .menu.open") && !menu.classList.contains("open")) {
+      closeMenus();
+      menu.classList.add("open");
+    }
+  });
+});
+document.addEventListener("mousedown", ev => {
+  if (!ev.target.closest("#menubar .menu")) closeMenus();
 });
 document.querySelectorAll("#menubar .mi").forEach(mi => {
   mi.addEventListener("click", ev => {
-    if (mi.classList.contains("disabled")) { ev.stopPropagation(); return; }
+    // Disabled items do nothing; keep-open items (grid controls) leave the
+    // menu up so several settings can be adjusted in one visit.
+    if (mi.classList.contains("disabled") || mi.classList.contains("keep-open")) {
+      ev.stopPropagation();
+      return;
+    }
     document.querySelectorAll("#menubar .menu").forEach(x => x.classList.remove("open"));
   });
 });
@@ -548,8 +579,10 @@ const DLG_TITLES = {
 function openDialog(id) {
   document.querySelectorAll("#modal .dlg").forEach(d => d.classList.toggle("active", d.id === id));
   document.getElementById("modal-title").textContent = DLG_TITLES[id] || id;
-  document.getElementById("modal-backdrop").style.display = "";
-  document.getElementById("modal").style.display = "";
+  // Explicit "block": the stylesheet hides these, so an empty inline style
+  // would fall back to display:none and the dialog would never appear.
+  document.getElementById("modal-backdrop").style.display = "block";
+  document.getElementById("modal").style.display = "block";
 }
 
 function closeDialog() {
@@ -809,7 +842,9 @@ function snap(v) {
   return snapOn() ? Math.round(v / g) * g : v;
 }
 
+let diagramSeq = 0;
 async function loadDiagram(nodeName, push) {
+  const seq = ++diagramSeq;
   let d;
   try {
     d = await fetchJSON("/api/diagram?node=" + encodeURIComponent(nodeName));
@@ -817,6 +852,8 @@ async function loadDiagram(nodeName, push) {
     document.getElementById("diagram-host").innerHTML = '<div class="diag severity-Error">' + e + "</div>";
     return;
   }
+  // A newer load superseded this one while the request was in flight.
+  if (seq !== diagramSeq) return;
   if (push === undefined) push = true;
   if (push) {
     const last = state.diagramStack[state.diagramStack.length - 1];
