@@ -901,6 +901,7 @@ fn serve_studio(
         use_embedded,
         scenarios,
         types_file,
+        history: Default::default(),
     };
     studio_server::serve(listener, ctx)?;
     Ok(())

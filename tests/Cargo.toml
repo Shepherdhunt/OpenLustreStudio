@@ -121,6 +121,10 @@ name = "evaluation_order"
 path = "evaluation_order.rs"
 
 [[test]]
+name = "industry_hardening"
+path = "industry_hardening.rs"
+
+[[test]]
 name = "stdlib_library"
 path = "stdlib_library.rs"
 

@@ -165,12 +165,30 @@ verification burden the qualified tool would otherwise discharge.
 | ~~Block symbols~~ | Gates, comparators, FBY draw as distinct shapes | **Landed** — compact operator blocks, text on hover | done |
 | ~~Typed wire labels~~ | Every wire named and typed inline (`_L2: bool`) | **Landed** — `name: type` labels, View-menu toggle | done |
 | ~~Properties dock~~ | Persistent bottom-right pane for the selection | **Landed** — name/type/usage/default value sheets | done |
-| Edit menu, undo/redo | Standard | Missing (edit journal is the planned approach) | P1 |
-| Pin-to-pin wire drag | Drag output pin to input pin to connect | Click red pin → Bind in Properties | P1 |
+| ~~Edit menu, undo/redo~~ | Standard | **Landed** — server edit journal (100 deep, model + types files snapshotted per edit), Edit menu + Ctrl+Z / Ctrl+Y | done |
+| ~~Pin-to-pin wire drag~~ | Drag output pin to input pin to connect | **Landed** — pin handles on every box; variable→block binds the first red pin, block→output rewires the result and sweeps the orphaned local | done |
+| ~~Tree organization~~ | Operators folders per package; libraries as tree roots | **Landed** — collapsible packages with Operators/Contracts folders, stdlib under a Libraries root | done |
+| ~~Output dock: Build tab~~ | Compile output is a dock tab | **Landed** — compile logs land in the Build dock | done |
 | MDI document tabs | Several diagrams open side by side | One diagram at a time + breadcrumbs | P2 |
-| Tree organization | Operators/Types/Observers folders per package; libraries as tree roots; FileView/Scade tabs | Flat package → node list | P2 |
-| Output dock: Build tab | Compile output is a dock tab | Compile log lives in the dialog | P3 |
 | Icon toolbars | Multiple icon strips under the menus | Menus only | P3, cosmetic |
+
+### Industry-deployment hardening (sixth slice)
+
+* **Generated C is identifier-safe**: model variables named `unsigned`,
+  `for`, `double` (any C keyword, or the generated `in`/`out`/`self`
+  parameter names) mangle with a trailing underscore at every emission
+  site — structs, locals, references, state fields, driver, monitors —
+  while CSV headers and traces keep the model's own names. Pinned by a
+  dual-backend test with hostile names.
+* **Every edit is undoable**: the server journals file snapshots before
+  each successful mutation; undo/redo round-trips are tested, a new edit
+  clears the redo branch, and empty stacks report instead of corrupting.
+
+Remaining for an industry deployment story (unchanged priorities):
+source spans in diagnostics, clocks, hierarchical automata, array
+iterators, MC/DC masking analysis, float intrinsics, requirements
+traceability, code signing, and the Tool Operational Requirements
+document for certification-adjacent use.
 
 ### Third slice, same day — the SCADE shell: menus, toolbox, numeric_cast
 

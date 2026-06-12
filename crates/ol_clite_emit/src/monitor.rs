@@ -155,9 +155,9 @@ struct MonScope {
 impl MonScope {
     fn ref_name(&self, name: &str) -> String {
         if self.inputs.iter().any(|n| n == name) {
-            format!("in->{name}")
+            format!("in->{}", crate::c_ident(name))
         } else if self.outputs.iter().any(|n| n == name) {
-            format!("out->{name}")
+            format!("out->{}", crate::c_ident(name))
         } else {
             name.to_string()
         }

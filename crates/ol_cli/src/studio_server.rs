@@ -36,6 +36,76 @@ pub struct ServerCtx {
     /// exists. Named type definitions created in the GUI are saved here —
     /// the SCADE "types file" — and reach the model via its `includes`.
     pub types_file: Option<PathBuf>,
+    /// Undo/redo journal: file snapshots taken before each successful edit.
+    pub history: std::sync::Mutex<History>,
+}
+
+/// A snapshot is the full text of every editable file (model + types).
+type Snapshot = Vec<(PathBuf, String)>;
+
+#[derive(Default)]
+pub struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+}
+
+const HISTORY_CAP: usize = 100;
+
+fn take_snapshot(ctx: &ServerCtx) -> Snapshot {
+    let mut files = vec![ctx.model.clone()];
+    if let Some(t) = &ctx.types_file {
+        files.push(t.clone());
+    }
+    files
+        .into_iter()
+        .filter_map(|p| std::fs::read_to_string(&p).ok().map(|text| (p, text)))
+        .collect()
+}
+
+/// Record `before` as an undoable state. Called only after an edit actually
+/// saved, so failed edits never pollute the journal. New edits invalidate
+/// the redo branch, like every editor.
+fn record_edit(ctx: &ServerCtx, before: Snapshot) {
+    let mut h = ctx.history.lock().unwrap();
+    h.undo.push(before);
+    if h.undo.len() > HISTORY_CAP {
+        h.undo.remove(0);
+    }
+    h.redo.clear();
+}
+
+fn history_response(ctx: &ServerCtx, undo: bool) -> (u16, &'static str, Vec<u8>) {
+    let restored = {
+        let mut h = ctx.history.lock().unwrap();
+        let from = if undo { &mut h.undo } else { &mut h.redo };
+        let Some(snap) = from.pop() else {
+            return (
+                400,
+                "application/json",
+                json_error(if undo { "nothing to undo" } else { "nothing to redo" }).into_bytes(),
+            );
+        };
+        let current = take_snapshot(ctx);
+        if undo {
+            h.redo.push(current);
+        } else {
+            h.undo.push(current);
+        }
+        snap
+    };
+    for (path, text) in &restored {
+        if let Err(e) = std::fs::write(path, text) {
+            return (
+                500,
+                "application/json",
+                json_error(&format!("restoring {}: {e}", path.display())).into_bytes(),
+            );
+        }
+    }
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
 }
 
 /// Bind a listener on `addr`. The caller can pass port `0` to let the OS pick
@@ -226,6 +296,8 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             operations_catalog().to_string().into_bytes(),
         ),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
+        ("POST", "/api/edit/undo") => history_response(ctx, true),
+        ("POST", "/api/edit/redo") => history_response(ctx, false),
         ("POST", "/api/clite/compile") => clite_compile_response(ctx, body),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
@@ -359,6 +431,10 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
         .iter()
         .map(crate::package_to_json)
         .collect();
+    let (undo_depth, redo_depth) = {
+        let h = ctx.history.lock().unwrap();
+        (h.undo.len(), h.redo.len())
+    };
     let value = serde_json::json!({
         "schema_version": 1,
         "tool": "openlustre studio inspect",
@@ -369,6 +445,7 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
             "node_count": project.all_nodes().count(),
             "packages": packages,
         },
+        "history": { "undo": undo_depth, "redo": redo_depth },
         "diagnostics": diagnostics,
         "summary": {
             "errors": diagnostics.iter()
@@ -774,6 +851,7 @@ fn apply_edit_response_to(
         Ok(v) => v,
         Err(e) => return (400, "application/json", json_error(&format!("bad JSON: {e}")).into_bytes()),
     };
+    let before = take_snapshot(ctx);
     let mut project = match load_raw_path(path) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
@@ -784,6 +862,7 @@ fn apply_edit_response_to(
     if let Err(e) = save_raw_path(path, &project) {
         return (500, "application/json", json_error(&e).into_bytes());
     }
+    record_edit(ctx, before);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -1427,6 +1506,7 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
     };
 
     let target_path = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let before = take_snapshot(ctx);
     let mut doc = match load_raw_path(&target_path) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
@@ -1438,6 +1518,7 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
     if let Err(e) = save_raw_path(&target_path, &doc) {
         return (500, "application/json", json_error(&e).into_bytes());
     }
+    record_edit(ctx, before);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -1473,9 +1554,11 @@ fn remove_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
             removed |= pkg.types.len() != before;
         }
         if removed {
+            let before = take_snapshot(ctx);
             if let Err(e) = save_raw_path(&path, &doc) {
                 return (500, "application/json", json_error(&e).into_bytes());
             }
+            record_edit(ctx, before);
             return match build_inspect(ctx) {
                 Ok(b) => (200, "application/json", b.into_bytes()),
                 Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -1720,6 +1803,7 @@ fn add_block_call_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
         .map(|p| (p.name.clone(), p.ty.clone()))
         .collect();
 
+    let before = take_snapshot(ctx);
     let mut project = match load_raw(ctx) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
@@ -1770,6 +1854,7 @@ fn add_block_call_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());
     }
+    record_edit(ctx, before);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -2006,6 +2091,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         return bad(&format!("`{op_id}` is not implemented yet: {}", opdef.hint));
     }
 
+    let before = take_snapshot(ctx);
     let mut project = match load_raw(ctx) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
@@ -2057,6 +2143,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());
     }
+    record_edit(ctx, before);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),

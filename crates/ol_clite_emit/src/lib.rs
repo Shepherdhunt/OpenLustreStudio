@@ -305,7 +305,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
 
     let _ = writeln!(out, "typedef struct {{");
     for p in &node.inputs {
-        let _ = writeln!(out, "  {};", type_decl(&p.ty, &p.name));
+        let _ = writeln!(out, "  {};", type_decl(&p.ty, &c_ident(&p.name)));
     }
     if node.inputs.is_empty() {
         let _ = writeln!(out, "  int8_t _unused;");
@@ -315,7 +315,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
 
     let _ = writeln!(out, "typedef struct {{");
     for p in &node.outputs {
-        let _ = writeln!(out, "  {};", type_decl(&p.ty, &p.name));
+        let _ = writeln!(out, "  {};", type_decl(&p.ty, &c_ident(&p.name)));
     }
     if node.outputs.is_empty() {
         let _ = writeln!(out, "  int8_t _unused;");
@@ -392,7 +392,7 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
     for l in &node.locals {
         // `= {0}` is C's universal zero-initializer — works for scalars,
         // arrays, and structs — so we don't need a per-shape cast.
-        let _ = writeln!(out, "  {} = {{0}};", type_decl(&l.ty, &l.name));
+        let _ = writeln!(out, "  {} = {{0}};", type_decl(&l.ty, &c_ident(&l.name)));
     }
 
     let scope = Scope {
@@ -506,12 +506,13 @@ struct Scope {
 impl Scope {
     fn ref_var(&self, name: &str) -> String {
         if self.inputs.contains(name) {
-            format!("in->{name}")
+            format!("in->{}", c_ident(name))
         } else if self.outputs.contains(name) {
-            format!("out->{name}")
+            format!("out->{}", c_ident(name))
         } else if self.locals.contains(name) {
-            name.to_string()
+            c_ident(name)
         } else {
+            // Constants and enum variants are emitted under their own names.
             name.to_string()
         }
     }
@@ -543,7 +544,7 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
             emit_call_block(callee, site.idx, &arg_strs, out);
             for (lhs, p) in eq.lhs.iter().zip(callee.outputs.iter()) {
                 let l = ctx.scope.ref_var(lhs);
-                let _ = writeln!(out, "  {l} = __out{}.{};", site.idx, p.name);
+                let _ = writeln!(out, "  {l} = __out{}.{};", site.idx, c_ident(&p.name));
             }
         } else {
             let _ = writeln!(out, "  /* unsupported multi-output rhs */");
@@ -575,7 +576,7 @@ fn emit_call_block(callee: &NodeDef, idx: usize, arg_strs: &[String], out: &mut 
     let _ = writeln!(out, "  {name}_Input __in{idx};");
     let _ = writeln!(out, "  {name}_Output __out{idx};");
     for (p, a) in callee.inputs.iter().zip(arg_strs.iter()) {
-        let _ = writeln!(out, "  __in{idx}.{} = {};", p.name, a);
+        let _ = writeln!(out, "  __in{idx}.{} = {};", c_ident(&p.name), a);
     }
     if callee.is_function() {
         let _ = writeln!(out, "  {name}_step(&__in{idx}, &__out{idx});");
@@ -720,6 +721,31 @@ fn type_decl(ty: &Type, name: &str) -> String {
 
 fn state_field_name(name: &str) -> String {
     format!("prev_{name}")
+}
+
+/// C identifier for a model variable. Model names are only constrained to be
+/// identifiers, so `unsigned`, `for`, or `double` are all legal — and would
+/// break the generated code. Keywords (and the generated parameter names
+/// `in`/`out`/`self`) get a trailing underscore; CSV headers, traces, and
+/// diagnostics keep the model's own names.
+pub(crate) fn c_ident(name: &str) -> String {
+    const RESERVED: &[&str] = &[
+        // C11 keywords.
+        "auto", "break", "case", "char", "const", "continue", "default", "do",
+        "double", "else", "enum", "extern", "float", "for", "goto", "if",
+        "inline", "int", "long", "register", "restrict", "return", "short",
+        "signed", "sizeof", "static", "struct", "switch", "typedef", "union",
+        "unsigned", "void", "volatile", "while",
+        // stdbool/stdint names the generated code relies on.
+        "bool", "true", "false",
+        // Parameter names of every generated _step/_init function.
+        "in", "out", "self",
+    ];
+    if RESERVED.contains(&name) {
+        format!("{name}_")
+    } else {
+        name.to_string()
+    }
 }
 
 fn state_driver_name(state_field: &str, scope: &Scope) -> String {

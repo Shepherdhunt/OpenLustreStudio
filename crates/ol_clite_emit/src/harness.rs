@@ -66,7 +66,12 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "    char* tok = strtok(line, \",\");");
     for p in &node.inputs {
         let _ = writeln!(s, "    if (!tok) return 1;");
-        let _ = writeln!(s, "    in.{} = {};", p.name, parse_expr(&p.ty, "tok"));
+        let _ = writeln!(
+            s,
+            "    in.{} = {};",
+            crate::c_ident(&p.name),
+            parse_expr(&p.ty, "tok")
+        );
         let _ = writeln!(s, "    tok = strtok(NULL, \",\");");
     }
     if node.kind != NodeKind::Function {
@@ -83,7 +88,11 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "    printf(\"%d\", cycle);");
     for p in &node.outputs {
         let _ = writeln!(s, "    printf(\",\");");
-        let _ = writeln!(s, "    {}", print_stmt(&p.ty, &format!("out.{}", p.name)));
+        let _ = writeln!(
+            s,
+            "    {}",
+            print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)))
+        );
     }
     if monitor_contract_name.is_some() {
         let _ = writeln!(s, "    printf(\",%s,%s\", mode_buf, viol_buf);");

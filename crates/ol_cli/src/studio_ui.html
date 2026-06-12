@@ -53,6 +53,12 @@
     text-transform: uppercase; letter-spacing: 0.5px;
     position: sticky; top: 0; z-index: 2;
   }
+  #left > #packages > details > summary,
+  #left details details > summary {
+    padding: 4px 10px; cursor: pointer; font-weight: 600; color: #3c3c3c;
+    background: #efefef; border-bottom: 1px solid #e0e0e0;
+  }
+  #left details details > summary { padding-left: 18px; }
   #center { overflow: auto; padding: 8px 12px; grid-row: 3; grid-column: 2; background: #fafafa; }
   #rightdock {
     grid-row: 3; grid-column: 3; background: #f5f5f5; border-left: 1px solid #c5c5c5;
@@ -159,6 +165,8 @@
   svg .box.warn { stroke: #c98a00; stroke-width: 1.6; fill: #fdf6e7; }
   svg .box.ghost { stroke: #d11a1a; stroke-width: 1.6; stroke-dasharray: 5 3; fill: #fdeeee; }
   svg .box.selected { stroke: #2b579a; stroke-width: 2.6; }
+  svg .pin { fill: #fff; stroke: #2b579a; stroke-width: 1.4; cursor: crosshair; }
+  svg .pin:hover { fill: #2b579a; }
   svg text.sym { font-size: 13px; font-weight: 600; }
   svg text.wire-label { fill: #6b7c8d; font-size: 9px; }
   svg text { fill: #1e1e1e; font-size: 11px; font-family: "Segoe UI", sans-serif; }
@@ -200,6 +208,13 @@
       <div class="mi" onclick="openDialog('dlg-main')">Set Main Operator…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="refresh()">Refresh Project</div>
+    </div>
+  </div>
+  <div class="menu" data-menu="edit">
+    <span class="menu-title">Edit</span>
+    <div class="dropdown">
+      <div class="mi disabled" id="mi-undo" onclick="editUndo()">Undo <span class="shortcut">Ctrl+Z</span></div>
+      <div class="mi disabled" id="mi-redo" onclick="editRedo()">Redo <span class="shortcut">Ctrl+Y</span></div>
     </div>
   </div>
   <div class="menu" data-menu="insert">
@@ -310,6 +325,7 @@
     <span class="dock-tab" data-dock="simulation" onclick="showDock('simulation')">Simulation</span>
     <span class="dock-tab" data-dock="tests" onclick="showDock('tests'); loadTests()">Tests</span>
     <span class="dock-tab" data-dock="verify" onclick="showDock('verify')">Verify</span>
+    <span class="dock-tab" data-dock="build" onclick="showDock('build')">Build</span>
   </div>
   <div class="dock-body">
     <div class="dock-pane" id="dock-messages"><div id="diagnostics"></div></div>
@@ -332,6 +348,9 @@
       </div>
       <div id="tests-scenarios"></div>
       <div id="tests-results"></div>
+    </div>
+    <div class="dock-pane" id="dock-build" style="display:none">
+      <pre id="build-log" style="border:none; margin:0">No build yet — Code &gt; Compile C-Lite…</pre>
     </div>
     <div class="dock-pane" id="dock-verify" style="display:none">
       <div class="row">
@@ -663,36 +682,60 @@ async function refresh() {
   document.getElementById("err-count").textContent = ins.summary.errors + " error" + (ins.summary.errors === 1 ? "" : "s");
   document.getElementById("warn-count").textContent = ins.summary.warnings + " warning" + (ins.summary.warnings === 1 ? "" : "s");
 
+  // SCADE-style tree: user packages with an Operators folder each, the
+  // standard library under a collapsed Libraries root.
   const pkgs = document.getElementById("packages");
   pkgs.innerHTML = "";
-  for (const pkg of ins.project.packages) {
+  const mkNodeRow = n => {
+    const d = document.createElement("div");
+    d.className = "node";
+    d.dataset.name = n.name;
+    d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
+    d.onclick = () => {
+      selectNode(n);
+      state.diagramStack = [];
+      loadDiagram(n.name);
+    };
+    return d;
+  };
+  const mkPackage = (pkg, host) => {
+    const det = document.createElement("details");
+    det.open = pkg.name !== "stdlib";
+    const sum = document.createElement("summary");
+    sum.textContent = pkg.name + " ";
+    const b = document.createElement("span");
+    b.className = "badge";
+    b.textContent = pkg.nodes.length + " operators";
+    sum.appendChild(b);
+    det.appendChild(sum);
     const h = document.createElement("h3");
-    h.textContent = pkg.name + " ";
-    const b = document.createElement("span"); b.className = "badge"; b.textContent = pkg.nodes.length + " nodes";
-    h.appendChild(b);
-    pkgs.appendChild(h);
-    for (const n of pkg.nodes) {
-      const d = document.createElement("div");
-      d.className = "node";
-      d.dataset.name = n.name;
-      d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
-      d.onclick = () => {
-        selectNode(n);
-        state.diagramStack = [];
-        loadDiagram(n.name);
-      };
-      pkgs.appendChild(d);
-    }
+    h.textContent = "Operators";
+    det.appendChild(h);
+    for (const n of pkg.nodes) det.appendChild(mkNodeRow(n));
     if (pkg.contracts && pkg.contracts.length) {
-      const h2 = document.createElement("h3"); h2.textContent = "contracts (" + pkg.name + ")";
-      pkgs.appendChild(h2);
+      const h2 = document.createElement("h3");
+      h2.textContent = "Contracts";
+      det.appendChild(h2);
       for (const c of pkg.contracts) {
         const d = document.createElement("div");
         d.className = "node";
         d.textContent = c.name + "  modes: " + c.mode_count + " · g: " + c.guarantee_count;
-        pkgs.appendChild(d);
+        det.appendChild(d);
       }
     }
+    host.appendChild(det);
+  };
+  for (const pkg of ins.project.packages.filter(p => p.name !== "stdlib")) {
+    mkPackage(pkg, pkgs);
+  }
+  const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
+  if (libPkgs.length) {
+    const lib = document.createElement("details");
+    const sum = document.createElement("summary");
+    sum.textContent = "Libraries";
+    lib.appendChild(sum);
+    for (const pkg of libPkgs) mkPackage(pkg, lib);
+    pkgs.appendChild(lib);
   }
   const diag = document.getElementById("diagnostics");
   diag.innerHTML = "";
@@ -724,6 +767,8 @@ async function refresh() {
   populateEditSelectors();
   loadTypes();
   refreshSideText();
+  setMenuEnabled("mi-undo", (ins.history?.undo ?? 0) > 0);
+  setMenuEnabled("mi-redo", (ins.history?.redo ?? 0) > 0);
   const e = entryNode();
   document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
   document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
@@ -745,6 +790,45 @@ function selectNode(n) {
   state.selectedNode = n;
   document.querySelectorAll(".node").forEach(el => el.classList.toggle("selected", el.dataset.name === n.name));
 }
+
+// --- Edit menu: undo/redo through the server's journal -----------------------------
+
+async function historyPost(url) {
+  const r = await fetch(url, { method: "POST" });
+  if (!r.ok) {
+    let msg = await r.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    document.getElementById("diagram-status").textContent = msg;
+    return;
+  }
+  await refresh();
+  // The current diagram may have been created by the edit we just undid.
+  const cur = state.diagramData?.node;
+  if (cur && findNode(cur)) {
+    await loadDiagram(cur, false);
+  } else {
+    const first = state.inspect.project.packages.find(p => p.nodes.length)?.nodes[0];
+    if (first) {
+      selectNode(first);
+      state.diagramStack = [];
+      await loadDiagram(first.name);
+    }
+  }
+}
+
+function editUndo() { historyPost("/api/edit/undo"); }
+function editRedo() { historyPost("/api/edit/redo"); }
+
+document.addEventListener("keydown", ev => {
+  // Leave text fields their native undo.
+  const t = ev.target.tagName;
+  if (t === "INPUT" || t === "TEXTAREA" || t === "SELECT") return;
+  if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
+    const k = ev.key.toLowerCase();
+    if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
+    else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
+  }
+});
 
 // --- Simulation menu (Build / Run / Step / Stop) -----------------------------------
 
@@ -833,15 +917,21 @@ async function cliteCompile() {
   try { v = JSON.parse(text); } catch (_) { v = { error: text }; }
   const log = document.getElementById("compile-log");
   log.style.display = "";
+  let logText;
   if (v.error) {
     st.textContent = "failed";
-    log.textContent = v.error;
-    return;
+    logText = v.error;
+  } else {
+    st.textContent = v.compiled
+      ? "✓ compiled — " + v.exe
+      : "emitted to " + v.out_dir + " but compile failed";
+    logText = "wrote: " + (v.wrote || []).join(", ") + "\n\n" + (v.log || "");
   }
-  st.textContent = v.compiled
-    ? "✓ compiled — " + v.exe
-    : "emitted to " + v.out_dir + " but compile failed";
-  log.textContent = "wrote: " + (v.wrote || []).join(", ") + "\n\n" + (v.log || "");
+  log.textContent = logText;
+  // The Build dock keeps the last build output, SCADE-style.
+  document.getElementById("build-log").textContent =
+    new Date().toLocaleTimeString() + " — " + st.textContent + "\n\n" + logText;
+  showDock("build");
 }
 
 // --- Diagram rendering -----------------------------------------------------------
@@ -1038,7 +1128,20 @@ function renderDiagram() {
     if (it.reason) {
       svg += '<title>' + escapeHTML(it.reason) + '</title>';
     }
+    // Source pin on the right edge: drag it onto another box to wire.
+    if (it.cls.indexOf("ghost") < 0) {
+      svg += '<circle class="pin" data-pin="' + it.id + '" cx="' + (p.x + p.w) +
+        '" cy="' + (p.y + DIAG.BOXH / 2) + '" r="4.5"><title>drag to wire</title></circle>';
+    }
     svg += '</g>';
+  }
+  // Live wire while pin-dragging.
+  if (state.wireDrag) {
+    const a = pos[state.wireDrag.from];
+    if (a) {
+      svg += '<path class="wire" style="stroke:#2b579a;stroke-dasharray:4 3;pointer-events:none" d="M ' +
+        (a.x + a.w) + ' ' + (a.y + DIAG.BOXH / 2) + ' L ' + state.wireDrag.x + ' ' + state.wireDrag.y + '"/>';
+    }
   }
   svg += "</svg>";
   const host = document.getElementById("diagram-host");
@@ -1063,6 +1166,13 @@ function svgPoint(ev) {
 }
 
 function diagPointerDown(ev) {
+  // Grabbing a pin starts a wire, not a move.
+  if (ev.target.classList && ev.target.classList.contains("pin")) {
+    const pt = svgPoint(ev);
+    state.wireDrag = { from: ev.target.dataset.pin, x: pt.x, y: pt.y };
+    ev.preventDefault();
+    return;
+  }
   const g = ev.target.closest("g.diag-item");
   if (!g) return;
   const id = g.dataset.id;
@@ -1073,6 +1183,13 @@ function diagPointerDown(ev) {
 }
 
 function diagPointerMove(ev) {
+  if (state.wireDrag) {
+    const pt = svgPoint(ev);
+    state.wireDrag.x = pt.x;
+    state.wireDrag.y = pt.y;
+    renderDiagram();
+    return;
+  }
   if (!state.drag) return;
   const pt = svgPoint(ev);
   const p = state.diagPos[state.drag.id];
@@ -1085,7 +1202,18 @@ function diagPointerMove(ev) {
   }
 }
 
-async function diagPointerUp() {
+async function diagPointerUp(ev) {
+  if (state.wireDrag) {
+    const wd = state.wireDrag;
+    state.wireDrag = null;
+    const el = document.elementFromPoint(ev.clientX, ev.clientY);
+    const g = el && el.closest ? el.closest("g.diag-item") : null;
+    renderDiagram();
+    if (g && g.dataset.id !== wd.from) {
+      await completeWire(wd.from, g.dataset.id);
+    }
+    return;
+  }
   const drag = state.drag;
   state.drag = null;
   if (!drag) return;
@@ -1100,6 +1228,76 @@ async function diagPointerUp() {
     return;
   }
   saveLayout();
+}
+
+function wireStatus(m) {
+  document.getElementById("diagram-status").textContent = m;
+}
+
+/// Complete a pin-to-pin drag, SCADE style:
+/// variable → block binds the block's first unbound (red) pin;
+/// block → output/local rewires the block's result (and sweeps up the
+/// orphaned auto-created local).
+async function completeWire(from, to) {
+  const d = state.diagramData;
+  const isEq = id => /^eq\d+$/.test(id);
+  const vars = new Set(knownVarNames());
+  if (vars.has(from) && isEq(to)) {
+    const i = +/^eq(\d+)$/.exec(to)[1];
+    const eq = d.equations[i];
+    const unbound = (d.ghosts || [])
+      .map(g => g.name)
+      .filter(gn => {
+        const esc = gn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        return new RegExp("\\b" + esc + "\\b").test(eq.body);
+      })
+      .sort();
+    if (!unbound.length) {
+      wireStatus("no unbound pin on this block — edit its expression in Properties");
+      return;
+    }
+    const ok = await propsFetch("/api/edit/update_equation", {
+      node: d.node,
+      index: i,
+      lhs: eq.lhs.join(", "),
+      body: replaceIdent(eq.body, unbound[0], from),
+    });
+    if (ok) {
+      wireStatus("wired " + from + " → " + unbound[0]);
+      await propsReload();
+    }
+  } else if (isEq(from) && vars.has(to)) {
+    const i = +/^eq(\d+)$/.exec(from)[1];
+    const eq = d.equations[i];
+    if (eq.lhs.length !== 1) {
+      wireStatus("multi-output block — rewire it in Properties");
+      return;
+    }
+    const old = eq.lhs[0];
+    if (old === to) return;
+    if (d.equations.some((e, j) => j !== i && e.lhs.includes(to))) {
+      wireStatus("`" + to + "` is already defined by another block");
+      return;
+    }
+    const ok = await propsFetch("/api/edit/update_equation", {
+      node: d.node, index: i, lhs: to, body: eq.body,
+    });
+    if (!ok) return;
+    // The auto-created result local is orphaned once the block feeds a real
+    // variable — sweep it up unless something else still mentions it.
+    const esc = old.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp("\\b" + esc + "\\b");
+    const usedElsewhere = d.equations.some(
+      (e, j) => j !== i && (re.test(e.body) || e.lhs.includes(old))
+    );
+    if (d.locals.some(l => l.name === old) && !usedElsewhere) {
+      await propsFetch("/api/edit/remove_port", { node: d.node, name: old });
+    }
+    wireStatus("result wired to " + to);
+    await propsReload();
+  } else {
+    wireStatus("drag a variable pin onto a block, or a block pin onto an output/local");
+  }
 }
 
 // Persist the whole layout (positions + grid pitch) for the current node.
