@@ -93,6 +93,28 @@ verification burden the qualified tool would otherwise discharge.
 
 ## 6. What closed recently
 
+### 2026-06-13 — authoring & simulation ergonomics
+
+Three round-two GUI gaps from live demo feedback:
+
+* **Select / delete on the canvas.** Selection is now a set — ctrl/shift-click
+  to multi-select, click empty to clear. Right-click opens a context menu
+  (Properties, Delete) and **Delete/Backspace** removes the selected item(s):
+  equations via `remove_equation` (descending index), variables via
+  `remove_port`; ghosts are symptoms and skipped; Ctrl+Z restores.
+* **Two-column simulation watch/set table.** The step view is a SCADE-style
+  table: column 1 is `name : type` for every input/local/output, column 2 is
+  an **editable, sticky** value for inputs (it holds across cycles until you
+  change it) and a computed read-only value for locals/outputs. Every typed
+  value is validated against its type — a bool only takes true/false, an int8
+  stays in −128…127, a uint can't go negative — so the simulator never gets a
+  value its type can't hold. (The 5 s inspect poll no longer wipes a running
+  sim's computed cells.)
+* **Cleaner unbound pins.** A gate's unbound input reads as “input N — needs a
+  source” rather than exposing the internal `p0_1` placeholder; binding still
+  happens by wiring the pin or, as the user prefers, typing the expression in
+  Properties.
+
 ### 2026-06-13 — SCADE gates: input pins on the left, output on the right
 
 The canvas drew every element — ports, operations, outputs — as the same

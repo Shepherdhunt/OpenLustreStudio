@@ -134,6 +134,22 @@
   .step-grid { display: grid; grid-template-columns: 180px 1fr; gap: 4px 12px;
                align-items: center; margin: 8px 0; }
   .step-grid label { color: #3c3c3c; }
+  /* SCADE-style watch/set table: name:type | editable-or-computed value */
+  .watch-table { border-collapse: collapse; margin: 8px 0; min-width: 320px; }
+  .watch-table th { text-align: left; color: #555; font-weight: 600; font-size: 11px;
+                    border-bottom: 1px solid #c5c5c5; padding: 3px 10px 3px 4px; }
+  .watch-table td { padding: 2px 10px 2px 4px; border-bottom: 1px solid #ececec; }
+  .watch-table td:first-child { font-family: Consolas, monospace; color: #2b3a4a; white-space: nowrap; }
+  .watch-val { width: 110px; font-family: Consolas, monospace; }
+  .watch-val.invalid { border: 1.5px solid #d11a1a; background: #fdeeee; }
+  .watch-computed { font-family: Consolas, monospace; color: #2b579a; }
+  /* Canvas right-click menu */
+  .ctx-menu { position: fixed; z-index: 1000; background: #fff; border: 1px solid #9aa6b2;
+              box-shadow: 0 3px 10px rgba(0,0,0,0.22); min-width: 132px; padding: 3px 0;
+              font-size: 12px; font-family: "Segoe UI", sans-serif; }
+  .ctx-menu .ctx-item { padding: 4px 16px; cursor: pointer; color: #1e1e1e; }
+  .ctx-menu .ctx-item:hover { background: #2b579a; color: #fff; }
+  .ctx-menu .ctx-sep { border-top: 1px solid #e6e6e6; margin: 3px 0; }
   .build-note { color: #666; font-size: 11px; margin-top: 4px; }
   code.inline { background: #eef2f7; padding: 1px 6px; border-radius: 3px;
                 font-family: Consolas, monospace; }
@@ -334,14 +350,17 @@
   <div class="dock-body">
     <div class="dock-pane" id="dock-messages"><div id="diagnostics"></div></div>
     <div class="dock-pane" id="dock-simulation" style="display:none">
-      <p style="margin:4px 0">Stepping <strong id="step-entry-name">main</strong> — set inputs, then <code class="inline">Simulation &gt; Step</code>. Every named item has a deterministic value each cycle.</p>
-      <div id="step-inputs" class="step-grid"></div>
-      <div>
+      <p style="margin:4px 0">Stepping <strong id="step-entry-name">main</strong> — type input values (they stay until you change them), then <code class="inline">Simulation &gt; Step</code>. Outputs and locals are computed each cycle.</p>
+      <table id="sim-watch" class="watch-table">
+        <thead><tr><th>name : type</th><th>value</th></tr></thead>
+        <tbody id="sim-watch-body"></tbody>
+      </table>
+      <div style="margin-top:6px">
         <button class="primary" onclick="simStep()">Step</button>
         <button onclick="simStop()">Stop / Reset</button>
         <span class="build-note">cycle <span id="step-cycle">0</span></span>
       </div>
-      <div id="step-trace"></div>
+      <details style="margin-top:6px"><summary class="build-note">trace history</summary><div id="step-trace"></div></details>
     </div>
     <div class="dock-pane" id="dock-tests" style="display:none">
       <div>
@@ -544,13 +563,16 @@
   </div>
 </div>
 
+<div id="ctx-menu" class="ctx-menu" style="display:none"></div>
+
 <script>
 "use strict";
 
 const state = {
   inspect: null, selectedNode: null, stepHistory: "",
   diagramStack: [], diagramData: null, diagPos: {}, drag: null,
-  sim: { built: false, running: false },
+  selection: null, selected: [],
+  sim: { built: false, running: false, values: {} },
   ops: null,
 };
 
@@ -767,7 +789,9 @@ async function refresh() {
     const first = ins.project.packages.find(p => p.nodes.length)?.nodes[0];
     if (first) { selectNode(first); loadDiagram(first.name); }
   }
-  populateStepInputs();
+  // Don't rebuild the watch table mid-run (the 5 s inspect poll calls
+  // refresh) — it would wipe the live computed values. simRun builds it.
+  if (!state.sim.running) buildWatchTable();
   populateEditSelectors();
   loadTypes();
   refreshSideText();
@@ -824,14 +848,25 @@ function editUndo() { historyPost("/api/edit/undo"); }
 function editRedo() { historyPost("/api/edit/redo"); }
 
 document.addEventListener("keydown", ev => {
-  // Leave text fields their native undo.
+  if (ev.key === "Escape") { hideCtxMenu(); return; }
+  // Leave text fields their native editing.
   const t = ev.target.tagName;
   if (t === "INPUT" || t === "TEXTAREA" || t === "SELECT") return;
+  // Delete / Backspace removes the selected canvas item(s).
+  if ((ev.key === "Delete" || ev.key === "Backspace") && state.selected.length && state.diagramData) {
+    ev.preventDefault();
+    deleteSelected();
+    return;
+  }
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = ev.key.toLowerCase();
     if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
     else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
   }
+});
+// Any click outside the menu dismisses it.
+document.addEventListener("click", ev => {
+  if (!ev.target.closest || !ev.target.closest("#ctx-menu")) hideCtxMenu();
 });
 
 // --- Simulation menu (Build / Run / Step / Stop) -----------------------------------
@@ -871,7 +906,7 @@ function simRun() {
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
   document.getElementById("step-cycle").textContent = "0";
-  populateStepInputs();
+  buildWatchTable();
   setMenuEnabled("mi-sim-step", true);
   setMenuEnabled("mi-sim-stop", true);
   setSimStatus("SIMULATION RUNNING — cycle 0");
@@ -893,6 +928,8 @@ function simStop() {
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
   document.getElementById("step-cycle").textContent = "0";
+  // Reset the computed cells; keep the sticky input values for the next run.
+  document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
   setMenuEnabled("mi-sim-step", false);
   setMenuEnabled("mi-sim-stop", false);
   setSimStatus("");
@@ -1165,7 +1202,7 @@ function renderDiagram() {
     const h = p.h || DIAG.BOXH;
     const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
     const divable = it.calls && it.calls.length;
-    const selected = state.selection === it.id;
+    const selected = state.selected.includes(it.id);
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
@@ -1187,11 +1224,13 @@ function renderDiagram() {
     // unbound. Each is a drop target for wiring a source onto that operand.
     (it.inputs || []).forEach((pin, k) => {
       const py = inputPinY(it.id, k);
+      // Bound pins name their source; unbound pins read as a neutral "input N"
+      // slot — wire it, or just type the expression in Properties.
+      const tip = pin.bound ? pin.name
+        : ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)");
       svg += '<circle class="inpin' + (pin.bound ? "" : " unbound") + '" data-eq="' + it.id +
         '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + p.x +
-        '" cy="' + py + '" r="4"><title>' +
-        escapeHTML(pin.bound ? pin.name : (pin.name + " — unbound; drag a source here")) +
-        '</title></circle>';
+        '" cy="' + py + '" r="4"><title>' + escapeHTML(tip) + '</title></circle>';
     });
     // Source pin on the right edge: drag it onto another box to wire.
     if (it.cls.indexOf("ghost") < 0) {
@@ -1231,6 +1270,7 @@ function svgPoint(ev) {
 }
 
 function diagPointerDown(ev) {
+  hideCtxMenu();
   // Grabbing a pin starts a wire, not a move.
   if (ev.target.classList && ev.target.classList.contains("pin")) {
     const pt = svgPoint(ev);
@@ -1239,11 +1279,18 @@ function diagPointerDown(ev) {
     return;
   }
   const g = ev.target.closest("g.diag-item");
-  if (!g) return;
+  if (!g) {
+    // Clicking empty canvas clears the selection.
+    if (ev.button === 0) setSelection(null);
+    return;
+  }
   const id = g.dataset.id;
   const pt = svgPoint(ev);
   const p = state.diagPos[id];
-  state.drag = { id, dx: pt.x - p.x, dy: pt.y - p.y, moved: false, call: g.dataset.call };
+  state.drag = {
+    id, dx: pt.x - p.x, dy: pt.y - p.y, moved: false, call: g.dataset.call,
+    additive: ev.shiftKey || ev.ctrlKey || ev.metaKey,
+  };
   ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
 }
 
@@ -1287,13 +1334,11 @@ async function diagPointerUp(ev) {
   const drag = state.drag;
   state.drag = null;
   if (!drag) return;
-  if (!drag.moved && drag.call) {
-    // A plain click on a calling equation: dive into the callee.
-    loadDiagram(drag.call, true);
-    return;
-  }
   if (!drag.moved) {
-    // A plain click selects: the Properties dock shows the element's sheet.
+    // Ctrl/shift-click toggles a multi-selection; a plain click on a calling
+    // equation dives into the callee; otherwise it just selects.
+    if (drag.additive) { setSelection(drag.id, true); return; }
+    if (drag.call) { loadDiagram(drag.call, true); return; }
     setSelection(drag.id);
     return;
   }
@@ -1579,17 +1624,81 @@ function symbolOpId(eq) {
 
 function diagContextMenu(ev) {
   const g = ev.target.closest("g.diag-item");
-  if (!g) return;
+  if (!g) { hideCtxMenu(); return; }
   ev.preventDefault();
-  setSelection(g.dataset.id);
+  // Right-clicking an unselected item selects it; an existing (multi)
+  // selection is kept so you can delete several at once.
+  if (!state.selected.includes(g.dataset.id)) setSelection(g.dataset.id);
+  showCtxMenu(ev.clientX, ev.clientY);
 }
 
 // --- Selection + the Properties dock (the SCADE Properties pane) ------------
 
-function setSelection(id) {
-  state.selection = id;
+/// Select an item. With `additive` (ctrl/shift-click) the item toggles in a
+/// multi-selection; otherwise it becomes the sole selection. `null` clears.
+function setSelection(id, additive) {
+  if (additive && id) {
+    const i = state.selected.indexOf(id);
+    if (i >= 0) {
+      state.selected.splice(i, 1);
+      state.selection = state.selected[state.selected.length - 1] || null;
+    } else {
+      state.selected.push(id);
+      state.selection = id;
+    }
+  } else {
+    state.selected = id ? [id] : [];
+    state.selection = id || null;
+  }
   renderDiagram();
   renderProps();
+}
+
+// --- Canvas context menu + delete --------------------------------------------
+
+function showCtxMenu(x, y) {
+  const m = document.getElementById("ctx-menu");
+  const n = state.selected.length;
+  m.innerHTML =
+    '<div class="ctx-item" onclick="hideCtxMenu()">Properties</div>' +
+    '<div class="ctx-sep"></div>' +
+    '<div class="ctx-item" onclick="deleteSelected()">Delete' +
+    (n > 1 ? " (" + n + " items)" : "") + "</div>";
+  m.style.left = x + "px";
+  m.style.top = y + "px";
+  m.style.display = "block";
+}
+
+function hideCtxMenu() {
+  const m = document.getElementById("ctx-menu");
+  if (m) m.style.display = "none";
+}
+
+/// Delete the selected item(s): variables via remove_port, equations via
+/// remove_equation (descending index so earlier indices stay valid). Ghosts
+/// are symptoms, not deletable. Ctrl+Z brings anything back.
+async function deleteSelected() {
+  hideCtxMenu();
+  const d = state.diagramData;
+  if (!d || !state.selected.length) return;
+  const known = new Set(knownVarNames());
+  const eqIdx = [], vars = [];
+  for (const id of state.selected) {
+    const m = /^eq(\d+)$/.exec(id);
+    if (m) eqIdx.push(+m[1]);
+    else if (known.has(id)) vars.push(id);
+  }
+  for (const name of vars) {
+    if (!(await propsFetch("/api/edit/remove_port", { node: d.node, name }))) return;
+  }
+  eqIdx.sort((a, b) => b - a);
+  for (const i of eqIdx) {
+    if (!(await propsFetch("/api/edit/remove_equation", { node: d.node, index: i }))) return;
+  }
+  state.selected = [];
+  state.selection = null;
+  wireStatus("deleted " + (vars.length + eqIdx.length) + " item(s) — Ctrl+Z to undo");
+  await propsReload();
 }
 
 /// The defining equation of a single-output variable, if any.
@@ -2217,53 +2326,124 @@ function editSetMain() {
   });
 }
 
-// --- Stepped simulation (full trace: every item, every cycle) ------------------------
+// --- Stepped simulation: a SCADE-style watch/set table ------------------------
+//
+// One row per input/local/output. Inputs are editable and STICKY — the value
+// holds across steps until the engineer changes it. Outputs and locals are
+// computed each cycle and shown read-only. Every value is validated against
+// its type (a bool is true/false, an int8 stays in -128…127), so the
+// simulator never receives a value its type cannot hold.
 
-function populateStepInputs() {
-  const e = entryNode();
-  const host = document.getElementById("step-inputs");
-  host.innerHTML = "";
-  if (!e) return;
-  for (const p of e.inputs) {
-    const lbl = document.createElement("label");
-    lbl.textContent = p.name + " : " + typeName(p.type);
-    const inp = document.createElement("input");
-    inp.dataset.port = p.name;
-    inp.dataset.tk = typeKind(p.type);
-    if (inp.dataset.tk === "Bool") {
-      inp.type = "checkbox";
-    } else if (inp.dataset.tk.startsWith("Float")) {
-      inp.type = "number"; inp.step = "any"; inp.value = "0";
-    } else {
-      inp.type = "number"; inp.value = "0";
-    }
-    host.appendChild(lbl);
-    host.appendChild(inp);
+function defaultForKind(tk) {
+  if (tk === "Bool") return "false";
+  return "0";
+}
+
+/// Validate a typed value the user typed. Returns {ok, norm, msg}.
+function validateValue(tk, raw) {
+  raw = (raw == null ? "" : String(raw)).trim();
+  if (tk === "Bool") {
+    const l = raw.toLowerCase();
+    if (["true", "1", "t"].includes(l)) return { ok: true, norm: "true" };
+    if (["false", "0", "f"].includes(l)) return { ok: true, norm: "false" };
+    return { ok: false, msg: "bool must be true or false" };
   }
+  if (tk === "Float32" || tk === "Float64") {
+    if (raw !== "" && isFinite(Number(raw))) return { ok: true, norm: raw };
+    return { ok: false, msg: "must be a number" };
+  }
+  const ranges = {
+    Int8: [-128, 127], Int16: [-32768, 32767], Int32: [-2147483648, 2147483647],
+    Uint8: [0, 255], Uint16: [0, 65535], Uint32: [0, 4294967295],
+  };
+  if (ranges[tk] || tk === "Int64" || tk === "Uint64") {
+    if (!/^-?\d+$/.test(raw)) return { ok: false, msg: "must be an integer" };
+    if ((tk === "Uint64" || tk === "Uint8" || tk === "Uint16" || tk === "Uint32") && raw[0] === "-")
+      return { ok: false, msg: "must be ≥ 0" };
+    if (tk === "Int64" || tk === "Uint64") return { ok: true, norm: raw };
+    const n = Number(raw), [lo, hi] = ranges[tk];
+    if (n < lo || n > hi) return { ok: false, msg: tk + " range is " + lo + "…" + hi };
+    return { ok: true, norm: raw };
+  }
+  // Named/enum/array values: the simulator resolves them; accept as typed.
+  return { ok: true, norm: raw };
 }
 
-function currentInputRow() {
-  const inputs = document.querySelectorAll("#step-inputs input");
-  return Array.from(inputs).map(i => {
-    if (i.dataset.tk === "Bool") return i.checked ? "true" : "false";
-    return i.value || "0";
-  }).join(",");
+function onWatchInput(inp) {
+  const v = validateValue(inp.dataset.tk, inp.value);
+  inp.classList.toggle("invalid", !v.ok);
+  inp.title = v.ok ? "" : v.msg;
+  state.sim.values[inp.dataset.port] = inp.value; // keep the raw text sticky
 }
 
-function currentHeaderRow() {
+function buildWatchTable() {
   const e = entryNode();
-  return e ? e.inputs.map(p => p.name).join(",") : "";
+  const body = document.getElementById("sim-watch-body");
+  body.innerHTML = "";
+  if (!e) return;
+  document.getElementById("step-entry-name").textContent = e.name;
+  const row = (name, type, suffix, editable) => {
+    const tr = document.createElement("tr");
+    const c1 = document.createElement("td");
+    c1.textContent = name + " : " + typeName(type) + suffix;
+    tr.appendChild(c1);
+    const c2 = document.createElement("td");
+    if (editable) {
+      const tk = typeKind(type);
+      const inp = document.createElement("input");
+      inp.className = "watch-val";
+      inp.dataset.port = name; inp.dataset.tk = tk;
+      inp.value = state.sim.values[name] != null ? state.sim.values[name] : defaultForKind(tk);
+      state.sim.values[name] = inp.value;
+      inp.addEventListener("input", () => onWatchInput(inp));
+      onWatchInput(inp);
+      c2.appendChild(inp);
+    } else {
+      c2.id = "watch-out-" + name;
+      c2.className = "watch-computed";
+      c2.textContent = "—";
+    }
+    tr.appendChild(c2);
+    body.appendChild(tr);
+  };
+  e.inputs.forEach(p => row(p.name, p.type, "", true));
+  (e.locals || []).forEach(l => row(l.name, l.type, " (local)", false));
+  e.outputs.forEach(p => row(p.name, p.type, " (out)", false));
+}
+
+/// Fill the computed cells (locals, outputs) from the latest trace row.
+function updateWatchComputed(csv) {
+  const lines = csv.trim().split("\n");
+  if (lines.length < 2) return;
+  const hdr = lines[0].split(",");
+  const last = lines[lines.length - 1].split(",");
+  hdr.forEach((h, i) => {
+    const cell = document.getElementById("watch-out-" + h);
+    if (cell) cell.textContent = last[i];
+  });
 }
 
 async function stepOnce() {
   const e = entryNode();
   if (!e) return;
-  if (!state.stepHistory) {
-    state.stepHistory = currentHeaderRow() + "\n";
+  // Build the input row from the sticky values, validating each first.
+  const cells = [];
+  for (const p of e.inputs) {
+    const v = validateValue(typeKind(p.type), state.sim.values[p.name]);
+    if (!v.ok) {
+      setSimStatus("invalid value for " + p.name + ": " + v.msg);
+      showDock("simulation");
+      return;
+    }
+    cells.push(v.norm);
   }
-  state.stepHistory += currentInputRow() + "\n";
+  if (!state.stepHistory) {
+    state.stepHistory = e.inputs.map(p => p.name).join(",") + "\n";
+  }
+  state.stepHistory += cells.join(",") + "\n";
   const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
   const trace = await r.text();
+  updateWatchComputed(trace);
   renderStepTrace(trace);
 }
 
