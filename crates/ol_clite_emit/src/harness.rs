@@ -146,11 +146,15 @@ fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32) {
     let _ = writeln!(s, "    printf(\"]\");");
 }
 
-/// A free-running DEBUG driver: no CSV, inputs held at their type defaults,
-/// printing a start banner, the held inputs, and the outputs + any log-message
-/// probes every `STRIDE` cycles. Compiled with `-DOL_DEBUG`, this is the
-/// "run it and watch it tick" build the GUI launches in a terminal.
-pub fn emit_debug_driver(node: &NodeDef) -> String {
+/// A free-running DEBUG driver: no CSV; inputs are held at the values the user
+/// set in the simulation watch table (`held`, keyed by input name) or their
+/// type defaults when unset. Prints a start banner, the held inputs, and the
+/// outputs + any log-message probes every `STRIDE` cycles. Compiled with
+/// `-DOL_DEBUG`, this is the "run it and watch it tick" build the GUI launches.
+pub fn emit_debug_driver(
+    node: &NodeDef,
+    held: &std::collections::BTreeMap<String, String>,
+) -> String {
     const STRIDE: u32 = 50;
     const STEPS: u32 = 500;
     let mut s = String::new();
@@ -175,7 +179,16 @@ pub fn emit_debug_driver(node: &NodeDef) -> String {
     let _ = writeln!(s, "  {prefix}_Output out;");
     let _ = writeln!(s, "  memset(&in, 0, sizeof(in));");
 
-    // Banner: the top operator's (default) input values.
+    // Hold each input at the user's watch-table value (parsed to a safe C
+    // literal — never the raw string, so the run can't inject code). Unset or
+    // unparseable inputs stay at the memset-zero default.
+    for p in &node.inputs {
+        if let Some(lit) = held.get(&p.name).and_then(|raw| c_literal(&p.ty, raw)) {
+            let _ = writeln!(s, "  in.{} = {lit};", crate::c_ident(&p.name));
+        }
+    }
+
+    // Banner: the top operator's (held) input values.
     let _ = writeln!(s, "  printf(\"initial inputs: \");");
     for p in &node.inputs {
         let _ = writeln!(s, "  {}", dbg_field(&p.ty, &format!("in.{}", crate::c_ident(&p.name)), &p.name));
@@ -204,6 +217,24 @@ pub fn emit_debug_driver(node: &NodeDef) -> String {
     let _ = writeln!(s, "  return 0;");
     let _ = writeln!(s, "}}");
     s
+}
+
+/// Parse a user-typed value into a safe C literal for a scalar input, or
+/// `None` (leave the memset-zero default) for unparseable or non-scalar
+/// types. Only literals derived from a successful parse are emitted, so no
+/// user text reaches the generated source verbatim.
+fn c_literal(ty: &Type, raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    match ty {
+        Type::Bool => match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" | "t" => Some("true".into()),
+            "false" | "0" | "f" => Some("false".into()),
+            _ => None,
+        },
+        t if t.is_float() => raw.parse::<f64>().ok().filter(|f| f.is_finite()).map(|f| format!("{f}")),
+        t if t.is_integer() => raw.parse::<i64>().ok().map(|i| i.to_string()),
+        _ => None,
+    }
 }
 
 /// One `printf` that labels and prints a scalar struct field by type.

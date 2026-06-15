@@ -1,6 +1,6 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-12.*
+*Updated 2026-06-13.*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove
@@ -9,17 +9,56 @@ is the industry-accepted, DO-178C-qualified original. This document is honest ab
 which gaps are **bridgeable engineering work** and which are **structural** (you
 cannot code your way to a qualification certificate), and prioritizes the former.
 
+## 0. Status snapshot — resume here
+
+**Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
+`main`). **Full check**: `cargo test --workspace --no-fail-fast` (56 result
+groups green as of 2026-06-13 on Windows/MSVC). The Studio GUI is one embedded
+HTML page, `crates/ol_cli/src/studio_ui.html`, served by
+`crates/ol_cli/src/studio_server.rs` (`openlustre studio serve <dir>`); the IR
+is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
+typecheck `crates/ol_typecheck`.
+
+**Landed recently (newest first):** held-input debug runs; the SCADE build
+pipeline (Build → Run Simulation → Generate C-Lite → Compile & Run) with
+`<operator>.lus` written on a clean build, the Lustre pane gated on build, and
+**log messages** (debug probes printed every 50 cycles); canvas select /
+multi-select / right-click-menu / Delete-key; the two-column simulation
+watch/set table with per-type validation; SCADE gates (input pins left, output
+right) + pin-to-pin wiring; MC/DC coverage; array iterators (`map`/`fold`);
+boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
+symbols; typed wire labels.
+
+**Best next gaps (pick up here):**
+1. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
+   add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
+   generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
+   pattern. Good first slice in a fresh session.
+2. **Hierarchical / parallel automata** (P1, large, structural) — today's FSMs
+   are flat Moore-style (`crates/ol_ir/src/state_machine.rs` lowers them);
+   SCADE automata nest, run in parallel, and carry history/signals.
+3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
+   the last piece of the verification-by-equivalence story (§4); pure docs, the
+   test suite already being the verification evidence.
+4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
+   copy/paste, distinct per-family gate silhouettes (§2).
+5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
+   cosmetic), then code signing (P2, cost not code).
+
+Everything ships across all stages — IR → typecheck → sim → generated C →
+dual-backend equivalence test — or it isn't done. The §6 log records each slice.
+
 ## 1. Where the products stand today
 
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
-| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Form-based authoring + draggable, grid-snapped canvas with persisted layout; palette inserts call text; red color-coding of invalid links |
-| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Strict Lustre subset: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
-| Static checks | Type/clock checker | Type checker + contract checker (vacuity, unreachability, overlap), live in the GUI |
-| Simulation | Cycle stepping, watch, plots, co-simulation | Cycle stepping with full trace of every named item; CSV batch simulation; golden-trace scenarios |
+| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with left input pins / right output, pin-to-pin wiring**, draggable grid-snapped canvas with persisted layout, multi-select + right-click menu + Delete, red invalid-link coding |
+| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
+| Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
+| Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
-| Code generation | KCG qualified C/Ada (TQL-1) | C-Lite emitter + contract monitors + CSV driver + Makefile, selected-root slicing |
-| Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage with uncovered-direction reporting |
+| Build & codegen | KCG qualified C/Ada (TQL-1) | **Build pipeline** (validity check → `<op>.lus` → C-Lite → debug run in a terminal), C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing |
+| Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage **and unique-cause MC/DC** with uncovered reporting |
 | Deployment | Commercial installer suite | Inno Setup Windows installer, Start Menu/Desktop shortcuts, embedded stdlib, Linux install script, CI release workflow |
 | Qualification | DO-178C/DO-330 qualification kits, 20+ years of certification credit | None (see §4) |
 
@@ -36,11 +75,12 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P0 — Palette drop~~ | Drag a library block onto the canvas to instantiate it | **Landed 2026-06-11**: drag a palette chip onto the canvas → placed call equation with fresh typed output locals and red unbound pins | done |
 | ~~P0 — Edit/delete in place~~ | Double-click a block to edit; delete removes it | **Landed 2026-06-11**: right-click any box → properties panel (equation edit/delete, variable rename/retype/role-change/delete, ghost-pin binding) | done |
 | ~~P0 — Pin-to-pin wire drawing~~ | Drag from an output pin to an input pin creates a connection | **Landed 2026-06-13**: operation blocks render as SCADE gates with one input pin per operand on the left edge (red when unbound) and an output pin on the right; dragging a source pin onto a specific input pin binds that operand. AND/OR/etc. drop with their minimum two pins and grow to twelve. See §6 | done |
-| **P1 — Undo/redo** | Standard | Edit-journal on the server (every edit endpoint already round-trips the file; keep N previous states) | Small |
+| ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
+| ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
-| **P1 — Zoom/pan, multi-select, copy/paste** | Standard | SVG viewBox transforms + selection rectangle | Medium |
+| **P1 — Zoom/pan, copy/paste** | Standard | SVG viewBox transforms + selection-rectangle marquee + clipboard | Medium |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
-| **P2 — Block symbols** | Distinct shapes per operator family (gates, delays, switches) | Symbol library keyed by stdlib block name | Small, cosmetic |
+| **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
 
 ## 3. Language and toolchain gaps
 
@@ -92,6 +132,18 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-13 — debug runs use the watch-table inputs
+
+The debug run (pipeline step 4) no longer holds inputs at zero: it holds each
+input at the value the engineer set in the simulation watch table. `pipeRun`
+sends those sticky values; `emit_debug_driver` parses each through
+`c_literal` (a value is parsed to a *safe* C literal — bool/int/float only —
+so no user text reaches the generated source verbatim) and emits
+`in.<name> = <literal>;`, falling back to the memset-zero default when unset or
+unparseable. So a `Doubler` with `x = 9` prints `initial inputs: x=9` and
+`step 0 | y=18`. Injection-safety and the held-vs-default behaviour are
+unit-tested.
 
 ### 2026-06-13 — the SCADE build pipeline + log messages
 

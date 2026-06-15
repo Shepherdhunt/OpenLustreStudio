@@ -2669,8 +2669,20 @@ fn clite_run_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
         return bad(&format!("creating {}: {e}", out_dir.display()));
     }
 
+    // Hold inputs at the values the user set in the simulation watch table.
+    let mut held: std::collections::BTreeMap<String, String> = Default::default();
+    if let Some(map) = req.get("inputs").and_then(|v| v.as_object()) {
+        for (k, v) in map {
+            if let Some(s) = v.as_str() {
+                held.insert(k.clone(), s.to_string());
+            } else if v.is_number() || v.is_boolean() {
+                held.insert(k.clone(), v.to_string());
+            }
+        }
+    }
+
     let bundle = ol_clite_emit::emit_project(&project);
-    let driver = ol_clite_emit::harness::emit_debug_driver(&entry);
+    let driver = ol_clite_emit::harness::emit_debug_driver(&entry, &held);
     for (name, text) in [
         ("openlustre_generated.h", &bundle.header),
         ("openlustre_generated.c", &bundle.source),

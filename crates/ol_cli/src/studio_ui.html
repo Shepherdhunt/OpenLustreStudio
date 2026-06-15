@@ -1083,8 +1083,14 @@ function pipeGenerate() {
 async function pipeRun() {
   if (!state.pipeline.generated) return;
   document.getElementById("pipe-run-status").textContent = "compiling…";
+  // Hold the run's inputs at the values set in the simulation watch table.
+  const e = entryNode();
+  const inputs = {};
+  if (e) for (const p of e.inputs) {
+    if (state.sim.values[p.name] != null) inputs[p.name] = state.sim.values[p.name];
+  }
   let d;
-  try { d = await (await fetch("/api/clite/run", { method: "POST", body: "{}" })).json(); }
+  try { d = await (await fetch("/api/clite/run", { method: "POST", body: JSON.stringify({ inputs }) })).json(); }
   catch (_) { d = { ok: false, log: "run request failed" }; }
   if (d.ok) {
     document.getElementById("pipe-run-status").textContent = "✓ " + (d.message || "launched");

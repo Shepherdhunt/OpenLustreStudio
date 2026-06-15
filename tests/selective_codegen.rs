@@ -223,3 +223,65 @@ fn unknown_root_is_an_error() {
     let err = project.slice_for_root("Nope").unwrap_err();
     assert!(err.contains("Nope"), "got: {err}");
 }
+
+/// The debug driver holds each input at the watch-table value the user set,
+/// parsed to a safe C literal; unset inputs keep their memset-zero default.
+#[test]
+fn debug_driver_holds_watch_table_inputs() {
+    let node = NodeDef {
+        name: "Doubler".into(),
+        kind: NodeKind::Operator,
+        inputs: vec![
+            Port { name: "x".into(), ty: Type::Int32 },
+            Port { name: "enable".into(), ty: Type::Bool },
+            Port { name: "untouched".into(), ty: Type::Int32 },
+        ],
+        outputs: vec![Port { name: "y".into(), ty: Type::Int32 }],
+        locals: vec![],
+        equations: vec![Equation {
+            lhs: vec!["y".into()],
+            rhs: Expr::bin(ol_ir::BinOp::Mul, Expr::var("x"), Expr::int_lit(2)),
+        }],
+        contract: None,
+        diagram: Default::default(),
+        probes: vec![ol_ir::Probe { label: "doubled".into(), var: "y".into() }],
+    };
+    let mut held = BTreeMap::new();
+    held.insert("x".to_string(), "9".to_string());
+    held.insert("enable".to_string(), "true".to_string());
+    // A bad value for `x` would be dropped; `untouched` is simply unset.
+    let driver = ol_clite_emit::harness::emit_debug_driver(&node, &held);
+
+    assert!(driver.contains("in.x = 9;"), "held int input: {driver}");
+    assert!(driver.contains("in.enable = true;"), "held bool input: {driver}");
+    assert!(!driver.contains("in.untouched ="), "unset input keeps its default");
+    // The banner and periodic output still print inputs/outputs.
+    assert!(driver.contains("=== OpenLustre debug run: Doubler"));
+    assert!(driver.contains("step % 50"));
+
+    // The probe is printed by `_step` under the debug guard.
+    let bundle = ol_clite_emit::emit_project(&Project {
+        name: "p".into(),
+        packages: vec![Package { name: "u".into(), nodes: vec![node], ..Default::default() }],
+        main: Some("Doubler".into()),
+        ..Default::default()
+    });
+    assert!(bundle.source.contains("#ifdef OL_DEBUG"));
+    assert!(bundle.source.contains("\"doubled: %lld\\n\""), "probe printf: {}", bundle.source);
+
+    // An out-of-the-watch-table value never reaches the source verbatim.
+    let mut hostile = BTreeMap::new();
+    hostile.insert("x".to_string(), "0); evil(".to_string());
+    let safe = ol_clite_emit::harness::emit_debug_driver(
+        &NodeDef {
+            name: "F".into(), kind: NodeKind::Function,
+            inputs: vec![Port { name: "x".into(), ty: Type::Int32 }],
+            outputs: vec![Port { name: "y".into(), ty: Type::Int32 }],
+            locals: vec![],
+            equations: vec![Equation { lhs: vec!["y".into()], rhs: Expr::var("x") }],
+            contract: None, diagram: Default::default(), probes: vec![],
+        },
+        &hostile,
+    );
+    assert!(!safe.contains("evil"), "unparseable value must be dropped, not injected");
+}
