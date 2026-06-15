@@ -143,3 +143,7 @@ path = "clocks.rs"
 [[test]]
 name = "iterators"
 path = "iterators.rs"
+
+[[test]]
+name = "mcdc"
+path = "mcdc.rs"

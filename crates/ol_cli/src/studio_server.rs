@@ -1096,6 +1096,7 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
         "all_green": crate::scenario::all_green(&outcome.results),
         "results": outcome.results,
         "coverage": outcome.coverage,
+        "mcdc": outcome.mcdc,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }

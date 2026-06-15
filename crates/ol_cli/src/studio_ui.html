@@ -2267,6 +2267,22 @@ async function testsRun() {
       html += "</tbody></table>";
     }
   }
+  if (data.mcdc) {
+    const m = data.mcdc;
+    html += "<h4>MC/DC <span class='build-note'>(DO-178C Level A)</span></h4><p>" +
+      m.covered_conditions + " / " + m.total_conditions +
+      " conditions shown to independently affect their decision — " +
+      m.covered_decisions + " / " + m.total_decisions + " decisions fully covered.</p>";
+    if (m.uncovered.length) {
+      html += "<table><thead><tr><th>node</th><th>equation</th><th>decision</th><th>condition</th></tr></thead><tbody>";
+      for (const u of m.uncovered) {
+        html += "<tr><td>" + escapeHTML(u.node) + "</td><td>" + escapeHTML(u.context) +
+          "</td><td><code>" + escapeHTML(u.decision) + "</code></td><td class=\"severity-Warning\"><code>" +
+          escapeHTML(u.condition) + "</code></td></tr>";
+      }
+      html += "</tbody></table>";
+    }
+  }
   document.getElementById("tests-results").innerHTML = html;
   document.getElementById("tests-summary").textContent =
     (data.all_green ? "✓ all green — " : "✗ failures — ") + pass + " passed, " + fail + " failed";

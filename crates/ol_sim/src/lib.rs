@@ -296,7 +296,7 @@ impl<'a> Sim<'a> {
                     continue;
                 }
             }
-            let value = eval(
+            let value = eval_eq_rhs(
                 &eq.rhs,
                 &env,
                 &mut self.state,
@@ -661,6 +661,84 @@ fn first_tick(
     }
 }
 
+/// Evaluate a boolean decision, recording each atomic condition's value into
+/// `obs` as it is reached. Descends through the boolean connectives and
+/// evaluates each atomic leaf exactly once (eager, like `eval_binary`), so a
+/// stateful sub-call is never stepped twice and the outcome matches a normal
+/// `eval` of the same expression.
+#[allow(clippy::too_many_arguments)]
+fn eval_decision(
+    expr: &Expr,
+    env: &BTreeMap<String, Value>,
+    state: &mut State,
+    call_states: &mut HashMap<usize, State>,
+    project: &Project,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
+    cov: &mut Option<Coverage>,
+    obs: &mut BTreeMap<usize, bool>,
+) -> Result<bool, SimError> {
+    macro_rules! sub {
+        ($e:expr) => {
+            eval_decision($e, env, state, call_states, project, site_clocks, cov, obs)?
+        };
+    }
+    // Operands are bound to locals BEFORE combining so both are always
+    // evaluated — the IR has no short-circuit (`eval_binary` is eager), and
+    // MC/DC needs every condition's value on every evaluation.
+    match expr {
+        Expr::Binary { op: BinOp::And, lhs, rhs } => {
+            let (l, r) = (sub!(lhs), sub!(rhs));
+            Ok(l && r)
+        }
+        Expr::Binary { op: BinOp::Or, lhs, rhs } => {
+            let (l, r) = (sub!(lhs), sub!(rhs));
+            Ok(l || r)
+        }
+        Expr::Binary { op: BinOp::Xor, lhs, rhs } => {
+            let (l, r) = (sub!(lhs), sub!(rhs));
+            Ok(l ^ r)
+        }
+        Expr::Binary { op: BinOp::Implies, lhs, rhs } => {
+            let (l, r) = (sub!(lhs), sub!(rhs));
+            Ok(!l || r)
+        }
+        Expr::Unary { op: UnaryOp::Not, arg } => Ok(!sub!(arg)),
+        atomic => {
+            let v = eval(atomic, env, state, call_states, project, site_clocks, cov)?;
+            let b = v.as_bool().ok_or_else(|| {
+                SimError::EvalError(format!("decision condition is not bool: {v:?}"))
+            })?;
+            obs.insert(atomic as *const Expr as usize, b);
+            Ok(b)
+        }
+    }
+}
+
+/// Evaluate an equation's right-hand side, recording an MC/DC trial first if
+/// the RHS is a registered decision. Either way returns the RHS value.
+fn eval_eq_rhs(
+    rhs: &Expr,
+    env: &BTreeMap<String, Value>,
+    state: &mut State,
+    call_states: &mut HashMap<usize, State>,
+    project: &Project,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
+    cov: &mut Option<Coverage>,
+) -> Result<Value, SimError> {
+    let ptr = rhs as *const Expr as usize;
+    let is_root = cov.as_ref().map_or(false, |c| c.is_root(ptr));
+    if is_root {
+        let mut obs = BTreeMap::new();
+        let outcome = eval_decision(rhs, env, state, call_states, project, site_clocks, cov, &mut obs)?;
+        if let Some(c) = cov.as_mut() {
+            c.record_trial(ptr, &obs, outcome);
+        }
+        Ok(Value::Bool(outcome))
+    } else {
+        eval(rhs, env, state, call_states, project, site_clocks, cov)
+    }
+}
+
 fn eval(
     expr: &Expr,
     env: &BTreeMap<String, Value>,
@@ -704,16 +782,33 @@ fn eval(
             then_branch,
             else_branch,
         } => {
-            let c = eval(cond, env, state, call_states, project, site_clocks, cov)?;
-            if let (Some(coverage), Value::Bool(b)) = (cov.as_mut(), &c) {
-                coverage.mark(cond.as_ref() as *const Expr as usize, *b);
-            }
-            match c {
-                Value::Bool(true) => eval(then_branch, env, state, call_states, project, site_clocks, cov),
-                Value::Bool(false) => eval(else_branch, env, state, call_states, project, site_clocks, cov),
-                other => Err(SimError::EvalError(format!(
-                    "if-condition is not bool: {other:?}"
-                ))),
+            // With coverage on, evaluate the condition through the decision
+            // recorder so each atomic condition's value feeds MC/DC; this also
+            // serves legacy decision coverage (seen-true/seen-false).
+            let cval = if cov.is_some() {
+                let mut obs = BTreeMap::new();
+                let outcome =
+                    eval_decision(cond, env, state, call_states, project, site_clocks, cov, &mut obs)?;
+                let ptr = cond.as_ref() as *const Expr as usize;
+                if let Some(coverage) = cov.as_mut() {
+                    coverage.mark(ptr, outcome);
+                    coverage.record_trial(ptr, &obs, outcome);
+                }
+                outcome
+            } else {
+                match eval(cond, env, state, call_states, project, site_clocks, cov)? {
+                    Value::Bool(b) => b,
+                    other => {
+                        return Err(SimError::EvalError(format!(
+                            "if-condition is not bool: {other:?}"
+                        )))
+                    }
+                }
+            };
+            if cval {
+                eval(then_branch, env, state, call_states, project, site_clocks, cov)
+            } else {
+                eval(else_branch, env, state, call_states, project, site_clocks, cov)
             }
         }
         Expr::Pre { arg } => {
@@ -904,7 +999,7 @@ fn call_function_values(
     let mut sub_calls: HashMap<usize, State> = HashMap::new();
     for &i in &order {
         let eq = &callee.equations[i];
-        let v = eval(&eq.rhs, &callee_env, &mut throwaway, &mut sub_calls, project, None, cov)?;
+        let v = eval_eq_rhs(&eq.rhs, &callee_env, &mut throwaway, &mut sub_calls, project, None, cov)?;
         bind_lhs(&mut callee_env, eq, v)?;
     }
     extract_output(callee, &mut callee_env)
@@ -996,7 +1091,7 @@ fn eval_call(
                         continue;
                     }
                 }
-                let v = eval(
+                let v = eval_eq_rhs(
                     &eq.rhs,
                     &callee_env,
                     &mut throwaway,
@@ -1029,7 +1124,7 @@ fn eval_call(
                         continue;
                     }
                 }
-                let v = eval(
+                let v = eval_eq_rhs(
                     &eq.rhs,
                     &callee_env,
                     &mut sub_state,
@@ -1151,11 +1246,55 @@ pub struct DecisionSite {
     pub seen_false: bool,
 }
 
+// --- MC/DC (Modified Condition/Decision Coverage) ---------------------------
+//
+// A DECISION is a boolean expression: an `if/then/else` condition, or a
+// boolean equation right-hand side with two or more conditions. Its
+// CONDITIONS are the atomic boolean leaves — the operands left once the
+// boolean connectives (`and`/`or`/`xor`/`implies`/`not`) are peeled away.
+// For each evaluation we record a TRIAL: every condition's value plus the
+// decision's outcome. MC/DC is achieved for a condition when the suite holds
+// some pair of trials that differ in only that condition and flip the
+// outcome — demonstrating the condition independently affects the result.
+
+/// One observed evaluation of a decision: each condition's value (in the
+/// decision's fixed condition order) and the resulting outcome.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub struct McdcTrial {
+    pub values: Vec<bool>,
+    pub outcome: bool,
+}
+
+/// A decision tracked for MC/DC, with its conditions and the distinct trials
+/// observed so far.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct McdcDecision {
+    pub node: String,
+    pub context: String,
+    pub decision: String,
+    pub conditions: Vec<String>,
+    pub trials: Vec<McdcTrial>,
+}
+
+#[derive(Debug)]
+struct DecisionData {
+    node: String,
+    context: String,
+    decision_text: String,
+    cond_ptrs: Vec<usize>,
+    cond_texts: Vec<String>,
+    trials: Vec<McdcTrial>,
+    seen: std::collections::HashSet<McdcTrial>,
+}
+
 #[derive(Debug, Default)]
 pub struct Coverage {
-    /// ptr-of-cond -> index into `sites`.
+    /// ptr-of-cond -> index into `sites` (legacy decision coverage).
     index: HashMap<usize, usize>,
     sites: Vec<DecisionSite>,
+    /// ptr-of-decision-root -> index into `decisions` (MC/DC).
+    roots: HashMap<usize, usize>,
+    decisions: Vec<DecisionData>,
 }
 
 impl Coverage {
@@ -1168,6 +1307,72 @@ impl Coverage {
             }
         }
     }
+
+    fn is_root(&self, ptr: usize) -> bool {
+        self.roots.contains_key(&ptr)
+    }
+
+    /// Record one trial of the decision rooted at `root`, projecting the
+    /// observed atomic values into the decision's fixed condition order.
+    fn record_trial(&mut self, root: usize, obs: &BTreeMap<usize, bool>, outcome: bool) {
+        if let Some(&di) = self.roots.get(&root) {
+            let d = &mut self.decisions[di];
+            let values: Vec<bool> = d
+                .cond_ptrs
+                .iter()
+                .map(|p| obs.get(p).copied().unwrap_or(false))
+                .collect();
+            let t = McdcTrial { values, outcome };
+            if d.seen.insert(t.clone()) {
+                d.trials.push(t);
+            }
+        }
+    }
+}
+
+/// The atomic boolean conditions of a decision, in evaluation order: descend
+/// through the boolean connectives, treat everything else as one condition.
+/// Each leaf is keyed by its address (stable for the Sim's lifetime).
+fn decision_conditions(expr: &Expr) -> Vec<(usize, String)> {
+    fn go(e: &Expr, out: &mut Vec<(usize, String)>) {
+        match e {
+            Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies, lhs, rhs } => {
+                go(lhs, out);
+                go(rhs, out);
+            }
+            Expr::Unary { op: UnaryOp::Not, arg } => go(arg, out),
+            _ => out.push((e as *const Expr as usize, ol_lustre_emit::format_expr(e))),
+        }
+    }
+    let mut v = Vec::new();
+    go(expr, &mut v);
+    v
+}
+
+/// Unique-cause MC/DC analysis. For each condition, find two trials that
+/// differ in only that condition yet produce opposite outcomes — the pair
+/// that demonstrates the condition independently affects the decision.
+/// Returns, per condition, the indices of such a pair, or `None`.
+pub fn mcdc_independence(num_conditions: usize, trials: &[McdcTrial]) -> Vec<Option<(usize, usize)>> {
+    (0..num_conditions)
+        .map(|i| {
+            for a in 0..trials.len() {
+                for b in (a + 1)..trials.len() {
+                    let (ta, tb) = (&trials[a], &trials[b]);
+                    if ta.values.len() != num_conditions || tb.values.len() != num_conditions {
+                        continue;
+                    }
+                    if ta.outcome != tb.outcome
+                        && ta.values[i] != tb.values[i]
+                        && (0..num_conditions).filter(|&j| j != i).all(|j| ta.values[j] == tb.values[j])
+                    {
+                        return Some((a, b));
+                    }
+                }
+            }
+            None
+        })
+        .collect()
 }
 
 impl<'a> Sim<'a> {
@@ -1187,6 +1392,30 @@ impl<'a> Sim<'a> {
             let Some(node) = self.project.find_node(name) else { continue };
             for eq in &node.equations {
                 let ctx = eq.lhs.join(", ");
+                // Register a decision root with its atomic conditions (MC/DC).
+                let mut register_decision = |root: &Expr| {
+                    let key = root as *const Expr as usize;
+                    if coverage.roots.contains_key(&key) {
+                        return;
+                    }
+                    let conds = decision_conditions(root);
+                    let idx = coverage.decisions.len();
+                    coverage.roots.insert(key, idx);
+                    coverage.decisions.push(DecisionData {
+                        node: node.name.clone(),
+                        context: ctx.clone(),
+                        decision_text: ol_lustre_emit::format_expr(root),
+                        cond_ptrs: conds.iter().map(|(p, _)| *p).collect(),
+                        cond_texts: conds.iter().map(|(_, t)| t.clone()).collect(),
+                        trials: Vec::new(),
+                        seen: Default::default(),
+                    });
+                };
+                // A boolean equation RHS with two or more conditions is a
+                // decision in its own right (dataflow logic without `if`).
+                if decision_conditions(&eq.rhs).len() >= 2 {
+                    register_decision(&eq.rhs);
+                }
                 eq.rhs.visit(|e| {
                     match e {
                         Expr::IfThenElse { cond, .. } => {
@@ -1201,6 +1430,8 @@ impl<'a> Sim<'a> {
                                     seen_false: false,
                                 });
                             }
+                            // Every if-condition is also an MC/DC decision.
+                            register_decision(cond);
                         }
                         Expr::Call { node: callee, .. } => {
                             // visit() gives no &mut access for the queue from
@@ -1235,5 +1466,22 @@ impl<'a> Sim<'a> {
     /// `None` until [`Sim::enable_coverage`] is called.
     pub fn coverage_sites(&self) -> Option<&[DecisionSite]> {
         self.coverage.as_ref().map(|c| c.sites.as_slice())
+    }
+
+    /// MC/DC decisions and the distinct trials observed so far. `None` until
+    /// [`Sim::enable_coverage`] is called.
+    pub fn mcdc_decisions(&self) -> Option<Vec<McdcDecision>> {
+        self.coverage.as_ref().map(|c| {
+            c.decisions
+                .iter()
+                .map(|d| McdcDecision {
+                    node: d.node.clone(),
+                    context: d.context.clone(),
+                    decision: d.decision_text.clone(),
+                    conditions: d.cond_texts.clone(),
+                    trials: d.trials.clone(),
+                })
+                .collect()
+        })
     }
 }

@@ -1119,6 +1119,18 @@ fn cmd_test_run(
             );
         }
     }
+    if let Some(m) = &outcome.mcdc {
+        println!(
+            "MC/DC: {}/{} conditions independent ({}/{} decisions fully covered)",
+            m.covered_conditions, m.total_conditions, m.covered_decisions, m.total_decisions
+        );
+        for u in &m.uncovered {
+            println!(
+                "  uncovered: {}::{} `{}` in `{}` ({})",
+                u.node, u.context, u.condition, u.decision, u.reason
+            );
+        }
+    }
     if !scenario::all_green(&outcome.results) {
         anyhow::bail!("test run failed");
     }

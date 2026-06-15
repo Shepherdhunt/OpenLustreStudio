@@ -50,7 +50,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
 | Hierarchical/parallel automata | Our FSMs are flat Moore-style; SCADE automata nest, run in parallel, carry history and signals | P1 |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
-| MC/DC proper | Decision coverage landed; MC/DC needs per-condition masking analysis on the same substrate | P1 |
+| ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
 | Requirements traceability | Annotate nodes/contracts with requirement IDs; emit a trace matrix (CSV/ReqIF) | P2 |
 | Documentation generator | Render IR + diagrams + contracts to a design-document HTML/PDF | P2 |
@@ -69,10 +69,13 @@ qualification-by-pedigree**, and it is already half-built:
    the compiled generated C, cell-by-cell (done).
 2. **Formal contract proofs** — Kind 2 proves the model's contracts; monitors compile
    the same contracts into the C so violations are observable at runtime (done).
-3. **Coverage evidence** — decision coverage today, MC/DC next (§3).
+3. **Coverage evidence** — decision coverage **and unique-cause MC/DC** (the DO-178C
+   Level A metric) measured on the IR backend and reported per condition (done 2026-06-12;
+   masking MC/DC for coupled conditions remains roadmap).
 4. **Tool Operational Requirements document** — enumerate what the tool claims to do,
    with the test suite as verification cases (not started; pure documentation work,
-   P1 if certification-adjacent use is a goal).
+   P1 if certification-adjacent use is a goal). With MC/DC landed, this is now the
+   single remaining piece of the verification-by-equivalence story.
 
 That story positions the tool as: *generated code you independently verify*, which
 is a legitimate (if more laborious) DO-178C path where the applicant carries the

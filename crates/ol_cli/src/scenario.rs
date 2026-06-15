@@ -114,9 +114,11 @@ fn ir_full_trace(
     node: &str,
     input_csv: &str,
     acc: Option<&mut CoverageAcc>,
+    mcdc: Option<&mut McdcAcc>,
 ) -> Result<String, String> {
     let mut sim = ol_sim::Sim::new(project, node).map_err(|e| e.to_string())?;
-    if acc.is_some() {
+    let collect = acc.is_some() || mcdc.is_some();
+    if collect {
         sim.enable_coverage();
     }
     let trace = sim.run_csv_full(input_csv).map_err(|e| e.to_string())?;
@@ -128,11 +130,32 @@ fn ir_full_trace(
             entry.1 |= site.seen_false;
         }
     }
+    // Merge MC/DC trials across scenarios, keyed by the decision's identity.
+    if let (Some(mcdc), Some(decisions)) = (mcdc, sim.mcdc_decisions()) {
+        for d in decisions {
+            let key = (d.node.clone(), d.context.clone(), d.decision.clone());
+            let entry = mcdc
+                .entry(key)
+                .or_insert_with(|| McdcDecisionAgg { conditions: d.conditions.clone(), trials: Default::default() });
+            for t in d.trials {
+                entry.trials.insert(t);
+            }
+        }
+    }
     Ok(trace.to_csv())
 }
 
 type CoverageAcc =
     std::collections::BTreeMap<(String, String, String), (bool, bool)>;
+
+/// Suite-level MC/DC accumulation: distinct trials per decision, keyed by
+/// (node, equation context, decision text) so they merge across scenarios.
+type McdcAcc = std::collections::BTreeMap<(String, String, String), McdcDecisionAgg>;
+
+struct McdcDecisionAgg {
+    conditions: Vec<String>,
+    trials: std::collections::HashSet<ol_sim::McdcTrial>,
+}
 
 /// Suite-level decision coverage: how many if-conditions were driven both
 /// true and false by the scenario suite (the first rung toward MC/DC).
@@ -177,12 +200,78 @@ fn summarize_coverage(acc: &CoverageAcc) -> CoverageSummary {
     CoverageSummary { total, covered, uncovered }
 }
 
+/// Suite-level MC/DC: how many conditions were shown to independently affect
+/// their decision (a test pair that flips only that condition flips the
+/// outcome). This is the DO-178C Level A metric, one rung above decision
+/// coverage.
+#[derive(Debug, Clone, Serialize)]
+pub struct McdcSummary {
+    pub total_decisions: usize,
+    pub covered_decisions: usize,
+    pub total_conditions: usize,
+    pub covered_conditions: usize,
+    pub uncovered: Vec<McdcUncovered>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McdcUncovered {
+    pub node: String,
+    pub context: String,
+    pub decision: String,
+    pub condition: String,
+    pub reason: String,
+}
+
+fn summarize_mcdc(acc: &McdcAcc) -> McdcSummary {
+    let mut total_decisions = 0;
+    let mut covered_decisions = 0;
+    let mut total_conditions = 0;
+    let mut covered_conditions = 0;
+    let mut uncovered = Vec::new();
+    for ((node, context, decision), agg) in acc {
+        let n = agg.conditions.len();
+        if n == 0 {
+            continue;
+        }
+        total_decisions += 1;
+        let trials: Vec<ol_sim::McdcTrial> = agg.trials.iter().cloned().collect();
+        let indep = ol_sim::mcdc_independence(n, &trials);
+        let mut all = true;
+        for (i, pair) in indep.iter().enumerate() {
+            total_conditions += 1;
+            if pair.is_some() {
+                covered_conditions += 1;
+            } else {
+                all = false;
+                uncovered.push(McdcUncovered {
+                    node: node.clone(),
+                    context: context.clone(),
+                    decision: decision.clone(),
+                    condition: agg.conditions[i].clone(),
+                    reason: "no test pair flips only this condition and the outcome".into(),
+                });
+            }
+        }
+        if all {
+            covered_decisions += 1;
+        }
+    }
+    McdcSummary {
+        total_decisions,
+        covered_decisions,
+        total_conditions,
+        covered_conditions,
+        uncovered,
+    }
+}
+
 /// A scenario run's full outcome: per-scenario/backend results plus the
-/// suite-level decision coverage measured on the IR backend.
+/// suite-level decision coverage and MC/DC measured on the IR backend.
 #[derive(Debug, Clone, Serialize)]
 pub struct RunOutcome {
     pub results: Vec<ScenarioResult>,
     pub coverage: Option<CoverageSummary>,
+    pub mcdc: Option<McdcSummary>,
 }
 
 /// Capture golden traces for every scenario in `dir`. Returns the recorded
@@ -203,7 +292,7 @@ pub fn record_goldens(
     for s in scenarios {
         let input = std::fs::read_to_string(&s.input_path)
             .map_err(|e| format!("{}: {e}", s.input_path.display()))?;
-        let golden = ir_full_trace(project, node, &input, None)
+        let golden = ir_full_trace(project, node, &input, None, None)
             .map_err(|e| format!("scenario `{}`: {e}", s.name))?;
         std::fs::write(&s.golden_path, &golden)
             .map_err(|e| format!("{}: {e}", s.golden_path.display()))?;
@@ -224,6 +313,7 @@ pub fn run_scenarios(
     let scenarios = list_scenarios(dir);
     let mut results = Vec::new();
     let mut cov_acc: CoverageAcc = CoverageAcc::new();
+    let mut mcdc_acc: McdcAcc = McdcAcc::new();
     let want_coverage = backends.contains(&Backend::Ir);
 
     // Compile the C backend once per run — every scenario reuses the binary.
@@ -279,6 +369,7 @@ pub fn run_scenarios(
                     node,
                     &input,
                     if want_coverage { Some(&mut cov_acc) } else { None },
+                    if want_coverage { Some(&mut mcdc_acc) } else { None },
                 ) {
                     Ok(actual) => compare_csv(golden, &actual, &s.name, backend, false),
                     Err(e) => ScenarioResult {
@@ -323,6 +414,11 @@ pub fn run_scenarios(
         results,
         coverage: if want_coverage && !cov_acc.is_empty() {
             Some(summarize_coverage(&cov_acc))
+        } else {
+            None
+        },
+        mcdc: if want_coverage && !mcdc_acc.is_empty() {
+            Some(summarize_mcdc(&mcdc_acc))
         } else {
             None
         },
