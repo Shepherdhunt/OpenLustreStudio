@@ -713,19 +713,30 @@ fn build_diagram(
         let eq_id = format!("eq{i}");
         let invalid = !eq_problems[i].is_empty();
         let reason = eq_problems[i].join("; ");
+        // The operand pins on the block's left edge, in evaluation order:
+        // each free variable is one input pin (global constants are inlined,
+        // not pins). Bound pins carry a wire from their source variable;
+        // unbound (ghost) pins render red on the block itself.
         let mut reads: Vec<String> = Vec::new();
+        let mut input_pins: Vec<serde_json::Value> = Vec::new();
         for v in eq.rhs.free_vars() {
+            if globals.contains(&v) {
+                continue;
+            }
+            let port = input_pins.len();
             if known.contains(v.as_str()) {
-                reads.push(v);
-            } else if !globals.contains(&v) {
+                reads.push(v.clone());
+                wires.push(serde_json::json!({
+                    "from": v.clone(), "to": eq_id, "to_port": port,
+                }));
+                input_pins.push(serde_json::json!({ "name": v, "bound": true }));
+            } else {
                 let why = ghost_reasons
                     .get(&v)
                     .cloned()
                     .unwrap_or_else(|| format!("`{v}` is not declared as an input, output, or local"));
                 ghosts.insert(v.clone(), why.clone());
-                wires.push(serde_json::json!({
-                    "from": v, "to": eq_id, "invalid": true, "reason": why,
-                }));
+                input_pins.push(serde_json::json!({ "name": v, "bound": false, "reason": why }));
             }
         }
         let mut calls: Vec<String> = Vec::new();
@@ -742,9 +753,6 @@ fn build_diagram(
                 }
             }
         });
-        for r in &reads {
-            wires.push(serde_json::json!({ "from": r, "to": eq_id }));
-        }
         for l in &eq.lhs {
             if !known.contains(l.as_str()) {
                 let why = ghost_reasons
@@ -785,6 +793,7 @@ fn build_diagram(
             "symbol": eq_symbol(&eq.rhs),
             "nary": nary,
             "reads": reads,
+            "inputs": input_pins,
             "calls": calls,
             "invalid": invalid,
             "reason": if invalid { serde_json::Value::String(reason) } else { serde_json::Value::Null },

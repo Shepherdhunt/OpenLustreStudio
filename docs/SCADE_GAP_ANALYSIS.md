@@ -35,7 +35,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|---|
 | ~~P0 — Palette drop~~ | Drag a library block onto the canvas to instantiate it | **Landed 2026-06-11**: drag a palette chip onto the canvas → placed call equation with fresh typed output locals and red unbound pins | done |
 | ~~P0 — Edit/delete in place~~ | Double-click a block to edit; delete removes it | **Landed 2026-06-11**: right-click any box → properties panel (equation edit/delete, variable rename/retype/role-change/delete, ghost-pin binding) | done |
-| **P0 — Pin-to-pin wire drawing** | Drag from an output pin to an input pin creates a connection | Pin-level ports on boxes; drag pin→pin rewrites the target call argument (today binding goes through the right-click Bind panel) | Medium |
+| ~~P0 — Pin-to-pin wire drawing~~ | Drag from an output pin to an input pin creates a connection | **Landed 2026-06-13**: operation blocks render as SCADE gates with one input pin per operand on the left edge (red when unbound) and an output pin on the right; dragging a source pin onto a specific input pin binds that operand. AND/OR/etc. drop with their minimum two pins and grow to twelve. See §6 | done |
 | **P1 — Undo/redo** | Standard | Edit-journal on the server (every edit endpoint already round-trips the file; keep N previous states) | Small |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
 | **P1 — Zoom/pan, multi-select, copy/paste** | Standard | SVG viewBox transforms + selection rectangle | Medium |
@@ -92,6 +92,26 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-13 — SCADE gates: input pins on the left, output on the right
+
+The canvas drew every element — ports, operations, outputs — as the same
+rectangle with one right-edge pin; an operation's operands were separate
+floating boxes. Now operation blocks render as SCADE gates:
+
+* `build_diagram` emits an ordered `inputs` array per equation (one pin per
+  operand free variable; global constants stay inlined), and tags each bound
+  operand's wire with its `to_port` index.
+* The canvas seats those pins on the block's left edge, growing the gate's
+  height to fit them, and routes each incoming wire to its specific pin. An
+  unbound operand is a **red pin on the gate** (not a floating ghost box);
+  the output pin stays on the right. So a dropped AND shows its minimum two
+  input pins immediately and grows to twelve via the Properties control.
+* Dragging a source pin onto a specific input pin binds *that* operand
+  (rewiring or filling an unbound pin); dropping on the block body still
+  binds the first free pin. The whole loop — create an operator, drop
+  comparison/AND gates, wire their pins, and generate Lustre that compiles to
+  C-Lite — is covered end to end by a new studio-API test.
 
 ### 2026-06-12 — array iterators (`map` / `fold`), vector-heavy modelling
 

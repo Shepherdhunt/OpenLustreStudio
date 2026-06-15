@@ -135,17 +135,21 @@ fn undeclared_read_becomes_a_ghost_with_an_invalid_wire() {
     }
 
     let d = diagram(port, "Bad");
-    // `zz` is not declared anywhere: it shows up as a ghost box...
+    // `zz` is not declared anywhere: it stays a ghost (so the Properties bind
+    // panel can still target it) and renders as a RED input pin on the gate
+    // itself — SCADE style — rather than a separate floating box + wire.
     let ghosts = d["ghosts"].as_array().unwrap();
     assert!(
         ghosts.iter().any(|g| g["name"] == "zz"),
         "expected ghost for zz, got: {ghosts:?}"
     );
-    // ...with a red (invalid) wire into the consuming equation.
-    let w = find_wire(&d, "zz", "eq0").expect("wire zz -> eq0");
-    assert_eq!(w["invalid"], true, "ghost wire must be invalid: {w}");
-    assert!(w["reason"].as_str().unwrap().contains("zz"));
-    // The legitimate read is untouched: a -> eq0 carries no invalid flag.
+    let pins = d["equations"][0]["inputs"].as_array().unwrap();
+    let zz = pins.iter().find(|p| p["name"] == "zz").expect("zz input pin");
+    assert_eq!(zz["bound"], false, "zz is an unbound input pin: {zz}");
+    assert!(zz["reason"].as_str().unwrap().contains("zz"));
+    // The legitimate read is a BOUND pin, wired cleanly: a -> eq0, valid.
+    let a = pins.iter().find(|p| p["name"] == "a").expect("a input pin");
+    assert_eq!(a["bound"], true, "a is a bound input pin: {a}");
     let ok = find_wire(&d, "a", "eq0").expect("wire a -> eq0");
     assert!(ok.get("invalid").is_none(), "valid wire flagged: {ok}");
 }
