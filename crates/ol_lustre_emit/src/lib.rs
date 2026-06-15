@@ -235,6 +235,21 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             };
             (s, 100)
         }
+        // Array iterators print function-style and round-trip through the
+        // parser. The Kind 2 view uses the same text — iterator bodies are
+        // not yet lowered for proving (roadmap, like the bit-op convention).
+        Expr::Iterate { kind, node, init, arrays } => {
+            let name = match kind {
+                ol_ir::IterKind::Map => "map",
+                ol_ir::IterKind::Fold => "fold",
+            };
+            let mut parts: Vec<String> = vec![node.clone()];
+            if let Some(i) = init {
+                parts.push(format_expr_prec(i, 0, lustre));
+            }
+            parts.extend(arrays.iter().map(|a| format_expr_prec(a, 0, lustre)));
+            (format!("{name}({})", parts.join(", ")), 100)
+        }
     };
     if prec < parent_prec {
         format!("({text})")

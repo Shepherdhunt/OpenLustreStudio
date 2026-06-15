@@ -138,6 +138,26 @@ pub enum Expr {
         on_true: Box<Expr>,
         on_false: Box<Expr>,
     },
+    /// An array iterator: `map(F, a₁…aₖ)` applies the named function `F`
+    /// element-wise across same-length arrays to produce an array;
+    /// `fold(F, init, a)` left-folds `F(acc, elem)` over an array to a
+    /// scalar (`init` is the accumulator seed). `node` names a stateless
+    /// function — the iterated body has no per-element state in this profile.
+    Iterate {
+        kind: IterKind,
+        node: String,
+        /// The fold accumulator seed; `None` for `map`.
+        init: Option<Box<Expr>>,
+        /// The array operands (one for `fold`, one or more for `map`).
+        arrays: Vec<Expr>,
+    },
+}
+
+/// Which array iterator an [`Expr::Iterate`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IterKind {
+    Map,
+    Fold,
 }
 
 impl Expr {
@@ -214,6 +234,17 @@ impl Expr {
             on_false: Box::new(on_false),
         }
     }
+    pub fn map<S: Into<String>>(node: S, arrays: Vec<Expr>) -> Self {
+        Expr::Iterate { kind: IterKind::Map, node: node.into(), init: None, arrays }
+    }
+    pub fn fold<S: Into<String>>(node: S, init: Expr, array: Expr) -> Self {
+        Expr::Iterate {
+            kind: IterKind::Fold,
+            node: node.into(),
+            init: Some(Box::new(init)),
+            arrays: vec![array],
+        }
+    }
 
     /// `false -> pre e` — the canonical "edge buffer" pattern.
     pub fn pre_with_init(init: Expr, body: Expr) -> Self {
@@ -268,6 +299,14 @@ impl Expr {
                 Expr::Merge { on_true, on_false, .. } => {
                     walk(on_true, f);
                     walk(on_false, f);
+                }
+                Expr::Iterate { init, arrays, .. } => {
+                    if let Some(i) = init {
+                        walk(i, f);
+                    }
+                    for a in arrays {
+                        walk(a, f);
+                    }
                 }
             }
         }
@@ -342,6 +381,16 @@ impl Expr {
                 }
                 on_true.rename_var(from, to);
                 on_false.rename_var(from, to);
+            }
+            // `node` is a called function name, not a variable — leave it,
+            // exactly as `Call` does.
+            Expr::Iterate { init, arrays, .. } => {
+                if let Some(i) = init {
+                    i.rename_var(from, to);
+                }
+                for a in arrays {
+                    a.rename_var(from, to);
+                }
             }
         }
     }

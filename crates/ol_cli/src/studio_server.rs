@@ -575,6 +575,12 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         Expr::When { on: true, .. } => op("WHEN"),
         Expr::When { on: false, .. } => op("WHEN¬"),
         Expr::Merge { .. } => op("MERGE"),
+        // Iterators render as a call-style block naming the iterated function,
+        // so the user can dive into F like any operator call.
+        Expr::Iterate { kind, node, .. } => serde_json::json!({
+            "kind": "call",
+            "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
+        }),
         Expr::Cast { to, .. } => op(&type_str(to)),
         Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
         _ => serde_json::Value::Null,
@@ -724,7 +730,13 @@ fn build_diagram(
         }
         let mut calls: Vec<String> = Vec::new();
         eq.rhs.visit(|e| {
-            if let ol_ir::Expr::Call { node: callee, .. } = e {
+            let callee = match e {
+                ol_ir::Expr::Call { node, .. } => Some(node),
+                // The iterated function is divable too.
+                ol_ir::Expr::Iterate { node, .. } => Some(node),
+                _ => None,
+            };
+            if let Some(callee) = callee {
                 if !calls.contains(callee) {
                     calls.push(callee.clone());
                 }
@@ -1947,6 +1959,8 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
         "when" | "when_not" => (vec!["T", "bool clock"], "T on the clock"),
         "merge" => (vec!["bool clock", "T", "T"], "T"),
+        "map" => (vec!["array(s)"], "array of F's output"),
+        "fold" => (vec!["seed", "array"], "F's output"),
         "if_then_else" => (vec!["bool", "T", "T"], "T"),
         "bit_and" | "bit_or" | "bit_xor" => (n("integer"), "integer"),
         "shift_left" | "shift_right" => (vec!["integer", "integer"], "integer"),
@@ -2059,10 +2073,12 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("shift_right", "shift right (>>)", 2, "int32"),
         ]),
         ("Higher Order", vec![
-            OpDef { id: "map", label: "map", pins: 0, out_type: "int32", param: None,
-                    enabled: false, hint: "array iterators — roadmap" },
-            OpDef { id: "fold", label: "fold", pins: 0, out_type: "int32", param: None,
-                    enabled: false, hint: "array iterators — roadmap" },
+            OpDef { id: "map", label: "map(F)", pins: 1, out_type: "int32",
+                    param: Some("iterator"), enabled: true,
+                    hint: "apply a function element-wise across array(s) → array" },
+            OpDef { id: "fold", label: "fold(F)", pins: 2, out_type: "int32",
+                    param: Some("iterator"), enabled: true,
+                    hint: "reduce an array to a scalar: acc = F(acc, element)" },
         ]),
     ]
 }
@@ -2188,6 +2204,55 @@ fn operation_body(
     Ok((body, opdef.out_type.to_string()))
 }
 
+/// Resolve a `map`/`fold` drop against the project: the `param` carries the
+/// iterated function's name (and, for `map`, the array length as `F:N`).
+/// Returns the ghost pins, the equation body, and the result local's type —
+/// derived from the function's signature so the diagram is typed on drop.
+fn resolve_iterator_drop(
+    project: &ol_ir::Project,
+    op_id: &str,
+    param: Option<&str>,
+    eq_index: usize,
+) -> Result<(Vec<String>, String, ol_ir::Type), String> {
+    let raw = param.ok_or("map/fold needs the iterated function name (e.g. `Scale:4` for map)")?;
+    let (f_name, len_opt) = match raw.split_once(':') {
+        Some((f, n)) => (f.trim(), Some(n.trim())),
+        None => (raw.trim(), None),
+    };
+    let f = project
+        .find_node(f_name)
+        .ok_or_else(|| format!("unknown function `{f_name}`"))?;
+    if !matches!(f.kind, ol_ir::NodeKind::Function) {
+        return Err(format!("`{f_name}` must be a stateless `function` to iterate"));
+    }
+    if f.outputs.len() != 1 {
+        return Err(format!("`{f_name}` must have exactly one output"));
+    }
+    let out_elem = f.outputs[0].ty.clone();
+    if op_id == "map" {
+        let k = f.inputs.len();
+        if k == 0 {
+            return Err(format!("`{f_name}` has no inputs to map over"));
+        }
+        let n: u32 = len_opt
+            .and_then(|s| s.parse().ok())
+            .ok_or("map needs the array length, e.g. `Scale:4`")?;
+        let pins: Vec<String> = (1..=k).map(|i| format!("p{eq_index}_{i}")).collect();
+        let body = format!("map({f_name}, {})", pins.join(", "));
+        Ok((pins, body, ol_ir::Type::Array { elem: Box::new(out_elem), len: n }))
+    } else {
+        // fold(F, seed, array): F is (accumulator, element) -> accumulator.
+        if f.inputs.len() != 2 {
+            return Err(format!(
+                "fold needs `{f_name}` to take two inputs (accumulator, element)"
+            ));
+        }
+        let pins = vec![format!("p{eq_index}_1"), format!("p{eq_index}_2")];
+        let body = format!("fold({f_name}, {}, {})", pins[0], pins[1]);
+        Ok((pins, body, out_elem))
+    }
+}
+
 /// Drop a predefined operation onto a node's canvas at (x, y): a fresh typed
 /// local receives the result, the inputs start as red unbound pins, and the
 /// new equation lands at the drop position.
@@ -2243,26 +2308,37 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
     };
-    {
-        let node = match find_node_mut(&mut project, &host_name) {
-            Ok(n) => n,
+    // Resolve the equation's pins, body, and result type. Iterators read the
+    // iterated function's signature from the project (immutable), so this
+    // happens before the mutable node borrow below.
+    let eq_index = match project.find_node(&host_name) {
+        Some(n) => n.equations.len(),
+        None => return bad(&format!("node `{host_name}` not found")),
+    };
+    let (_pins, body_text, out_ty) = if op_id == "map" || op_id == "fold" {
+        match resolve_iterator_drop(&project, &op_id, param.as_deref(), eq_index) {
+            Ok(v) => v,
             Err(e) => return bad(&e),
-        };
-        let eq_index = node.equations.len();
-        let pins: Vec<String> = (1..=pin_count)
-            .map(|k| format!("p{eq_index}_{k}"))
-            .collect();
+        }
+    } else {
+        let pins: Vec<String> = (1..=pin_count).map(|k| format!("p{eq_index}_{k}")).collect();
         let (body_text, out_type) = match operation_body(&opdef, &pins, param.as_deref()) {
             Ok(v) => v,
             Err(e) => return bad(&e),
         };
-        let rhs = match ol_stdlib::parse_expr(&body_text) {
-            Ok(e) => e,
-            Err(e) => return bad(&format!("internal template error: {e}")),
-        };
-        let out_ty = match ol_stdlib::parse_type(&out_type) {
-            Ok(t) => t,
+        match ol_stdlib::parse_type(&out_type) {
+            Ok(t) => (pins, body_text, t),
             Err(e) => return bad(&format!("internal out-type error: {e}")),
+        }
+    };
+    let rhs = match ol_stdlib::parse_expr(&body_text) {
+        Ok(e) => e,
+        Err(e) => return bad(&format!("internal template error: {e}")),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host_name) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
         };
         let known: std::collections::HashSet<String> = node
             .inputs

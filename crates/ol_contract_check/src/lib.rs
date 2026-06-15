@@ -579,6 +579,10 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
             Expr::Merge { on_true, on_false, .. } => {
                 walk(on_true, name, in_pre) && walk(on_false, name, in_pre)
             }
+            Expr::Iterate { init, arrays, .. } => {
+                init.as_deref().map(|i| walk(i, name, in_pre)).unwrap_or(true)
+                    && arrays.iter().all(|a| walk(a, name, in_pre))
+            }
         }
     }
     walk(expr, name, false)

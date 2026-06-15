@@ -483,6 +483,71 @@ fn when_and_merge_drop_from_the_time_family() {
     }
 }
 
+// --- map/fold drop from the Higher Order family --------------------------------
+
+#[test]
+fn map_and_fold_drop_with_a_typed_result() {
+    let g = start_server_on_workspace("ops_iter");
+    let port = g.port;
+
+    // The Higher Order family now offers map/fold as enabled blocks.
+    let cat = get_json(port, "/api/operations");
+    let ho = cat["categories"].as_array().unwrap().iter()
+        .find(|c| c["name"] == "Higher Order").unwrap();
+    for id in ["map", "fold"] {
+        let item = ho["items"].as_array().unwrap().iter()
+            .find(|i| i["id"] == id).unwrap();
+        assert_eq!(item["enabled"], true, "{id} should be enabled");
+    }
+
+    // A stateless function to iterate: Scale(x) = x * 3.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Scale","kind":"function"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"Scale","name":"x","side":"input","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"Scale","name":"y","side":"output","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Scale","lhs":"y","body":"x * 3"}"#);
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Vec","kind":"operator"}"#);
+
+    // Drop map(Scale) with length 4: body is map(Scale, p0_1), result int32[4].
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Vec","op":"map","param":"Scale:4","x":40.0,"y":40.0}"#);
+    let d = get_json(port, "/api/diagram?node=Vec");
+    assert_eq!(d["equations"][0]["body"], "map(Scale, p0_1)");
+    assert_eq!(d["equations"][0]["symbol"]["text"], "map(Scale)");
+    let map_local = d["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "map0").expect("map result local");
+    assert_eq!(map_local["type"]["kind"], "Array");
+    assert_eq!(map_local["type"]["len"], 4);
+    assert_eq!(map_local["type"]["elem"]["kind"], "Int32");
+
+    // A reducing function AddF(acc, e) = acc + e, then fold(AddF).
+    post_ok(port, "/api/edit/add_node", r#"{"name":"AddF","kind":"function"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"AddF","name":"acc","side":"input","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"AddF","name":"e","side":"input","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"AddF","name":"s","side":"output","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"AddF","lhs":"s","body":"acc + e"}"#);
+
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Vec","op":"fold","param":"AddF","x":40.0,"y":160.0}"#);
+    let d = get_json(port, "/api/diagram?node=Vec");
+    assert_eq!(d["equations"][1]["body"], "fold(AddF, p1_1, p1_2)");
+    let fold_local = d["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "fold1").expect("fold result local");
+    assert_eq!(fold_local["type"]["kind"], "Int32", "fold yields the accumulator type");
+
+    // Iterating a stateful operator is rejected on drop, with the reason.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Counter","kind":"operator"}"#);
+    let (s, body) = request(port, "POST", "/api/edit/add_operation",
+        r#"{"node":"Vec","op":"map","param":"Counter:4","x":0,"y":0}"#).unwrap();
+    assert_eq!(s, 400);
+    assert!(body.contains("stateless"), "{body}");
+}
+
 // --- Compile C-Lite from the GUI ----------------------------------------------
 
 #[test]

@@ -49,7 +49,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
 | Hierarchical/parallel automata | Our FSMs are flat Moore-style; SCADE automata nest, run in parallel, carry history and signals | P1 |
-| Array iterators (`map`/`fold`) | Needed for vector-heavy avionics models; today arrays exist but loops must be unrolled | P1 |
+| ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | MC/DC proper | Decision coverage landed; MC/DC needs per-condition masking analysis on the same substrate | P1 |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
 | Requirements traceability | Annotate nodes/contracts with requirement IDs; emit a trace matrix (CSV/ReqIF) | P2 |
@@ -89,6 +89,34 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-12 — array iterators (`map` / `fold`), vector-heavy modelling
+
+* **The language**: `map(F, a₁…aₖ)` applies a stateless function element-wise
+  across same-length arrays to build an array; `fold(F, init, a)` left-reduces
+  an array to a scalar (`F` is `(accumulator, element) -> accumulator`). The
+  iterated `F` is a **function** — no per-element state in this profile — and an
+  iterator is always the whole right-hand side of its equation, so codegen is a
+  single `for` loop and `map`'s array result has a clean home.
+* **One representation, every stage**: `Expr::Iterate { kind, node, init,
+  arrays }` flows through the parser/formatter (round-trips; Kind 2 view is the
+  same surface text — iterator *proving* is roadmap), the typechecker
+  (E0140–E0146: unknown/stateful/many-output `F`, non-array operands, unequal
+  lengths, argument-type and arity mismatch, nesting), the simulator
+  (element-wise application, building `Value::Array` for map / threading the
+  accumulator for fold), and the C emitter (a guarded-free `for` loop calling
+  `F_step` per element).
+* **Arrays at the boundary**: the IR simulator and the generated CSV driver now
+  read and write arrays as `[e0;e1;…]`, so array-interface nodes are testable.
+  This unblocked the **dual-backend equivalence test**: a saturating-scale `map`
+  and a sum `fold` over `int32[4]`, IR vs MSVC-compiled C, agree cell-by-cell.
+* **A soundness fix the feature surfaced**: `slice_for_root` followed `Call`
+  targets but not iterator function references, so generated C for a sliced root
+  dropped the iterated function. Now both are kept (regression-tested).
+* **Authoring**: `map(F)` / `fold(F)` are enabled in the Higher Order toolbox
+  with pin contracts; the drop reads `F`'s signature to type the result local
+  (an `int32[N]` for map, the accumulator type for fold) and renders a divable
+  `map(F)` / `fold(F)` block.
 
 ### 2026-06-12 — boolean clocks (`when` / `merge`), the biggest language gap
 

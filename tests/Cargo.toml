@@ -139,3 +139,7 @@ path = "trace_comparison.rs"
 [[test]]
 name = "clocks"
 path = "clocks.rs"
+
+[[test]]
+name = "iterators"
+path = "iterators.rs"

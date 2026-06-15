@@ -230,6 +230,9 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
             emit_mon_expr(on_true, scope),
             emit_mon_expr(on_false, scope)
         ),
+        // Iterators don't appear in boolean contracts; lower to a neutral
+        // value so the monitor still compiles if one ever does.
+        Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
         Expr::Field { base, field } => format!("{}.{field}", emit_mon_expr(base, scope)),
         Expr::Index { base, index } => format!(
             "{}[{}]",

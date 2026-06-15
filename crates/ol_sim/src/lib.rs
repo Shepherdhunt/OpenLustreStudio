@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use ol_contract_ir::{parse_contracts, ContractDef};
-use ol_ir::{BinOp, Expr, Literal, NodeDef, NodeKind, Project, Type, TypeBody, UnaryOp};
+use ol_ir::{BinOp, Expr, IterKind, Literal, NodeDef, NodeKind, Project, Type, TypeBody, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
@@ -502,6 +502,29 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
         },
         t if t.is_float() => raw.parse::<f64>().map(Value::Float).map_err(|_| ()),
         t if t.is_integer() => raw.parse::<i64>().map(Value::Int).map_err(|_| ()),
+        // Arrays at the CSV boundary use `[e0;e1;…]` — the same bracketed,
+        // semicolon-separated form `Value::to_csv` produces, so traces
+        // round-trip and the generated C driver can match byte-for-byte.
+        Type::Array { elem, len } => {
+            let inner = raw
+                .trim()
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .ok_or(())?;
+            let parts: Vec<&str> = if inner.trim().is_empty() {
+                Vec::new()
+            } else {
+                inner.split(';').collect()
+            };
+            if parts.len() != *len as usize {
+                return Err(());
+            }
+            let mut vals = Vec::with_capacity(parts.len());
+            for p in parts {
+                vals.push(parse_value(p.trim(), elem)?);
+            }
+            Ok(Value::Array(vals))
+        }
         _ => Err(()),
     }
 }
@@ -782,7 +805,109 @@ fn eval(
             }
             Ok(Value::Tuple(vs))
         }
+        Expr::Iterate { kind, node: f_name, init, arrays } => {
+            let callee = project.find_node(f_name).ok_or_else(|| {
+                SimError::EvalError(format!("iterator calls unknown function `{f_name}`"))
+            })?;
+            if !matches!(callee.kind, NodeKind::Function) {
+                return Err(SimError::EvalError(format!(
+                    "iterator function `{f_name}` must be a stateless function"
+                )));
+            }
+            // Evaluate the array operands to concrete vectors.
+            let mut arrs: Vec<Vec<Value>> = Vec::with_capacity(arrays.len());
+            for a in arrays {
+                match eval(a, env, state, call_states, project, site_clocks, cov)? {
+                    Value::Array(xs) => arrs.push(xs),
+                    other => {
+                        return Err(SimError::EvalError(format!(
+                            "iterator operand is not an array: {other:?}"
+                        )))
+                    }
+                }
+            }
+            let n = arrs.first().map(|a| a.len()).unwrap_or(0);
+            if arrs.iter().any(|a| a.len() != n) {
+                return Err(SimError::EvalError(
+                    "iterator arrays have unequal lengths".into(),
+                ));
+            }
+            match kind {
+                IterKind::Map => {
+                    // Apply F to the k-th element of each array, building the
+                    // result array element by element.
+                    let mut out = Vec::with_capacity(n);
+                    for k in 0..n {
+                        let args: Vec<Value> = arrs.iter().map(|a| a[k].clone()).collect();
+                        out.push(call_function_values(callee, args, project, cov)?);
+                    }
+                    Ok(Value::Array(out))
+                }
+                IterKind::Fold => {
+                    // Left fold: acc starts at the seed, then F(acc, elem).
+                    let seed = init.as_ref().ok_or_else(|| {
+                        SimError::EvalError("fold without an accumulator seed".into())
+                    })?;
+                    let mut acc =
+                        eval(seed, env, state, call_states, project, site_clocks, cov)?;
+                    for elem in &arrs[0] {
+                        acc = call_function_values(callee, vec![acc, elem.clone()], project, cov)?;
+                    }
+                    Ok(acc)
+                }
+            }
+        }
     }
+}
+
+/// Invoke a stateless function with already-computed argument values — the
+/// per-element call an iterator makes. Mirrors the `Function` branch of
+/// [`eval_call`] but takes `Value`s instead of argument expressions.
+fn call_function_values(
+    callee: &NodeDef,
+    arg_values: Vec<Value>,
+    project: &Project,
+    cov: &mut Option<Coverage>,
+) -> Result<Value, SimError> {
+    if arg_values.len() != callee.inputs.len() {
+        return Err(SimError::EvalError(format!(
+            "iterated `{}` arity mismatch: expected {}, got {}",
+            callee.name,
+            callee.inputs.len(),
+            arg_values.len()
+        )));
+    }
+    let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            let mut ts = State::default();
+            let mut tc: HashMap<usize, State> = HashMap::new();
+            if let Ok(v) = eval(&c.value, &callee_env, &mut ts, &mut tc, project, None, &mut None) {
+                callee_env.insert(c.name.clone(), v);
+            }
+        }
+    }
+    for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
+        callee_env.insert(p.name.clone(), v);
+    }
+    for p in &callee.outputs {
+        callee_env.insert(p.name.clone(), default_value(&p.ty, project));
+    }
+    for l in &callee.locals {
+        callee_env.insert(l.name.clone(), default_value(&l.ty, project));
+    }
+    let order = ol_ir::evaluation_order(callee)
+        .map_err(|e| SimError::EvalError(format!("`{}`: {e}", callee.name)))?;
+    // Stateless: a throwaway state, and a fresh call map for any nested
+    // function calls (functions never touch stateful call state).
+    let mut throwaway = State::default();
+    let mut sub_calls: HashMap<usize, State> = HashMap::new();
+    for &i in &order {
+        let eq = &callee.equations[i];
+        let v = eval(&eq.rhs, &callee_env, &mut throwaway, &mut sub_calls, project, None, cov)?;
+        bind_lhs(&mut callee_env, eq, v)?;
+    }
+    extract_output(callee, &mut callee_env)
 }
 
 fn eval_call(

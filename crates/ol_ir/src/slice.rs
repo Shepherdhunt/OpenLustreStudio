@@ -43,10 +43,12 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
             continue; // unresolved call — typecheck reports it; nothing to slice
         };
         let mut enqueue_calls = |e: &Expr| {
-            e.visit(|sub| {
-                if let Expr::Call { node: callee, .. } = sub {
-                    queue.push_back(callee.clone());
-                }
+            e.visit(|sub| match sub {
+                Expr::Call { node: callee, .. } => queue.push_back(callee.clone()),
+                // An iterator names the function it applies — it must be kept
+                // (and emitted) just like a direct call.
+                Expr::Iterate { node: callee, .. } => queue.push_back(callee.clone()),
+                _ => {}
             });
         };
         for eq in &node.equations {

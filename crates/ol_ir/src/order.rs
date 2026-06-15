@@ -65,6 +65,16 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
             same_cycle_reads(on_true, out);
             same_cycle_reads(on_false, out);
         }
+        // The iterated function is stateless, so its operands are ordinary
+        // same-cycle reads; the seed and arrays must be ready this cycle.
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                same_cycle_reads(i, out);
+            }
+            for a in arrays {
+                same_cycle_reads(a, out);
+            }
+        }
     }
 }
 

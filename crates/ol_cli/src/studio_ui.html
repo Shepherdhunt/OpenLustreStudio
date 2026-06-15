@@ -1431,6 +1431,16 @@ function promptForParam(opId, kind) {
     case "n": return prompt("to_nth_power: exponent n (2–8):", "2");
     case "field": return prompt("field name to read:", "value");
     case "index": return prompt("array index (constant):", "0");
+    case "iterator":
+      if (opId === "map") {
+        // map needs the function and the result array length: `F:N`.
+        const f = prompt("map: function to apply element-wise (a stateless operator):", "");
+        if (f === null) return null;
+        const n = prompt("map: array length (number of elements):", "4");
+        if (n === null) return null;
+        return f.trim() + ":" + n.trim();
+      }
+      return prompt("fold: reducing function F(accumulator, element):", "");
     default: return prompt(kind + ":", "");
   }
 }

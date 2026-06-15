@@ -241,6 +241,17 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
             walk_call_targets(on_true, f);
             walk_call_targets(on_false, f);
         }
+        // The iterated function is a call target — topo-sort must emit it
+        // before this node, exactly like a direct `Call`.
+        Expr::Iterate { node, init, arrays, .. } => {
+            f(node);
+            if let Some(i) = init {
+                walk_call_targets(i, f);
+            }
+            for a in arrays {
+                walk_call_targets(a, f);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -304,6 +315,16 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
         Expr::Merge { on_true, on_false, .. } => {
             walk_calls_assign(on_true, map, idx);
             walk_calls_assign(on_false, map, idx);
+        }
+        // The iterated function is invoked statelessly inside the loop, not a
+        // call site here; but its operands may contain calls.
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                walk_calls_assign(i, map, idx);
+            }
+            for a in arrays {
+                walk_calls_assign(a, map, idx);
+            }
         }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
     }
@@ -420,11 +441,20 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
     };
 
     let clocks = node_clocks(node);
+    let types: HashMap<String, Type> = node
+        .inputs
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .chain(node.outputs.iter().map(|p| (p.name.clone(), p.ty.clone())))
+        .chain(node.locals.iter().map(|l| (l.name.clone(), l.ty.clone())))
+        .collect();
     let mut ctx = EmitCtx {
         scope: &scope,
         project,
         call_sites: &call_sites,
         clocks: &clocks,
+        types: &types,
+        iter_seq: 0,
     };
 
     // C assignments execute top-to-bottom, so equations must be emitted in
@@ -545,6 +575,16 @@ fn collect_stateful(
             collect_stateful(on_true, call_sites, project, out);
             collect_stateful(on_false, call_sites, project, out);
         }
+        // The iterated function is stateless (typecheck enforces it), so no
+        // sub-state — only its operands can carry stateful calls.
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                collect_stateful(i, call_sites, project, out);
+            }
+            for a in arrays {
+                collect_stateful(a, call_sites, project, out);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
     }
 }
@@ -657,9 +697,21 @@ struct EmitCtx<'a> {
     project: &'a Project,
     call_sites: &'a HashMap<usize, CallSite>,
     clocks: &'a NodeClocks,
+    /// Declared type of every name in scope — lets the iterator emitter
+    /// recover an array operand's length for the `for` bound.
+    types: &'a HashMap<String, Type>,
+    /// Disambiguates the temporaries of multiple iterators in one node.
+    iter_seq: usize,
 }
 
 fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
+    // Array iterators are always the whole RHS (typecheck enforces it) and
+    // emit as a `for` loop rather than an expression.
+    if let Expr::Iterate { kind, node, init, arrays } = &eq.rhs {
+        emit_iterator(&eq.lhs[0], *kind, node, init.as_deref(), arrays, ctx, out);
+        return;
+    }
+
     // Multi-output: only direct top-level Call binding is supported.
     if eq.lhs.len() > 1 {
         if let Expr::Call { args, .. } = &eq.rhs {
@@ -693,6 +745,148 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
     }
     let lhs = ctx.scope.ref_var(&eq.lhs[0]);
     let _ = writeln!(out, "  {lhs} = {rhs_expr};");
+}
+
+/// Emit an array iterator as a `for` loop. The iterated `F` is a stateless
+/// function, so each step is a plain `F_step(&in, &out)` — no state pointer.
+/// `map` writes the result array element by element; `fold` threads an
+/// accumulator and assigns the scalar result once.
+fn emit_iterator(
+    lhs: &str,
+    kind: ol_ir::IterKind,
+    f_name: &str,
+    init: Option<&Expr>,
+    arrays: &[Expr],
+    ctx: &mut EmitCtx,
+    out: &mut String,
+) {
+    let seq = ctx.iter_seq;
+    ctx.iter_seq += 1;
+    let callee = match ctx.project.find_node(f_name) {
+        Some(c) => c,
+        None => {
+            let _ = writeln!(out, "  /* iterator over unknown `{f_name}` */");
+            return;
+        }
+    };
+    // Loop bound from the first array operand's declared length.
+    let n = arrays.first().and_then(|a| array_len_of(a, ctx)).unwrap_or(0);
+    let i = format!("__it{seq}i");
+    let inp = format!("__it{seq}in");
+    let outp = format!("__it{seq}out");
+
+    if matches!(kind, ol_ir::IterKind::Fold) {
+        // acc = seed; for k { in.acc=acc; in.elem=a[k]; F_step; acc=out; } lhs=acc;
+        let acc = format!("__it{seq}acc");
+        let (stmts, seed) = init
+            .map(|e| lower_anf(e, ctx))
+            .unwrap_or_else(|| (vec![], "0".into()));
+        for s in stmts {
+            out.push_str(&s);
+        }
+        let acc_ty = callee.outputs.first().map(|p| p.ty.c_name()).unwrap_or_else(|| "int32_t".into());
+        let _ = writeln!(out, "  {acc_ty} {acc} = {seed};");
+        let arr = lower_operand(&arrays[0], ctx);
+        let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {{");
+        let _ = writeln!(out, "    {f_name}_Input {inp};");
+        let _ = writeln!(out, "    {f_name}_Output {outp};");
+        if let Some(p) = callee.inputs.first() {
+            let _ = writeln!(out, "    {inp}.{} = {acc};", c_ident(&p.name));
+        }
+        if let Some(p) = callee.inputs.get(1) {
+            let _ = writeln!(out, "    {inp}.{} = {arr}[{i}];", c_ident(&p.name));
+        }
+        let _ = writeln!(out, "    {f_name}_step(&{inp}, &{outp});");
+        if let Some(p) = callee.outputs.first() {
+            let _ = writeln!(out, "    {acc} = {outp}.{};", c_ident(&p.name));
+        }
+        let _ = writeln!(out, "  }}");
+        let _ = writeln!(out, "  {} = {acc};", ctx.scope.ref_var(lhs));
+        return;
+    }
+
+    // map: for k { in.<inj>=aj[k]; F_step; lhs[k]=out.<o>; }
+    let arr_refs: Vec<String> = arrays.iter().map(|a| lower_operand(a, ctx)).collect();
+    let lhs_ref = ctx.scope.ref_var(lhs);
+    let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {{");
+    let _ = writeln!(out, "    {f_name}_Input {inp};");
+    let _ = writeln!(out, "    {f_name}_Output {outp};");
+    for (p, a) in callee.inputs.iter().zip(arr_refs.iter()) {
+        let _ = writeln!(out, "    {inp}.{} = {a}[{i}];", c_ident(&p.name));
+    }
+    let _ = writeln!(out, "    {f_name}_step(&{inp}, &{outp});");
+    if let Some(p) = callee.outputs.first() {
+        let _ = writeln!(out, "    {lhs_ref}[{i}] = {outp}.{};", c_ident(&p.name));
+    }
+    let _ = writeln!(out, "  }}");
+}
+
+/// C reference to an array operand. A bare variable resolves through the
+/// scope; richer array expressions (a record field, a 2-D index) lower to an
+/// indexable lvalue. The result is something `[__i]` can be appended to.
+fn lower_operand(expr: &Expr, ctx: &mut EmitCtx) -> String {
+    match expr {
+        Expr::Var { name } => ctx.scope.ref_var(name),
+        other => {
+            let (stmts, e) = lower_anf(other, ctx);
+            // Array operands never need preceding statements in practice
+            // (they are lvalues), but keep any that arise.
+            debug_assert!(stmts.is_empty(), "array operand produced statements");
+            e
+        }
+    }
+}
+
+/// The static length of an array-typed operand, for the loop bound.
+fn array_len_of(expr: &Expr, ctx: &EmitCtx) -> Option<u32> {
+    match expr {
+        Expr::Var { name } => match ctx.types.get(name) {
+            Some(Type::Array { len, .. }) => Some(*len),
+            _ => None,
+        },
+        Expr::Field { base, field } => {
+            let bt = expr_type(base, ctx)?;
+            if let Type::Named { name } = bt {
+                let fields = record_fields(&name, ctx.project)?;
+                if let Some(Type::Array { len, .. }) =
+                    fields.iter().find(|f| &f.name == field).map(|f| &f.ty)
+                {
+                    return Some(*len);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Best-effort declared type of a simple lvalue expression (var or field),
+/// enough for [`array_len_of`] to resolve record-of-array operands.
+fn expr_type(expr: &Expr, ctx: &EmitCtx) -> Option<Type> {
+    match expr {
+        Expr::Var { name } => ctx.types.get(name).cloned(),
+        Expr::Field { base, field } => {
+            if let Some(Type::Named { name }) = expr_type(base, ctx) {
+                let fields = record_fields(&name, ctx.project)?;
+                return fields.iter().find(|f| &f.name == field).map(|f| f.ty.clone());
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn record_fields<'a>(name: &str, project: &'a Project) -> Option<&'a Vec<ol_ir::RecordField>> {
+    for pkg in &project.packages {
+        for t in &pkg.types {
+            if let TypeBody::Record { name: rn, fields } = &t.body {
+                if rn == name {
+                    return Some(fields);
+                }
+            }
+        }
+    }
+    None
 }
 
 fn lower_args(args: &[Expr], ctx: &mut EmitCtx) -> (Vec<String>, Vec<String>) {
@@ -852,6 +1046,9 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             (s, format!("{b}[{i}]"))
         }
         Expr::Tuple { .. } => (vec![], "/* tuple */ 0".into()),
+        // Iterators are emitted at the equation level (a `for` loop), never
+        // as a sub-expression — typecheck guarantees they are the whole RHS.
+        Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),
         // Sampling is pure evaluation here: the equation guard (or the merge
         // ternary) already decides which cycles reach this expression.
         Expr::When { arg, .. } => lower_anf(arg, ctx),
@@ -991,6 +1188,14 @@ fn collect_pre_vars(
         Expr::Merge { on_true, on_false, .. } => {
             collect_pre_vars(on_true, env, out, seen);
             collect_pre_vars(on_false, env, out, seen);
+        }
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                collect_pre_vars(i, env, out, seen);
+            }
+            for a in arrays {
+                collect_pre_vars(a, env, out, seen);
+            }
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }

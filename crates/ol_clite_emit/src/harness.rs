@@ -66,12 +66,17 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "    char* tok = strtok(line, \",\");");
     for p in &node.inputs {
         let _ = writeln!(s, "    if (!tok) return 1;");
-        let _ = writeln!(
-            s,
-            "    in.{} = {};",
-            crate::c_ident(&p.name),
-            parse_expr(&p.ty, "tok")
-        );
+        match &p.ty {
+            Type::Array { elem, len } => emit_array_parse(&mut s, &crate::c_ident(&p.name), elem, *len),
+            _ => {
+                let _ = writeln!(
+                    s,
+                    "    in.{} = {};",
+                    crate::c_ident(&p.name),
+                    parse_expr(&p.ty, "tok")
+                );
+            }
+        }
         let _ = writeln!(s, "    tok = strtok(NULL, \",\");");
     }
     if node.kind != NodeKind::Function {
@@ -88,11 +93,16 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "    printf(\"%d\", cycle);");
     for p in &node.outputs {
         let _ = writeln!(s, "    printf(\",\");");
-        let _ = writeln!(
-            s,
-            "    {}",
-            print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)))
-        );
+        match &p.ty {
+            Type::Array { elem, len } => emit_array_print(&mut s, &crate::c_ident(&p.name), elem, *len),
+            _ => {
+                let _ = writeln!(
+                    s,
+                    "    {}",
+                    print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)))
+                );
+            }
+        }
     }
     if monitor_contract_name.is_some() {
         let _ = writeln!(s, "    printf(\",%s,%s\", mode_buf, viol_buf);");
@@ -103,6 +113,37 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "  return 0;");
     let _ = writeln!(s, "}}");
     s
+}
+
+/// Parse a bracketed `[e0;e1;…]` token into `in.<name>[k]`. `strtoll`/`strtod`
+/// advance a cursor past each element; we skip the `[` and `;` separators by
+/// hand (strtok is already in use on the outer comma split, so no nesting).
+fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32) {
+    let is_float = elem.is_float();
+    let read = if is_float { "strtod(__p, &__e)" } else { "strtoll(__p, &__e, 10)" };
+    let _ = writeln!(s, "    {{");
+    let _ = writeln!(s, "      char* __p = tok; char* __e;");
+    let _ = writeln!(s, "      for (int __k = 0; __k < {len}; __k++) {{");
+    let _ = writeln!(s, "        while (*__p=='[' || *__p==';' || *__p==' ') __p++;");
+    let _ = writeln!(s, "        in.{name}[__k] = ({}) {read};", elem.c_name());
+    let _ = writeln!(s, "        __p = __e;");
+    let _ = writeln!(s, "      }}");
+    let _ = writeln!(s, "    }}");
+}
+
+/// Print `out.<name>` as `[e0;e1;…]`, matching `Value::to_csv` for arrays.
+fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32) {
+    let item = if elem.is_float() {
+        format!("printf(\"%g\", (double) out.{name}[__k]);")
+    } else {
+        format!("printf(\"%lld\", (long long) out.{name}[__k]);")
+    };
+    let _ = writeln!(s, "    printf(\"[\");");
+    let _ = writeln!(s, "    for (int __k = 0; __k < {len}; __k++) {{");
+    let _ = writeln!(s, "      if (__k) printf(\";\");");
+    let _ = writeln!(s, "      {item}");
+    let _ = writeln!(s, "    }}");
+    let _ = writeln!(s, "    printf(\"]\");");
 }
 
 fn parse_expr(ty: &Type, tok: &str) -> String {

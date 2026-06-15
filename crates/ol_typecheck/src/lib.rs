@@ -299,6 +299,7 @@ fn check_node(
         }
 
         check_pre_initialization(&eq.rhs, false, diags, &eq_ctx);
+        check_iterator_placement(&eq.rhs, diags, &eq_ctx);
 
         // For single-output equations we pass the LHS's declared type as a
         // bidirectional hint so integer literals adopt the target type when
@@ -541,6 +542,14 @@ fn check_pre_initialization(
         Expr::Merge { on_true, on_false, .. } => {
             check_pre_initialization(on_true, under_arrow_body, diags, ctx);
             check_pre_initialization(on_false, under_arrow_body, diags, ctx);
+        }
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                check_pre_initialization(i, under_arrow_body, diags, ctx);
+            }
+            for a in arrays {
+                check_pre_initialization(a, under_arrow_body, diags, ctx);
+            }
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
@@ -966,6 +975,230 @@ pub fn infer_expr_type(
             }
             Some(t)
         }
+        Expr::Iterate { kind, node: f_name, init, arrays } => {
+            infer_iterator_type(*kind, f_name, init.as_deref(), arrays,
+                env, sigs, node, diags, ctx, tctx)
+        }
+    }
+}
+
+/// Type an array iterator. The iterated `F` must be a stateless function
+/// with one output; `map` needs one input per array and yields an array of
+/// `F`'s output, `fold` needs `(accumulator, element)` and yields the
+/// accumulator. Lengths of all array operands must agree.
+#[allow(clippy::too_many_arguments)]
+fn infer_iterator_type(
+    kind: ol_ir::IterKind,
+    f_name: &str,
+    init: Option<&Expr>,
+    arrays: &[Expr],
+    env: &BTreeMap<String, Type>,
+    sigs: &HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)>,
+    node: &NodeDef,
+    diags: &mut Vec<Diagnostic>,
+    ctx: &str,
+    tctx: &TypeContext,
+) -> Option<Type> {
+    use ol_ir::IterKind;
+    let iter = if kind == IterKind::Map { "map" } else { "fold" };
+
+    let Some((f_inputs, f_outputs, f_kind)) = sigs.get(f_name) else {
+        diags.push(
+            Diagnostic::error("E0140", format!("{iter} calls unknown function `{f_name}`"))
+                .with_context(ctx.to_string()),
+        );
+        return None;
+    };
+    // Stateless only: a stateful body would need per-element state, which
+    // this profile does not generate. Loud, not silent.
+    if !matches!(f_kind, NodeKind::Function) {
+        diags.push(
+            Diagnostic::error(
+                "E0141",
+                format!(
+                    "{iter} requires a stateless `function`, but `{f_name}` is a {f_kind:?} \
+                     — iterating stateful operators is not supported yet"
+                ),
+            )
+            .with_context(ctx.to_string()),
+        );
+        return None;
+    }
+    if f_outputs.len() != 1 {
+        diags.push(
+            Diagnostic::error(
+                "E0142",
+                format!("{iter}'s function `{f_name}` must have exactly one output"),
+            )
+            .with_context(ctx.to_string()),
+        );
+        return None;
+    }
+    let f_out = f_outputs[0].ty.clone();
+
+    // Each array operand must be an array; collect (element type, length).
+    let mut elems: Vec<Type> = Vec::new();
+    let mut lengths: Vec<u32> = Vec::new();
+    for a in arrays {
+        let at = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, None)?;
+        match tctx.resolve(&at) {
+            Type::Array { elem, len } => {
+                elems.push(*elem);
+                lengths.push(len);
+            }
+            other => {
+                diags.push(
+                    Diagnostic::error(
+                        "E0143",
+                        format!("{iter} operand must be an array, got {other:?}"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+        }
+    }
+    if let Some(&first) = lengths.first() {
+        if lengths.iter().any(|&l| l != first) {
+            diags.push(
+                Diagnostic::error(
+                    "E0144",
+                    format!("{iter}'s array operands must have equal length, got {lengths:?}"),
+                )
+                .with_context(ctx.to_string()),
+            );
+            return None;
+        }
+    }
+    let n = lengths.first().copied().unwrap_or(0);
+
+    match kind {
+        IterKind::Map => {
+            if f_inputs.len() != arrays.len() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0145",
+                        format!(
+                            "map: `{f_name}` takes {} input(s) but {} array(s) were given",
+                            f_inputs.len(),
+                            arrays.len()
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            for (i, (p, e)) in f_inputs.iter().zip(elems.iter()).enumerate() {
+                if !types_compatible(tctx, &p.ty, e) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0145",
+                            format!(
+                                "map: array #{i} has element type {e:?} but `{f_name}` \
+                                 expects {:?}",
+                                p.ty
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            }
+            Some(Type::Array { elem: Box::new(f_out), len: n })
+        }
+        IterKind::Fold => {
+            // fold(F, init, a): F is (accumulator, element) -> accumulator.
+            if f_inputs.len() != 2 {
+                diags.push(
+                    Diagnostic::error(
+                        "E0145",
+                        format!("fold: `{f_name}` must take exactly two inputs (accumulator, element)"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            let acc_ty = f_inputs[0].ty.clone();
+            let elem_ty = f_inputs[1].ty.clone();
+            // The accumulator type must thread: in, out, and the seed agree.
+            if !types_compatible(tctx, &acc_ty, &f_out) {
+                diags.push(
+                    Diagnostic::error(
+                        "E0145",
+                        format!(
+                            "fold: `{f_name}`'s accumulator input {acc_ty:?} and output {f_out:?} \
+                             must be the same type"
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            if let Some(seed) = init {
+                if let Some(seed_ty) =
+                    infer_expr_type(seed, env, sigs, node, diags, ctx, tctx, Some(&acc_ty))
+                {
+                    if !types_compatible(tctx, &acc_ty, &seed_ty) {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0145",
+                                format!(
+                                    "fold: seed has type {seed_ty:?} but `{f_name}`'s accumulator \
+                                     is {acc_ty:?}"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            if let Some(e) = elems.first() {
+                if !types_compatible(tctx, &elem_ty, e) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0145",
+                            format!(
+                                "fold: array element type {e:?} but `{f_name}` expects {elem_ty:?}"
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            }
+            Some(f_out)
+        }
+    }
+}
+
+/// An array iterator may only be the *whole* right-hand side of an equation,
+/// never nested inside another expression — that keeps codegen a single
+/// `for` loop (a `map` even produces an array, which has no C value form).
+/// The GUI drops each iterator as its own equation, so this never bites real
+/// authoring; it only rejects hand-written nesting.
+fn check_iterator_placement(rhs: &Expr, diags: &mut Vec<Diagnostic>, ctx: &str) {
+    fn forbid_nested(e: &Expr, diags: &mut Vec<Diagnostic>, ctx: &str) {
+        e.visit(|x| {
+            if matches!(x, Expr::Iterate { .. }) {
+                diags.push(
+                    Diagnostic::error(
+                        "E0146",
+                        "map/fold may only be the whole right-hand side of an equation, \
+                         not nested inside another expression",
+                    )
+                    .with_context(ctx.to_string()),
+                );
+            }
+        });
+    }
+    match rhs {
+        Expr::Iterate { init, arrays, .. } => {
+            for sub in init.iter().map(|b| b.as_ref()).chain(arrays.iter()) {
+                forbid_nested(sub, diags, ctx);
+            }
+        }
+        other => forbid_nested(other, diags, ctx),
     }
 }
 
@@ -1100,6 +1333,16 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
             out.insert(clock.clone());
             collect_immediate_deps(on_true, out);
             collect_immediate_deps(on_false, out);
+        }
+        // The iterated function is stateless: its seed and arrays are
+        // same-cycle reads (the function name is not a variable).
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                collect_immediate_deps(i, out);
+            }
+            for a in arrays {
+                collect_immediate_deps(a, out);
+            }
         }
     }
 }

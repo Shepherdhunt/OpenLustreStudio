@@ -527,6 +527,45 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen)?;
+                    // `map(F, a, …)` / `fold(F, init, a)` are array iterators:
+                    // the first argument is the iterated function's name.
+                    if name == "map" || name == "fold" {
+                        let iter_node = match args.first() {
+                            Some(Expr::Var { name }) => name.clone(),
+                            _ => {
+                                return Err(ParseError::Expected {
+                                    expected: format!(
+                                        "a function name as {name}'s first argument"
+                                    ),
+                                    found: args
+                                        .first()
+                                        .map(ol_ir_expr_describe)
+                                        .unwrap_or_else(|| "no arguments".into()),
+                                })
+                            }
+                        };
+                        let rest: Vec<Expr> = args.into_iter().skip(1).collect();
+                        if name == "map" {
+                            if rest.is_empty() {
+                                return Err(ParseError::Expected {
+                                    expected: "map(F, array, …) with at least one array".into(),
+                                    found: "no arrays".into(),
+                                });
+                            }
+                            return Ok(Expr::map(iter_node, rest));
+                        }
+                        // fold(F, init, array)
+                        if rest.len() != 2 {
+                            return Err(ParseError::Expected {
+                                expected: "fold(F, init, array)".into(),
+                                found: format!("{} arguments after F", rest.len()),
+                            });
+                        }
+                        let mut it = rest.into_iter();
+                        let init = it.next().unwrap();
+                        let array = it.next().unwrap();
+                        return Ok(Expr::fold(iter_node, init, array));
+                    }
                     // `merge(c, a, b)` joins two complementary clocked
                     // streams; the clock must be a variable name.
                     if name == "merge" {

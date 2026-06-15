@@ -262,6 +262,10 @@ fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clo
         Expr::Tuple { items } => {
             items.iter().find_map(|i| natural_clock(i, var_clocks))
         }
+        Expr::Iterate { init, arrays, .. } => init
+            .as_deref()
+            .and_then(|i| natural_clock(i, var_clocks))
+            .or_else(|| arrays.iter().find_map(|a| natural_clock(a, var_clocks))),
     }
 }
 
@@ -362,6 +366,16 @@ fn check_expr(
         Expr::Tuple { items } => {
             for i in items {
                 check_expr(i, expected, var_clocks, eq, info);
+            }
+        }
+        // Iterators operate on whole arrays at the base clock; their operands
+        // share the iterator's own clock (clocked iteration is roadmap).
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(i) = init {
+                check_expr(i, expected, var_clocks, eq, info);
+            }
+            for a in arrays {
+                check_expr(a, expected, var_clocks, eq, info);
             }
         }
     }
