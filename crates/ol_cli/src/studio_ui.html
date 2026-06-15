@@ -143,6 +143,13 @@
   .watch-val { width: 110px; font-family: Consolas, monospace; }
   .watch-val.invalid { border: 1.5px solid #d11a1a; background: #fdeeee; }
   .watch-computed { font-family: Consolas, monospace; color: #2b579a; }
+  /* Build pipeline: four gated steps */
+  .pipeline { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: 4px 0 8px; }
+  .pstep { display: flex; align-items: center; gap: 8px; }
+  .pstep button.pdisabled { opacity: 0.45; pointer-events: none; }
+  #pipe-probes { margin: 4px 0; }
+  #pipe-probes .probe-row { font-family: Consolas, monospace; font-size: 11px; color: #2b3a4a; }
+  #pipe-probes .probe-row button { font-size: 10px; padding: 0 6px; margin-left: 6px; }
   /* Canvas right-click menu */
   .ctx-menu { position: fixed; z-index: 1000; background: #fff; border: 1px solid #9aa6b2;
               box-shadow: 0 3px 10px rgba(0,0,0,0.22); min-width: 132px; padding: 3px 0;
@@ -248,6 +255,8 @@
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-equation')">Equation…</div>
       <div class="mi" id="mi-insert-fsm" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machine…</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="openLogMsgDialog()">Log Message…</div>
     </div>
   </div>
   <div class="menu" data-menu="view">
@@ -278,8 +287,8 @@
   <div class="menu" data-menu="simulation">
     <span class="menu-title">Simulation</span>
     <div class="dropdown">
-      <div class="mi" id="mi-sim-build" onclick="simBuild()">Build</div>
-      <div class="mi" id="mi-sim-run" onclick="simRun()">Run</div>
+      <div class="mi" id="mi-sim-build" onclick="pipeBuild()">Build Model</div>
+      <div class="mi" id="mi-sim-run" onclick="pipeSimulate()">Run</div>
       <div class="mi disabled" id="mi-sim-step" onclick="simStep()">Step <span class="shortcut">active while running</span></div>
       <div class="mi disabled" id="mi-sim-stop" onclick="simStop()">Stop / Reset</div>
       <div class="menu-sep"></div>
@@ -373,7 +382,26 @@
       <div id="tests-results"></div>
     </div>
     <div class="dock-pane" id="dock-build" style="display:none">
-      <pre id="build-log" style="border:none; margin:0">No build yet — Code &gt; Compile C-Lite…</pre>
+      <div class="pipeline">
+        <div class="pstep">
+          <button class="primary" onclick="pipeBuild()">1 · Build Model</button>
+          <span class="build-note" id="pipe-build-status">checks validity and writes the .lus</span>
+        </div>
+        <div class="pstep">
+          <button id="pipe-sim-btn" class="pdisabled" onclick="pipeSimulate()">2 · Run Simulation</button>
+          <span class="build-note" id="pipe-sim-status">build the model first</span>
+        </div>
+        <div class="pstep">
+          <button id="pipe-gen-btn" class="pdisabled" onclick="pipeGenerate()">3 · Generate C-Lite</button>
+          <span class="build-note" id="pipe-gen-status">build the model first</span>
+        </div>
+        <div class="pstep">
+          <button id="pipe-run-btn" class="pdisabled" onclick="pipeRun()">4 · Compile &amp; Run (debug)</button>
+          <span class="build-note" id="pipe-run-status">generate the C-Lite first</span>
+        </div>
+      </div>
+      <div id="pipe-probes"></div>
+      <pre id="build-log" style="border:none; margin:8px 0 0">No build yet — press 1 · Build Model.</pre>
     </div>
     <div class="dock-pane" id="dock-verify" style="display:none">
       <div class="row">
@@ -463,6 +491,24 @@
       <div class="row"><button class="primary" onclick="editAddEquation()">Add equation</button></div>
       <h4>Library palette — click to insert a call</h4>
       <div class="palette" id="palette"></div>
+    </div>
+  </div>
+
+  <div class="dlg" id="dlg-logmsg">
+    <div class="edit-form">
+      <h4>Log message (debug probe)</h4>
+      <p class="build-note">Prints <code class="inline">label: value</code> for a variable during a debug run (Build dock ▸ 4 · Compile &amp; Run).</p>
+      <div class="row">
+        <label>operator</label><select id="logmsg-node" onchange="fillLogMsgVars()"></select>
+      </div>
+      <div class="row">
+        <label>variable</label><select id="logmsg-var"></select>
+      </div>
+      <div class="row">
+        <label>label</label><input id="logmsg-label" placeholder="(defaults to the variable name)">
+      </div>
+      <div class="row"><button class="primary" onclick="editAddProbe()">Add log message</button></div>
+      <div id="logmsg-status"></div>
     </div>
   </div>
 
@@ -573,6 +619,9 @@ const state = {
   diagramStack: [], diagramData: null, diagPos: {}, drag: null,
   selection: null, selected: [],
   sim: { built: false, running: false, values: {} },
+  // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
+  // Generate; Generate gates Compile&Run. Edits invalidate the build.
+  pipeline: { built: false, generated: false, lustre: "", sig: "" },
   ops: null,
 };
 
@@ -634,6 +683,7 @@ const DLG_TITLES = {
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
   "dlg-types": "Types", "dlg-fsm": "State Machines",
   "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
+  "dlg-logmsg": "Insert Log Message",
 };
 
 function openDialog(id) {
@@ -682,9 +732,12 @@ function setSidePane(name) {
 }
 
 async function refreshSideText() {
-  // The Lustre view of the model is always one glance away while drawing.
+  // The Lustre model code only exists once the operator has built — the SCADE
+  // model-checker gate. Before that the pane invites a build.
   if (document.getElementById("side-lustre").style.display !== "none") {
-    document.getElementById("side-lustre").textContent = await fetchText("/api/lustre");
+    document.getElementById("side-lustre").textContent = state.pipeline.built
+      ? state.pipeline.lustre
+      : "— Build the model (Build dock ▸ 1 · Build Model) to generate and view the Lustre. —";
   } else {
     const h = await fetchText("/api/clite/header");
     const c = await fetchText("/api/clite/source");
@@ -788,6 +841,17 @@ async function refresh() {
   } else {
     const first = ins.project.packages.find(p => p.nodes.length)?.nodes[0];
     if (first) { selectNode(first); loadDiagram(first.name); }
+  }
+  // A build done earlier is stale once the model changes — re-lock the gate
+  // (and hide the Lustre) so the engineer rebuilds before simulating.
+  if (state.pipeline.built && modelSignature() !== state.pipeline.sig) {
+    state.pipeline.built = false;
+    state.pipeline.generated = false;
+    state.sim.built = false;
+    reflectPipeline();
+    document.getElementById("pipe-build-status").textContent = "model changed — Build again";
+    document.getElementById("pipe-sim-status").textContent = "build the model first";
+    document.getElementById("pipe-gen-status").textContent = "build the model first";
   }
   // Don't rebuild the watch table mid-run (the 5 s inspect poll calls
   // refresh) — it would wipe the live computed values. simRun builds it.
@@ -941,6 +1005,161 @@ async function runSim(full) {
   document.getElementById("sim-output").textContent = await r.text();
 }
 
+// --- The SCADE build pipeline: Build → Simulate → Generate → Compile&Run ------
+
+/// A cheap content fingerprint of the model. Any edit changes it, so a build
+/// done earlier is known to be stale and the gate re-locks.
+function modelSignature() {
+  try { return JSON.stringify(state.inspect.project.packages); } catch (_) { return ""; }
+}
+
+function sideShowing(name) {
+  const el = document.getElementById("side-" + name);
+  return el && el.style.display !== "none";
+}
+
+function pipeLog(title, body) {
+  document.getElementById("build-log").textContent =
+    new Date().toLocaleTimeString() + " — " + title + "\n\n" + (body || "");
+}
+
+function reflectPipeline() {
+  const b = state.pipeline.built, g = state.pipeline.generated;
+  document.getElementById("pipe-sim-btn").classList.toggle("pdisabled", !b);
+  document.getElementById("pipe-gen-btn").classList.toggle("pdisabled", !b);
+  document.getElementById("pipe-run-btn").classList.toggle("pdisabled", !g);
+}
+
+/// Build = the SCADE model checker: validity check, write the .lus, unlock
+/// simulation and generation. A failing model is not simulated and has no
+/// generated Lustre.
+async function pipeBuild() {
+  showDock("build");
+  document.getElementById("pipe-build-status").textContent = "building…";
+  let d;
+  try { d = await (await fetch("/api/build", { method: "POST" })).json(); }
+  catch (_) { d = { ok: false, message: "build request failed" }; }
+  if (d.ok) {
+    state.pipeline.built = true;
+    state.pipeline.generated = false;
+    state.pipeline.lustre = d.lustre || "";
+    state.pipeline.sig = modelSignature();
+    state.sim.built = true;
+    document.getElementById("pipe-build-status").textContent = "✓ " + d.message;
+    document.getElementById("pipe-sim-status").textContent = "ready";
+    document.getElementById("pipe-gen-status").textContent = "ready";
+    document.getElementById("pipe-run-status").textContent = "generate the C-Lite first";
+    if (sideShowing("lustre")) refreshSideText();
+    pipeLog("Build Model", d.message + (d.warnings ? "  (" + d.warnings + " warning(s))" : ""));
+  } else {
+    state.pipeline.built = false;
+    state.pipeline.generated = false;
+    state.sim.built = false;
+    document.getElementById("pipe-build-status").textContent = "✗ " + (d.message || "build failed");
+    pipeLog("Build Model", d.message || "failed — see Messages");
+    showDock("messages");
+  }
+  reflectPipeline();
+}
+
+function pipeSimulate() {
+  if (!state.pipeline.built) return;
+  simRun();
+}
+
+function pipeGenerate() {
+  if (!state.pipeline.built) return;
+  setSidePane("c");                 // the generated C is now the visible model code
+  state.pipeline.generated = true;
+  document.getElementById("pipe-gen-status").textContent = "✓ generated — see the Generated C pane";
+  document.getElementById("pipe-run-status").textContent = "ready";
+  reflectPipeline();
+  pipeLog("Generate C-Lite", "generated the directional C-Lite for the main operator");
+}
+
+/// Compile the C in debug mode and launch it in its own terminal: a free run
+/// that prints a banner, the held inputs, and outputs + log messages every 50
+/// cycles.
+async function pipeRun() {
+  if (!state.pipeline.generated) return;
+  document.getElementById("pipe-run-status").textContent = "compiling…";
+  let d;
+  try { d = await (await fetch("/api/clite/run", { method: "POST", body: "{}" })).json(); }
+  catch (_) { d = { ok: false, log: "run request failed" }; }
+  if (d.ok) {
+    document.getElementById("pipe-run-status").textContent = "✓ " + (d.message || "launched");
+    pipeLog("Compile & Run", (d.message || "launched") + "\n\n" + (d.log || ""));
+  } else {
+    document.getElementById("pipe-run-status").textContent = "✗ compile failed";
+    pipeLog("Compile & Run", d.log || "compile failed");
+  }
+}
+
+// --- Log messages (debug probes) ---------------------------------------------
+
+function openLogMsgDialog() {
+  const sel = document.getElementById("logmsg-node");
+  sel.innerHTML = "";
+  const nodes = (state.inspect?.project?.packages || []).flatMap(p => p.nodes);
+  const cur = state.diagramData?.node;
+  for (const n of nodes) {
+    const o = document.createElement("option");
+    o.value = n.name; o.textContent = n.name;
+    if (n.name === cur) o.selected = true;
+    sel.appendChild(o);
+  }
+  fillLogMsgVars();
+  document.getElementById("logmsg-label").value = "";
+  document.getElementById("logmsg-status").textContent = "";
+  openDialog("dlg-logmsg");
+}
+
+function fillLogMsgVars() {
+  const node = findNode(document.getElementById("logmsg-node").value);
+  const sel = document.getElementById("logmsg-var");
+  sel.innerHTML = "";
+  if (!node) return;
+  const vars = node.inputs.map(p => p.name)
+    .concat((node.locals || []).map(l => l.name))
+    .concat(node.outputs.map(p => p.name));
+  for (const v of vars) {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = v;
+    sel.appendChild(o);
+  }
+}
+
+async function editAddProbe() {
+  const node = document.getElementById("logmsg-node").value;
+  const v = document.getElementById("logmsg-var").value;
+  if (!v) { document.getElementById("logmsg-status").textContent = "pick a variable"; return; }
+  const label = document.getElementById("logmsg-label").value.trim() || v;
+  const ok = await postEdit("/api/edit/add_probe", { node, "var": v, label });
+  if (ok) { closeDialog(); renderProbes(); }
+}
+
+function renderProbes() {
+  const host = document.getElementById("pipe-probes");
+  if (!host) return;
+  const probes = state.diagramData?.probes || [];
+  if (!probes.length) {
+    host.innerHTML = '<span class="build-note">No log messages — Insert ▸ Log Message…</span>';
+    return;
+  }
+  let html = '<div class="build-note">Log messages (printed every 50 cycles in a debug run):</div>';
+  probes.forEach((p, i) => {
+    html += '<div class="probe-row">▸ ' + escapeHTML(p.label) + ' : <code>' + escapeHTML(p.var) +
+      '</code><button onclick="removeProbe(' + i + ')">remove</button></div>';
+  });
+  host.innerHTML = html;
+}
+
+async function removeProbe(i) {
+  if (!state.diagramData) return;
+  await postEdit("/api/edit/remove_probe", { node: state.diagramData.node, index: i });
+  renderProbes();
+}
+
 // --- Compile C-Lite ------------------------------------------------------------
 
 async function cliteCompile() {
@@ -1024,6 +1243,7 @@ async function loadDiagram(nodeName, push) {
   renderProblems();
   renderDiagram();
   renderProps();
+  renderProbes();
 }
 
 function renderCrumbs() {

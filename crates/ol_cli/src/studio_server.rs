@@ -206,6 +206,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(body) => (200, "text/plain; charset=utf-8", body.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
         },
+        ("POST", "/api/build") => build_model_response(ctx),
         ("GET", "/api/clite/header") => match build_clite(ctx) {
             Ok((h, _)) => (200, "text/plain; charset=utf-8", h.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
@@ -299,9 +300,12 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
+        ("POST", "/api/edit/add_probe") => apply_edit_response(ctx, body, edit_add_probe),
+        ("POST", "/api/edit/remove_probe") => apply_edit_response(ctx, body, edit_remove_probe),
         ("POST", "/api/edit/undo") => history_response(ctx, true),
         ("POST", "/api/edit/redo") => history_response(ctx, false),
         ("POST", "/api/clite/compile") => clite_compile_response(ctx, body),
+        ("POST", "/api/clite/run") => clite_run_response(ctx, body),
         _ => (404, "text/plain", b"not found".to_vec()),
     }
 }
@@ -467,6 +471,67 @@ fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
     let lus = ol_lustre_emit::emit_project(&project);
     let con = ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern);
     Ok(format!("{lus}\n{con}"))
+}
+
+/// "Build the model": the SCADE model-checker step. Type- and contract-check
+/// the project; on a clean check, emit the main operator's Lustre (the root
+/// plus everything it uses) and write it to `<main>.lus` next to the model,
+/// then hand it back so the GUI can show it. A model that does not build is
+/// not simulated and has no generated `.lus` — failures are loud, never silent.
+fn build_model_response(ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
+    let project = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let report = ol_typecheck::check_project(&project);
+    let contract = ol_contract_check::check_project(&project);
+    let count = |sev: ol_ir::Severity| {
+        report.diagnostics.iter().filter(|d| d.severity == sev).count()
+            + contract.diagnostics.iter().filter(|d| d.severity == sev).count()
+    };
+    let errors = count(ol_ir::Severity::Error);
+    let warnings = count(ol_ir::Severity::Warning);
+
+    let fail = |msg: String, warnings: usize| {
+        let v = serde_json::json!({ "ok": false, "errors": errors, "warnings": warnings, "message": msg });
+        (200, "application/json", v.to_string().into_bytes())
+    };
+    if errors > 0 {
+        return fail(
+            format!("{errors} error(s) — fix them in Messages before building"),
+            warnings,
+        );
+    }
+    let Some(main) = project.main.clone() else {
+        return fail("no main operator — set one with File ▸ Set Main Operator".into(), warnings);
+    };
+    let sliced = match project.slice_for_root(&main) {
+        Ok(s) => s,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let lus = ol_lustre_emit::emit_project(&sliced);
+    let con = ol_cocospec_emit::emit_project(&sliced, ol_cocospec_emit::Target::Modern);
+    let full = format!("{lus}\n{con}");
+    let dir = ctx.model.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let path = dir.join(format!("{main}.lus"));
+    if let Err(e) = std::fs::write(&path, &full) {
+        return (
+            500,
+            "application/json",
+            json_error(&format!("writing {}: {e}", path.display())).into_bytes(),
+        );
+    }
+    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("model.lus");
+    let value = serde_json::json!({
+        "ok": true,
+        "errors": 0,
+        "warnings": warnings,
+        "main": main,
+        "path": path.display().to_string(),
+        "lustre": full,
+        "message": format!("model valid — wrote {fname}"),
+    });
+    (200, "application/json", value.to_string().into_bytes())
 }
 
 /// The Build/C-Lite views generate the SCADE way: the selected root (the
@@ -827,6 +892,9 @@ fn build_diagram(
         "equations": equations,
         "wires": wires,
         "problems": problems,
+        "probes": node.probes.iter().map(|p| serde_json::json!({
+            "label": p.label, "var": p.var,
+        })).collect::<Vec<_>>(),
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
@@ -954,6 +1022,7 @@ fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
         equations: vec![],
         contract: None,
         diagram: Default::default(),
+        probes: vec![],
     };
     if project.packages.is_empty() {
         project.packages.push(ol_ir::Package {
@@ -2448,6 +2517,43 @@ fn edit_set_operation_inputs(
     Ok(())
 }
 
+/// Add a debug log probe (`{node, var, label}`): logs `<label>: <var value>`
+/// in a debug run. `var` must be a name in the node.
+fn edit_add_probe(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let var = req_str(req, "var")?.to_string();
+    let label = req
+        .get("label")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&var)
+        .to_string();
+    let node = find_node_mut(project, &node_name)?;
+    let known = node
+        .inputs
+        .iter()
+        .map(|p| &p.name)
+        .chain(node.outputs.iter().map(|p| &p.name))
+        .chain(node.locals.iter().map(|l| &l.name))
+        .any(|n| n == &var);
+    if !known {
+        return Err(format!("`{var}` is not an input, output, or local of `{node_name}`"));
+    }
+    node.probes.push(ol_ir::Probe { label, var });
+    Ok(())
+}
+
+/// Remove the probe at `index` from a node (`{node, index}`).
+fn edit_remove_probe(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let index = req_index(req)?;
+    let node = find_node_mut(project, &node_name)?;
+    if index >= node.probes.len() {
+        return Err(format!("node `{node_name}` has no log message {index}"));
+    }
+    node.probes.remove(index);
+    Ok(())
+}
+
 // --- Compile C-Lite: emit + compile into a user directory --------------------
 
 /// Emit the selected root's C (header, source, driver, monitors, Makefile)
@@ -2531,4 +2637,118 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         "log": log,
     });
     (200, "application/json", value.to_string().into_bytes())
+}
+
+/// Compile + run the C-Lite in DEBUG mode and launch it in its own terminal
+/// window: a free-running build (no CSV) that prints a banner, the held
+/// inputs, and the outputs plus any log-message probes every 50 cycles. This
+/// is the GUI's fourth pipeline button — "watch the generated code run".
+fn clite_run_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
+    let compiler = req.get("compiler").and_then(|v| v.as_str()).unwrap_or("auto");
+    let out_dir = ctx
+        .model
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("build");
+
+    let project = match sliced_for_main(ctx) {
+        Ok(p) => p,
+        Err(e) => return bad(&e),
+    };
+    let entry_name = match project.main.clone() {
+        Some(m) => m,
+        None => return bad("project has no `main` operator; set one first"),
+    };
+    let entry = match project.find_node(&entry_name) {
+        Some(n) => n.clone(),
+        None => return bad(&format!("main operator `{entry_name}` not found")),
+    };
+    if let Err(e) = std::fs::create_dir_all(&out_dir) {
+        return bad(&format!("creating {}: {e}", out_dir.display()));
+    }
+
+    let bundle = ol_clite_emit::emit_project(&project);
+    let driver = ol_clite_emit::harness::emit_debug_driver(&entry);
+    for (name, text) in [
+        ("openlustre_generated.h", &bundle.header),
+        ("openlustre_generated.c", &bundle.source),
+        ("debug_driver.c", &driver),
+    ] {
+        if let Err(e) = std::fs::write(out_dir.join(name), text) {
+            return bad(&format!("writing {name}: {e}"));
+        }
+    }
+    let exe_name = if cfg!(windows) {
+        format!("{entry_name}_debug.exe")
+    } else {
+        format!("{entry_name}_debug")
+    };
+    let sources = ["openlustre_generated.c", "debug_driver.c"];
+    let log = match crate::scenario::compile_in_dir_defs(
+        &out_dir,
+        &sources,
+        &exe_name,
+        Some(compiler),
+        &["OL_DEBUG"],
+    ) {
+        Ok(l) => l,
+        Err(e) => {
+            let v = serde_json::json!({ "ok": false, "compiled": false, "log": e });
+            return (200, "application/json", v.to_string().into_bytes());
+        }
+    };
+
+    let exe = out_dir.join(&exe_name);
+    let (launched, note) = launch_in_terminal(&exe);
+    let value = serde_json::json!({
+        "ok": true,
+        "compiled": true,
+        "launched": launched,
+        "exe": exe.display().to_string(),
+        "message": note,
+        "log": log,
+    });
+    (200, "application/json", value.to_string().into_bytes())
+}
+
+/// Open the compiled executable in its own terminal window so the user can
+/// watch it run. Windows pops a `cmd` window that stays open; other platforms
+/// try common terminals, falling back to a detached run.
+fn launch_in_terminal(exe: &std::path::Path) -> (bool, String) {
+    let exe_str = exe.display().to_string();
+    #[cfg(windows)]
+    {
+        // `cmd /c start "" cmd /k "<exe>"` — the empty title keeps the exe path
+        // from being parsed as the window title; /k leaves the window open.
+        let r = std::process::Command::new("cmd")
+            .args(["/c", "start", "", "cmd", "/k", &exe_str])
+            .spawn();
+        match r {
+            Ok(_) => (true, "launched in a new terminal window".into()),
+            Err(e) => (false, format!("compiled, but could not open a terminal: {e}")),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        for (term, args) in [
+            ("x-terminal-emulator", vec!["-e"]),
+            ("gnome-terminal", vec!["--"]),
+            ("xterm", vec!["-e"]),
+        ] {
+            if std::process::Command::new(term)
+                .args(&args)
+                .arg(&exe_str)
+                .spawn()
+                .is_ok()
+            {
+                return (true, format!("launched in {term}"));
+            }
+        }
+        match std::process::Command::new(&exe_str).spawn() {
+            Ok(_) => (true, "no terminal found — running detached".into()),
+            Err(e) => (false, format!("compiled, but could not run: {e}")),
+        }
+    }
 }

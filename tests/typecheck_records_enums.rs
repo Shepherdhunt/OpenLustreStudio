@@ -80,6 +80,7 @@ fn record_field_access_resolves_to_field_type() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![msg_type]));
     assert!(
@@ -107,6 +108,7 @@ fn unknown_record_field_errors() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![msg_type]));
     assert!(codes(&report).contains(&"E0120"), "got {:?}", codes(&report));
@@ -130,6 +132,7 @@ fn enum_variant_is_resolved_as_its_enum_type() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![color]));
     assert!(!report.has_errors(), "got {:?}", codes(&report));
@@ -153,6 +156,7 @@ fn type_alias_resolves_when_comparing_types() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![alt]));
     assert!(!report.has_errors(), "got {:?}", codes(&report));
@@ -174,6 +178,7 @@ fn integer_literal_adopts_hint_when_in_range() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(!report.has_errors(), "got {:?}", codes(&report));
@@ -195,6 +200,7 @@ fn integer_literal_out_of_range_for_target_errors() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(codes(&report).contains(&"E0040"), "got {:?}", codes(&report));
@@ -216,6 +222,7 @@ fn arithmetic_with_typed_var_and_literal_keeps_var_type() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(!report.has_errors(), "got {:?}", codes(&report));
@@ -240,6 +247,7 @@ fn arithmetic_with_mismatched_widths_still_errors() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(codes(&report).contains(&"E0086"), "got {:?}", codes(&report));
@@ -267,6 +275,7 @@ fn array_index_must_be_integer() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(codes(&report).contains(&"E0111"), "got {:?}", codes(&report));
@@ -294,6 +303,7 @@ fn array_index_with_int_literal_resolves_to_element_type() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     assert!(!report.has_errors(), "got {:?}", codes(&report));
@@ -325,6 +335,7 @@ fn negative_literal_fits_signed_but_not_unsigned() {
         ],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![]));
     // The signed assignment is fine; the unsigned assignment must error.

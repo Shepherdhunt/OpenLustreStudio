@@ -46,6 +46,7 @@ fn build_faulty_latch_project() -> Project {
         }],
         contract: Some("FaultyLatch_contract".into()),
         diagram: Default::default(),
+            probes: vec![],
     };
 
     // Contract: one named guarantee.

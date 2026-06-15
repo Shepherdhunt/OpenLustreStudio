@@ -1000,6 +1000,7 @@ fn starter_project() -> ol_ir::Project {
         }],
         contract: None,
         diagram: Default::default(),
+        probes: vec![],
     };
     Project {
         name: "welcome".into(),

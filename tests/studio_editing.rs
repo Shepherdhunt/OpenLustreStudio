@@ -284,6 +284,73 @@ fn author_comparison_and_gate_logic_then_generate_code() {
     assert!(csrc.contains("in->roll"), "reads the input: {csrc}");
 }
 
+/// The SCADE build pipeline: building the model checks validity and writes
+/// `<main>.lus` to the project folder, and a log message (debug probe)
+/// round-trips and lands in the generated C under `#ifdef OL_DEBUG`.
+#[test]
+fn build_writes_lus_and_log_messages_reach_generated_c() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let json = |path: &str, body: &str| -> (u16, serde_json::Value) {
+        let (s, b) = request(port, "POST", path, body).expect(path);
+        let v = serde_json::from_str(&b).unwrap_or(serde_json::Value::Null);
+        (s, v)
+    };
+
+    // The example's main is ReleaseLogic — a clean model. Build it.
+    let (s, d) = json("/api/build", "");
+    assert_eq!(s, 200, "build: {d}");
+    assert_eq!(d["ok"], true, "model should build: {d}");
+    assert!(d["lustre"].as_str().unwrap().contains("node ReleaseLogic"), "lustre: {d}");
+    // …and the operator's Lustre is now a file in the project folder.
+    let lus = g.tmp.join("ReleaseLogic.lus");
+    assert!(lus.exists(), "expected {} to be written", lus.display());
+    assert!(std::fs::read_to_string(&lus).unwrap().contains("node ReleaseLogic"));
+
+    // Add a log message for an output, SCADE's "log message" probe.
+    let (s, _) = request(port, "POST", "/api/edit/add_probe",
+        r#"{"node":"ReleaseLogic","var":"release_cmd","label":"cmd"}"#).expect("add_probe");
+    assert_eq!(s, 200);
+    let (s, b) = request(port, "GET", "/api/diagram?node=ReleaseLogic", "").unwrap();
+    assert_eq!(s, 200);
+    let dg: serde_json::Value = serde_json::from_str(&b).unwrap();
+    let probes = dg["probes"].as_array().unwrap();
+    assert!(probes.iter().any(|p| p["var"] == "release_cmd" && p["label"] == "cmd"), "{probes:?}");
+
+    // The generated C carries the probe, guarded so production builds skip it.
+    let (s, csrc) = request(port, "GET", "/api/clite/source", "").unwrap();
+    assert_eq!(s, 200);
+    assert!(csrc.contains("#ifdef OL_DEBUG"), "debug guard: {csrc}");
+    assert!(csrc.contains("\"cmd: %s\\n\""), "probe printf: {csrc}");
+
+    // A probe on an unknown variable is rejected.
+    let (s, _) = request(port, "POST", "/api/edit/add_probe",
+        r#"{"node":"ReleaseLogic","var":"nope","label":"x"}"#).unwrap();
+    assert_eq!(s, 400, "unknown probe var must be rejected");
+}
+
+/// A model with an error does not build, is not written, and stays gated.
+#[test]
+fn an_invalid_model_does_not_build() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    for (p, b) in [
+        ("/api/edit/add_node", r#"{"name":"Broken","kind":"operator"}"#),
+        ("/api/edit/add_port", r#"{"node":"Broken","side":"output","name":"y","type":"bool"}"#),
+        ("/api/edit/add_equation", r#"{"node":"Broken","lhs":"y","body":"y and missing"}"#),
+        ("/api/edit/set_main", r#"{"main":"Broken"}"#),
+    ] {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    }
+    let (s, body) = request(port, "POST", "/api/build", "").expect("build");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], false, "broken model must not build: {d}");
+    assert!(d["errors"].as_u64().unwrap() >= 1);
+    assert!(!g.tmp.join("Broken.lus").exists(), "no .lus for a model that didn't build");
+}
+
 #[test]
 fn bad_equation_body_is_rejected_with_400() {
     let g = start_server_on_copy();

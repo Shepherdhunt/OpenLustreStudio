@@ -642,6 +642,19 @@ pub(crate) fn compile_in_dir(
     exe_name: &str,
     which: Option<&str>,
 ) -> Result<String, String> {
+    compile_in_dir_defs(dir, source_names, exe_name, which, &[])
+}
+
+/// Like [`compile_in_dir`] but with extra preprocessor `defines` (macro
+/// names) — `-D<name>` for POSIX compilers, `/D<name>` for MSVC. Used to
+/// turn on `OL_DEBUG` for the debug-run build.
+pub(crate) fn compile_in_dir_defs(
+    dir: &Path,
+    source_names: &[&str],
+    exe_name: &str,
+    which: Option<&str>,
+    defines: &[&str],
+) -> Result<String, String> {
     let compiler = match which {
         None | Some("auto") => {
             find_compiler().ok_or("no C compiler found (cc/gcc/clang on PATH, or MSVC)")?
@@ -673,10 +686,12 @@ pub(crate) fn compile_in_dir(
     let (out, desc) = match compiler {
         CompilerKind::Posix(name) => {
             let exe = dir.join(exe_name);
-            let out = Command::new(name)
-                .current_dir(dir)
-                .args(["-std=c11", "-Wall", "-O2", "-o"])
-                .arg(&exe)
+            let mut cmd = Command::new(name);
+            cmd.current_dir(dir).args(["-std=c11", "-Wall", "-O2", "-o"]).arg(&exe);
+            for d in defines {
+                cmd.arg(format!("-D{d}"));
+            }
+            let out = cmd
                 .args(source_names)
                 .arg("-I.")
                 .output()
@@ -689,6 +704,9 @@ pub(crate) fn compile_in_dir(
                 "\"{}\" >NUL 2>&1 && cl /nologo /std:c11 /W3 /O2 /Fe:{exe_name}",
                 vcvars.display()
             );
+            for d in defines {
+                cmdline.push_str(&format!(" /D{d}"));
+            }
             for s in source_names {
                 cmdline.push(' ');
                 cmdline.push_str(s);

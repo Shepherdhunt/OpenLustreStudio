@@ -48,6 +48,7 @@ fn srflipflop_library_block_loads_lowers_and_simulates() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let project = build_with_stdlib(node, "Latched");
     let report = ol_typecheck::check_project(&project);

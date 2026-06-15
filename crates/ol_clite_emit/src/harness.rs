@@ -146,6 +146,76 @@ fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32) {
     let _ = writeln!(s, "    printf(\"]\");");
 }
 
+/// A free-running DEBUG driver: no CSV, inputs held at their type defaults,
+/// printing a start banner, the held inputs, and the outputs + any log-message
+/// probes every `STRIDE` cycles. Compiled with `-DOL_DEBUG`, this is the
+/// "run it and watch it tick" build the GUI launches in a terminal.
+pub fn emit_debug_driver(node: &NodeDef) -> String {
+    const STRIDE: u32 = 50;
+    const STEPS: u32 = 500;
+    let mut s = String::new();
+    let prefix = &node.name;
+    let _ = writeln!(s, "/* OpenLustre DEBUG driver for {prefix}. */");
+    let _ = writeln!(s, "#include \"openlustre_generated.h\"");
+    let _ = writeln!(s, "#include <stdio.h>");
+    let _ = writeln!(s, "#include <string.h>");
+    // `_step` reads this flag (under OL_DEBUG) to decide when to print probes.
+    let _ = writeln!(s, "int ol_dbg_print = 0;");
+    s.push('\n');
+    let _ = writeln!(s, "int main(void) {{");
+    let _ = writeln!(
+        s,
+        "  printf(\"=== OpenLustre debug run: {prefix} (held inputs, every {STRIDE} steps) ===\\n\");"
+    );
+    if node.kind != NodeKind::Function {
+        let _ = writeln!(s, "  {prefix}_State state;");
+        let _ = writeln!(s, "  {prefix}_init(&state);");
+    }
+    let _ = writeln!(s, "  {prefix}_Input in;");
+    let _ = writeln!(s, "  {prefix}_Output out;");
+    let _ = writeln!(s, "  memset(&in, 0, sizeof(in));");
+
+    // Banner: the top operator's (default) input values.
+    let _ = writeln!(s, "  printf(\"initial inputs: \");");
+    for p in &node.inputs {
+        let _ = writeln!(s, "  {}", dbg_field(&p.ty, &format!("in.{}", crate::c_ident(&p.name)), &p.name));
+    }
+    if node.inputs.is_empty() {
+        let _ = writeln!(s, "  printf(\"(none)\");");
+    }
+    let _ = writeln!(s, "  printf(\"\\n\");");
+
+    let _ = writeln!(s, "  for (int step = 0; step < {STEPS}; step++) {{");
+    let _ = writeln!(s, "    ol_dbg_print = (step % {STRIDE} == 0);");
+    if node.kind != NodeKind::Function {
+        let _ = writeln!(s, "    {prefix}_step(&state, &in, &out);");
+    } else {
+        let _ = writeln!(s, "    {prefix}_step(&in, &out);");
+    }
+    let _ = writeln!(s, "    if (ol_dbg_print) {{");
+    let _ = writeln!(s, "      printf(\"step %d | \", step);");
+    for p in &node.outputs {
+        let _ = writeln!(s, "      {}", dbg_field(&p.ty, &format!("out.{}", crate::c_ident(&p.name)), &p.name));
+    }
+    let _ = writeln!(s, "      printf(\"\\n\");");
+    let _ = writeln!(s, "    }}");
+    let _ = writeln!(s, "  }}");
+    let _ = writeln!(s, "  printf(\"done after {STEPS} steps.\\n\");");
+    let _ = writeln!(s, "  return 0;");
+    let _ = writeln!(s, "}}");
+    s
+}
+
+/// One `printf` that labels and prints a scalar struct field by type.
+fn dbg_field(ty: &Type, access: &str, name: &str) -> String {
+    match ty {
+        Type::Bool => format!("printf(\"{name}=%s \", {access} ? \"true\" : \"false\");"),
+        t if t.is_float() => format!("printf(\"{name}=%g \", (double) {access});"),
+        t if t.is_integer() => format!("printf(\"{name}=%lld \", (long long) {access});"),
+        _ => format!("printf(\"{name}=? \");"),
+    }
+}
+
 fn parse_expr(ty: &Type, tok: &str) -> String {
     match ty {
         Type::Bool => format!(

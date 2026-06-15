@@ -37,6 +37,18 @@ pub struct Equation {
     pub rhs: Expr,
 }
 
+/// A debug log probe — SCADE's "log message". Observation-only: it does not
+/// affect the dataflow, but in a debug run the generated C prints
+/// `<label>: <value>` for the named variable. `var` must be a name in the
+/// node (input, output, or local).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Probe {
+    /// The text shown before the value, e.g. `"altitude"`.
+    pub label: String,
+    /// The variable whose value is logged.
+    pub var: String,
+}
+
 /// Position of one diagram element. Keys in [`DiagramLayout::positions`] use
 /// the same ids the Studio diagram API serves: port and local names, and
 /// `eqN` for the N-th equation box.
@@ -77,6 +89,9 @@ pub struct NodeDef {
     pub contract: Option<String>,
     #[serde(default)]
     pub diagram: DiagramLayout,
+    /// Debug log probes — printed by a debug run, ignored by normal codegen.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub probes: Vec<Probe>,
 }
 
 impl NodeDef {

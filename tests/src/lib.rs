@@ -54,6 +54,7 @@ pub fn build_release_logic_project() -> Project {
         ],
         contract: Some("ReleaseLogic_contract".into()),
         diagram: Default::default(),
+        probes: vec![],
     };
 
     let helper = NodeDef {
@@ -68,6 +69,7 @@ pub fn build_release_logic_project() -> Project {
         }],
         contract: None,
         diagram: Default::default(),
+        probes: vec![],
     };
 
     let contract = serde_json::json!({

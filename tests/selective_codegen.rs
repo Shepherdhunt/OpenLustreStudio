@@ -50,6 +50,7 @@ fn cluttered_project() -> Project {
         ],
         contract: Some("Main_contract".into()),
         diagram: Default::default(),
+            probes: vec![],
     };
     let unrelated = NodeDef {
         name: "Unrelated".into(),
@@ -66,6 +67,7 @@ fn cluttered_project() -> Project {
         }],
         contract: Some("Unrelated_contract".into()),
         diagram: Default::default(),
+            probes: vec![],
     };
     let main_contract = serde_json::json!({
         "name": "Main_contract",

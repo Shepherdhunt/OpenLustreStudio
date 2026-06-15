@@ -182,6 +182,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         equations,
         contract: sm.contract.clone(),
         diagram: Default::default(),
+        probes: Vec::new(),
     };
 
     Ok(LoweredMachine {

@@ -167,6 +167,7 @@ fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagno
         equations: vec![],
         contract: None,
         diagram: Default::default(),
+        probes: Vec::new(),
     };
     let empty_env: BTreeMap<String, Type> = BTreeMap::new();
     let empty_sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
@@ -385,6 +386,19 @@ fn check_node(
                         "combinational cycle without a temporal break: {}",
                         cycle.join(" -> ")
                     ),
+                )
+                .with_context(ctx.clone()),
+            );
+        }
+    }
+
+    // Debug log probes must name a real variable in the node.
+    for p in &node.probes {
+        if !env.contains_key(&p.var) {
+            diags.push(
+                Diagnostic::error(
+                    "E0150",
+                    format!("log message references unknown variable `{}`", p.var),
                 )
                 .with_context(ctx.clone()),
             );

@@ -54,6 +54,7 @@ fn build_edge_counter_project() -> Project {
         ],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     Project {
         name: "edge_counter".into(),

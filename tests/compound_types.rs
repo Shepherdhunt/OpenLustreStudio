@@ -68,6 +68,7 @@ fn array_node() -> NodeDef {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     }
 }
 
@@ -105,6 +106,7 @@ fn record_node() -> NodeDef {
         ],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     }
 }
 
@@ -130,6 +132,7 @@ fn enum_node() -> NodeDef {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     }
 }
 

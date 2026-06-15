@@ -38,6 +38,7 @@ fn dummy_node(name: &str, contract: Option<&str>) -> NodeDef {
         }],
         contract: contract.map(|s| s.into()),
         diagram: Default::default(),
+            probes: vec![],
     }
 }
 

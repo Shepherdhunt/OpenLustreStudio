@@ -55,6 +55,7 @@ fn bit_ops_typecheck_and_simulate_correctly() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let project = Project {
         name: "bits".into(),
@@ -102,6 +103,7 @@ fn bit_ops_reject_non_integer_operands() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let report = ol_typecheck::check_project(&Project {
         name: "bad".into(),
@@ -172,6 +174,7 @@ fn arinc429_decoders_extract_the_right_fields() {
         ],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
 
     let mut project = Project {
@@ -228,6 +231,7 @@ fn generated_c_for_bit_ops_compiles_and_matches_ir_simulator() {
         }],
         contract: None,
         diagram: Default::default(),
+            probes: vec![],
     };
     let project = Project {
         name: "bits".into(),

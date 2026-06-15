@@ -93,6 +93,26 @@ verification burden the qualified tool would otherwise discharge.
 
 ## 6. What closed recently
 
+### 2026-06-13 — the SCADE build pipeline + log messages
+
+A four-step pipeline in the Build dock, gated like SCADE's:
+
+* **1 · Build Model** is the model-checker step: type- and contract-check, and
+  on a clean check emit the main operator's Lustre (root + dependencies) and
+  write it to `<main>.lus` in the project folder. The Lustre pane is empty
+  until then — *the model code exists only after a successful build* — and any
+  edit re-locks the gate (a content fingerprint detects the change).
+* **2 · Run Simulation** is gated on a successful build (you cannot simulate an
+  unbuilt operator), **3 · Generate C-Lite** shows the generated C, and
+  **4 · Compile & Run (debug)** compiles with `-DOL_DEBUG` and launches the
+  executable in its own terminal window — a free run that prints a banner, the
+  held inputs, and the outputs plus log messages every 50 cycles.
+* **Log messages** (SCADE's debug probes): `NodeDef.probes` = `{label, var}`,
+  added via Insert ▸ Log Message, type-checked (the var must exist, E0150),
+  and emitted as a `printf` inside `_step` under `#ifdef OL_DEBUG` — so a
+  probe prints `label: value` in the debug run while production C and the
+  dual-backend equivalence tests never see it.
+
 ### 2026-06-13 — authoring & simulation ergonomics
 
 Three round-two GUI gaps from live demo feedback:
