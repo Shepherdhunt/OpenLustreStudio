@@ -19,8 +19,15 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** project & code-pane fixes from demo
-feedback — **empty new projects** (`openlustre new --empty`, no starter
+**Landed recently (newest first):** **Types and Constants tree nodes**
+(SCADE-style, between the operators and the libraries) — a Types node listing
+the project's named types (opens the type editor), and a Constants node for
+project-wide constants (`NAME : type = value`, all-caps by convention, add via a
+dialog, right-click to delete; referenced in operators like any global,
+`out = NAME`). Scalar constants (int/uint/float/bool) work end to end; composite
+values (arrays/structs/strings) await array-literal expression parsing. Before
+that: project & code-pane fixes from demo feedback — **empty new projects**
+(`openlustre new --empty`, no starter
 operator; the Studio serves a blank project and stays editable); a **right-click
 operator menu** in the workspace tree (Build this operator / Add Input / Add
 Output / Add Local / Set as Main — the discoverable "build *this* operator"
@@ -61,6 +68,12 @@ symbols; typed wire labels.
    so this is structural (nest it in `NodeDef`) plus a real editor.
 3. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
    on the canvas, and a right-click "wrap text / don't wrap" per box.
+   *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
+   it (construct an array/struct from element inputs, or destructure one) — a
+   Structures/Arrays authoring feature tied to the Types node.
+   *Also:* **composite constant values** — array/struct/string (`char[]`)
+   constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
+   scalar constants parse) plus a `char` type; scalar constants already work.
 4. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
    add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
    generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
@@ -160,6 +173,30 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (later still) — Types & Constants tree nodes
+
+SCADE puts **Types** and **Constants** in the model browser between the
+operators and the libraries; now so do we.
+
+* **Types node** — lists the project's named types (enum / record / alias)
+  with a kind hint; clicking a type or "New type…" opens the existing Types
+  editor, right-click deletes. (The data was already in `/api/inspect`; this
+  surfaces it in the tree.)
+* **Constants node** — project-wide constants, all-caps by convention
+  (`NAME : type = value`). The whole IR pipeline already supported `ConstDef`
+  (typecheck registers them, the simulator evaluates them, both emitters emit
+  `const` declarations, slicing keeps the used ones); what was missing was the
+  *editing* surface. New `/api/edit/add_constant` (upper-cases the name, parses
+  the type and value, saves into the project-global types file) and
+  `/api/edit/remove_constant`; the inspect now carries each constant's formatted
+  value. A dialog adds them; the tree lists them; an operator uses one like any
+  global (`out = MAX_SPEED` → `const MAX_SPEED : int = 32;` in the emitted
+  Lustre). Verified end to end + a workspace test.
+* **Scope:** scalar constants (int/uint/float/bool) work fully. Array / struct /
+  string (`char[]`) constant *values* need array-literal syntax in
+  `ol_stdlib::parse_expr` (it parses scalars, not `[1;2;3]`) and a `char` type —
+  logged in §0 alongside the requested drag-a-type-to-MAKE/FLATTEN authoring.
 
 ### 2026-06-16 (later) — empty projects, operator right-click menu, gated/copyable code panes
 

@@ -276,6 +276,8 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         },
         ("POST", "/api/edit/add_type") => add_type_response(ctx, body),
         ("POST", "/api/edit/remove_type") => remove_type_response(ctx, body),
+        ("POST", "/api/edit/add_constant") => add_constant_response(ctx, body),
+        ("POST", "/api/edit/remove_constant") => remove_constant_response(ctx, body),
         ("POST", "/api/edit/update_port") => {
             apply_edit_response(ctx, body, edit_update_port)
         }
@@ -1775,6 +1777,124 @@ fn remove_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
     }
     (400, "application/json", json_error(&format!(
         "type `{name}` not found in the editable files (stdlib types cannot be removed)"
+    )).into_bytes())
+}
+
+/// Create a project-wide constant `{name, type, value}`. Constants are
+/// SCADE-style all-caps by convention (the name is upper-cased here), carry a
+/// declared data type, and a constant value expression. They are saved into the
+/// workspace types file (project-global, reached via `includes`) — falling back
+/// to the model file — and the project typechecker reports a value/type
+/// mismatch on the next refresh. Operators reference a constant by name like
+/// any global (`out = NAME`); the emitters and simulator already resolve them.
+fn add_constant_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let raw_name = match req.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.trim(),
+        None => return bad("missing string field `name`"),
+    };
+    if !is_identifier(raw_name) {
+        return bad(&format!("`{raw_name}` is not a valid constant name"));
+    }
+    // All-caps by convention (SCADE constants).
+    let name = raw_name.to_uppercase();
+    let ty_str = match req.get("type").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return bad("missing string field `type`"),
+    };
+    let ty = match ol_stdlib::parse_type(ty_str) {
+        Ok(t) => t,
+        Err(e) => return bad(&format!("type `{ty_str}`: {e}")),
+    };
+    let value_str = match req.get("value").and_then(|v| v.as_str()) {
+        Some(v) => v.trim(),
+        None => return bad("missing string field `value`"),
+    };
+    if value_str.is_empty() {
+        return bad("a constant needs a value (e.g. 32, true, [1;2;3])");
+    }
+    let value = match ol_stdlib::parse_expr(value_str) {
+        Ok(e) => e,
+        Err(e) => return bad(&format!("value `{value_str}`: {e}")),
+    };
+
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if full.packages.iter().any(|p| p.constants.iter().any(|c| c.name == name)) {
+        return bad(&format!("constant `{name}` already exists"));
+    }
+    if full.packages.iter().any(|p| p.nodes.iter().any(|n| n.name == name)) {
+        return bad(&format!("`{name}` already names an operator"));
+    }
+
+    let target_path = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let before = take_snapshot(ctx);
+    let mut doc = match load_raw_path(&target_path) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if doc.packages.is_empty() {
+        doc.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
+    }
+    doc.packages[0].constants.push(ol_ir::ConstDef { name, ty, value });
+    if let Err(e) = save_raw_path(&target_path, &doc) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    record_edit(ctx, before);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Remove a project constant from whichever editable file defines it (types
+/// file first, then the model file). Uses of a removed constant surface as
+/// typecheck errors on the next refresh rather than blocking the removal.
+fn remove_constant_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return (400, "application/json", json_error(&format!("bad JSON: {e}")).into_bytes()),
+    };
+    let name = match req.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return (400, "application/json", json_error("missing string field `name`").into_bytes()),
+    };
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(t) = &ctx.types_file {
+        candidates.push(t.clone());
+    }
+    candidates.push(ctx.model.clone());
+    for path in candidates {
+        let mut doc = match load_raw_path(&path) {
+            Ok(p) => p,
+            Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+        };
+        let mut removed = false;
+        for pkg in &mut doc.packages {
+            let n = pkg.constants.len();
+            pkg.constants.retain(|c| c.name != name);
+            removed |= pkg.constants.len() != n;
+        }
+        if removed {
+            let before = take_snapshot(ctx);
+            if let Err(e) = save_raw_path(&path, &doc) {
+                return (500, "application/json", json_error(&e).into_bytes());
+            }
+            record_edit(ctx, before);
+            return match build_inspect(ctx) {
+                Ok(b) => (200, "application/json", b.into_bytes()),
+                Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+            };
+        }
+    }
+    (400, "application/json", json_error(&format!(
+        "constant `{name}` not found in the editable files"
     )).into_bytes())
 }
 

@@ -110,6 +110,8 @@
   .node:hover { background: #e3eef9; }
   .node.selected { background: #cce4f7; outline: 1px solid #99c9ef; }
   .node .kind { display: inline-block; width: 13px; color: #2b579a; font-weight: 600; }
+  .node .tree-meta { color: #888; }
+  .node.add-row { color: #2b579a; font-style: italic; }
   .diag { padding: 3px 12px; font-size: 12px; line-height: 1.45; cursor: default;
           border-bottom: 1px solid #e6e6e6; background: #fff; }
   .diag:hover { background: #f0f6fc; }
@@ -316,6 +318,7 @@
     <span class="menu-title">Project</span>
     <div class="dropdown">
       <div class="mi" onclick="openDialog('dlg-types'); loadTypes()">Types…</div>
+      <div class="mi" onclick="openConstantDialog()">Constants…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="showDock('tests'); loadTests(); testsRun()">Run Test Scenarios</div>
       <div class="mi" onclick="showDock('tests'); testsRecord()">Record Golden Traces</div>
@@ -555,6 +558,23 @@
     <div class="build-note" id="types-status"></div>
   </div>
 
+  <div class="dlg" id="dlg-constant">
+    <p>A project-wide constant — <strong>ALL-CAPS</strong> by convention, with a data type and a value. Persists across the whole project; use it in any operator like a global (e.g. <code class="inline">out = MAX_SPEED</code>).</p>
+    <div class="edit-form">
+      <div class="row">
+        <label>name</label><input id="const-name" placeholder="MAX_SPEED">
+        <label>type</label><select id="const-type"></select>
+        <input id="const-type-custom" placeholder="custom e.g. int32[4]" style="width:150px">
+      </div>
+      <div class="row">
+        <label>value</label><input id="const-value" style="flex:1" placeholder="32    ·    true    ·    1.5    ·    -5">
+        <button class="primary" onclick="editAddConstant()">Create</button>
+      </div>
+      <p class="build-note">Examples: <code class="inline">MAX : uint16 = 32</code>, <code class="inline">GAIN : float32 = 1.5</code>, <code class="inline">ENABLED : bool = true</code>. Array / structure / string (char) constant values are a coming enhancement.</p>
+      <div class="build-note" id="const-status"></div>
+    </div>
+  </div>
+
   <div class="dlg" id="dlg-fsm">
     <p>State machines lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
     <div class="row">machine <select id="fsm-select"></select> <button onclick="fsmView()">View</button></div>
@@ -701,7 +721,7 @@ document.querySelectorAll("#menubar .mi").forEach(mi => {
 const DLG_TITLES = {
   "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
-  "dlg-types": "Types", "dlg-fsm": "State Machines",
+  "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-fsm": "State Machines",
   "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
   "dlg-logmsg": "Insert Log Message",
 };
@@ -793,6 +813,130 @@ async function copySidePane(btn) {
   }
 }
 
+// --- Workspace tree: persisted folders, Types & Constants nodes --------------
+
+// A <details> whose open/closed state is remembered across tree rebuilds: first
+// time it uses `defOpen`, after that the user's last choice wins (so the 5 s
+// inspect-poll rebuild never collapses a folder you opened).
+function mkDetails(key, defOpen) {
+  const det = document.createElement("details");
+  det.open = key in state.treeOpen ? state.treeOpen[key] : defOpen;
+  det.addEventListener("toggle", () => { state.treeOpen[key] = det.open; });
+  return det;
+}
+
+// SCADE-style "Types" tree node: lists the project's named types; clicking a
+// type (or "New type…") opens the Types editor; right-click to delete.
+function buildTypesNode(host, types) {
+  const det = mkDetails("__types__", false);
+  const sum = document.createElement("summary");
+  sum.innerHTML = 'Types <span class="badge">' + types.length + '</span>';
+  det.appendChild(sum);
+  for (const t of types) {
+    const kind = t.body && t.body.kind ? t.body.kind.toLowerCase() : "type";
+    const d = document.createElement("div");
+    d.className = "node";
+    d.innerHTML = '<span class="kind">T</span> ' + escapeHTML(t.name) +
+      ' <span class="tree-meta">' + escapeHTML(kind) + '</span>';
+    d.onclick = () => { openDialog("dlg-types"); loadTypes(); };
+    d.oncontextmenu = ev => typeTreeMenu(ev, t.name);
+    det.appendChild(d);
+  }
+  const add = document.createElement("div");
+  add.className = "node add-row";
+  add.textContent = "＋ New type…";
+  add.onclick = () => { openDialog("dlg-types"); loadTypes(); };
+  det.appendChild(add);
+  host.appendChild(det);
+}
+
+// SCADE-style "Constants" tree node: project-wide constants, each NAME : type =
+// value. "New constant…" opens the dialog; right-click to delete.
+function buildConstantsNode(host, consts) {
+  const det = mkDetails("__constants__", false);
+  const sum = document.createElement("summary");
+  sum.innerHTML = 'Constants <span class="badge">' + consts.length + '</span>';
+  det.appendChild(sum);
+  for (const c of consts) {
+    const d = document.createElement("div");
+    d.className = "node";
+    d.innerHTML = '<span class="kind">K</span> ' + escapeHTML(c.name) +
+      ' <span class="tree-meta">: ' + escapeHTML(typeName(c.type)) +
+      (c.value != null ? " = " + escapeHTML(String(c.value)) : "") + '</span>';
+    d.oncontextmenu = ev => constantTreeMenu(ev, c.name);
+    det.appendChild(d);
+  }
+  const add = document.createElement("div");
+  add.className = "node add-row";
+  add.textContent = "＋ New constant…";
+  add.onclick = () => openConstantDialog();
+  det.appendChild(add);
+  host.appendChild(det);
+}
+
+function typeTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const item = (label, fn) => {
+    const d = document.createElement("div");
+    d.className = "ctx-item"; d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    m.appendChild(d);
+  };
+  item("Edit types…", () => { openDialog("dlg-types"); loadTypes(); });
+  item("Delete " + name, () => typesRemove(name));
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
+}
+
+function constantTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const d = document.createElement("div");
+  d.className = "ctx-item"; d.textContent = "Delete " + name;
+  d.onclick = () => { hideCtxMenu(); removeConstant(name); };
+  m.appendChild(d);
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
+}
+
+function openConstantDialog() {
+  openDialog("dlg-constant");
+  document.getElementById("const-name").value = "";
+  document.getElementById("const-value").value = "";
+  document.getElementById("const-type-custom").value = "";
+  document.getElementById("const-status").textContent = "";
+  populateTypeSelect(document.getElementById("const-type"));
+}
+
+async function editAddConstant() {
+  const payload = {
+    name: document.getElementById("const-name").value.trim(),
+    type: selectedType("const-type", "const-type-custom"),
+    value: document.getElementById("const-value").value.trim(),
+  };
+  const r = await fetch("/api/edit/add_constant", { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    document.getElementById("const-status").textContent = msg;
+    return;
+  }
+  closeDialog();
+  await refresh();
+}
+
+async function removeConstant(name) {
+  await postEdit("/api/edit/remove_constant", { name });
+}
+
 // --- Project refresh -------------------------------------------------------------
 
 async function refresh() {
@@ -826,14 +970,6 @@ async function refresh() {
     d.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
     return d;
   };
-  // A <details> whose open/closed state is remembered across tree rebuilds:
-  // first time it uses `defOpen`, after that the user's last choice wins.
-  const mkDetails = (key, defOpen) => {
-    const det = document.createElement("details");
-    det.open = key in state.treeOpen ? state.treeOpen[key] : defOpen;
-    det.addEventListener("toggle", () => { state.treeOpen[key] = det.open; });
-    return det;
-  };
   const mkPackage = (pkg, host) => {
     const det = mkDetails("pkg:" + pkg.name, pkg.name !== "stdlib");
     const sum = document.createElement("summary");
@@ -863,6 +999,11 @@ async function refresh() {
   for (const pkg of ins.project.packages.filter(p => p.name !== "stdlib")) {
     mkPackage(pkg, pkgs);
   }
+  // SCADE-style project-wide Types and Constants, between the operators and the
+  // libraries. Aggregated across the user packages.
+  const userPkgs = ins.project.packages.filter(p => p.name !== "stdlib");
+  buildTypesNode(pkgs, userPkgs.flatMap(p => p.types || []));
+  buildConstantsNode(pkgs, userPkgs.flatMap(p => p.constants || []));
   const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
   if (libPkgs.length) {
     const lib = mkDetails("__libraries__", false);

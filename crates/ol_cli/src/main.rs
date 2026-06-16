@@ -595,6 +595,7 @@ pub(crate) fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
         "constants": pkg.constants.iter().map(|c| serde_json::json!({
             "name": c.name,
             "type": c.ty,
+            "value": ol_lustre_emit::format_expr(&c.value),
         })).collect::<Vec<_>>(),
         "nodes": nodes,
         "contracts": contract_summary,

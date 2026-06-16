@@ -172,6 +172,47 @@ fn empty_new_project_has_no_operators_and_is_editable() {
     assert!(names.contains(&"First".to_string()), "added operator should appear: {names:?}");
 }
 
+/// Project-wide constants: add one via the API (the name upper-cases by
+/// convention), see it in inspect as NAME : type = value, reference it from an
+/// operator (`out = NAME`) so the operator builds clean with the constant in
+/// its Lustre, then remove it.
+#[test]
+fn project_constants_add_use_and_remove() {
+    let g = start_server_on_workspace("ws_const");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_constant", r#"{"name":"max_speed","type":"uint16","value":"32"}"#);
+    let ins = get_json(port, "/api/inspect");
+    let consts: Vec<serde_json::Value> = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["constants"].as_array().cloned().unwrap_or_default())
+        .collect();
+    let c = consts.iter().find(|c| c["name"] == "MAX_SPEED").expect("MAX_SPEED present");
+    assert_eq!(c["value"], "32", "value shown in inspect: {c}");
+
+    // Reference it from a fresh operator — out = MAX_SPEED builds clean.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"UsesConst","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"UsesConst","side":"output","name":"out","type":"uint16"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"UsesConst","lhs":"out","body":"MAX_SPEED"}"#);
+    let (s, body) = request(port, "POST", "/api/build", r#"{"node":"UsesConst"}"#).expect("build");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], true, "operator using a constant should build: {d}");
+    assert!(d["lustre"].as_str().unwrap().contains("MAX_SPEED"), "constant in lustre: {d}");
+
+    // A duplicate (case-folded) name is rejected.
+    let (s2, _) = request(port, "POST", "/api/edit/add_constant",
+        r#"{"name":"MAX_SPEED","type":"int8","value":"1"}"#).expect("dup");
+    assert_eq!(s2, 400, "duplicate constant name must be rejected");
+
+    // Remove it.
+    post_ok(port, "/api/edit/remove_constant", r#"{"name":"MAX_SPEED"}"#);
+    let ins2 = get_json(port, "/api/inspect");
+    let still = ins2["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["constants"].as_array().cloned().unwrap_or_default())
+        .any(|c| c["name"] == "MAX_SPEED");
+    assert!(!still, "constant removed");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]
