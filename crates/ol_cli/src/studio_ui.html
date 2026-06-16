@@ -190,6 +190,7 @@
   svg .box.selected { stroke: #2b579a; stroke-width: 2.6; }
   svg .pin { fill: #fff; stroke: #2b579a; stroke-width: 1.4; cursor: crosshair; }
   svg .pin:hover { fill: #2b579a; }
+  svg .pin.unbound { stroke: #d11a1a; fill: #fdeeee; }
   /* Input pins on a gate's left edge: blue when bound, red when unbound. */
   svg .inpin { fill: #fff; stroke: #2b579a; stroke-width: 1.4; }
   svg .inpin.unbound { stroke: #d11a1a; fill: #fdeeee; }
@@ -382,10 +383,15 @@
       <div id="tests-results"></div>
     </div>
     <div class="dock-pane" id="dock-build" style="display:none">
+      <div class="row" style="margin-bottom:6px">
+        <label>operator to build</label>
+        <select id="build-target" onchange="buildTargetChanged()"></select>
+        <span class="build-note">Building makes it the root — Simulate, Generate, and Run all follow it.</span>
+      </div>
       <div class="pipeline">
         <div class="pstep">
           <button class="primary" onclick="pipeBuild()">1 · Build Model</button>
-          <span class="build-note" id="pipe-build-status">checks validity and writes the .lus</span>
+          <span class="build-note" id="pipe-build-status">checks validity and writes its .lus</span>
         </div>
         <div class="pstep">
           <button id="pipe-sim-btn" class="pdisabled" onclick="pipeSimulate()">2 · Run Simulation</button>
@@ -622,7 +628,14 @@ const state = {
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
   pipeline: { built: false, generated: false, lustre: "", sig: "" },
+  // The operator the Build dock will build (and make the root). Null = follow
+  // the project's current root; set when the engineer picks one.
+  buildTarget: null,
   ops: null,
+  // Disclosure state of the workspace-tree folders, keyed by a stable id, so a
+  // folder the user expanded survives the 5 s inspect-poll tree rebuild
+  // (folders only close when the user closes them).
+  treeOpen: {},
 };
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
@@ -777,9 +790,16 @@ async function refresh() {
     };
     return d;
   };
-  const mkPackage = (pkg, host) => {
+  // A <details> whose open/closed state is remembered across tree rebuilds:
+  // first time it uses `defOpen`, after that the user's last choice wins.
+  const mkDetails = (key, defOpen) => {
     const det = document.createElement("details");
-    det.open = pkg.name !== "stdlib";
+    det.open = key in state.treeOpen ? state.treeOpen[key] : defOpen;
+    det.addEventListener("toggle", () => { state.treeOpen[key] = det.open; });
+    return det;
+  };
+  const mkPackage = (pkg, host) => {
+    const det = mkDetails("pkg:" + pkg.name, pkg.name !== "stdlib");
     const sum = document.createElement("summary");
     sum.textContent = pkg.name + " ";
     const b = document.createElement("span");
@@ -809,7 +829,7 @@ async function refresh() {
   }
   const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
   if (libPkgs.length) {
-    const lib = document.createElement("details");
+    const lib = mkDetails("__libraries__", false);
     const sum = document.createElement("summary");
     sum.textContent = "Libraries";
     lib.appendChild(sum);
@@ -1030,16 +1050,38 @@ function reflectPipeline() {
   document.getElementById("pipe-run-btn").classList.toggle("pdisabled", !g);
 }
 
-/// Build = the SCADE model checker: validity check, write the .lus, unlock
-/// simulation and generation. A failing model is not simulated and has no
-/// generated Lustre.
+/// Changing the build target re-locks the pipeline: the build of another
+/// operator no longer applies, so Simulate / Generate / Run gate shut until the
+/// newly-chosen operator is built.
+function buildTargetChanged() {
+  state.buildTarget = document.getElementById("build-target").value;
+  state.pipeline.built = false;
+  state.pipeline.generated = false;
+  state.sim.built = false;
+  reflectPipeline();
+  document.getElementById("pipe-build-status").textContent =
+    "ready to build " + state.buildTarget;
+  document.getElementById("pipe-sim-status").textContent = "build the operator first";
+  document.getElementById("pipe-gen-status").textContent = "build the operator first";
+}
+
+/// Build = the SCADE model checker for the chosen operator: validity check,
+/// write its .lus, make it the root, unlock simulation and generation. A
+/// failing model is not simulated and has no generated Lustre.
 async function pipeBuild() {
   showDock("build");
-  document.getElementById("pipe-build-status").textContent = "building…";
+  const target = document.getElementById("build-target").value || state.buildTarget;
+  document.getElementById("pipe-build-status").textContent =
+    "building " + (target || "the model") + "…";
   let d;
-  try { d = await (await fetch("/api/build", { method: "POST" })).json(); }
-  catch (_) { d = { ok: false, message: "build request failed" }; }
+  try {
+    d = await (await fetch("/api/build", {
+      method: "POST",
+      body: JSON.stringify(target ? { node: target } : {}),
+    })).json();
+  } catch (_) { d = { ok: false, message: "build request failed" }; }
   if (d.ok) {
+    if (d.main) state.buildTarget = d.main;
     state.pipeline.built = true;
     state.pipeline.generated = false;
     state.pipeline.lustre = d.lustre || "";
@@ -1051,6 +1093,9 @@ async function pipeBuild() {
     document.getElementById("pipe-run-status").textContent = "generate the C-Lite first";
     if (sideShowing("lustre")) refreshSideText();
     pipeLog("Build Model", d.message + (d.warnings ? "  (" + d.warnings + " warning(s))" : ""));
+    // The build made the chosen operator the root — reflect that everywhere
+    // (header, selectors, watch table) without waiting for the 5 s poll.
+    await refresh();
   } else {
     state.pipeline.built = false;
     state.pipeline.generated = false;
@@ -1306,6 +1351,25 @@ function operandGhostSet(d) {
   return s;
 }
 
+// Auto-created result locals the server marked "collapsible": each is the sole
+// result of one operation gate. We don't draw a separate box for it — the
+// gate's own right pin IS the result (red "output needed" until consumed), and
+// any wire out of the local is drawn from the gate. Returns Map(local -> eqId).
+function collapsedLocals(d) {
+  const m = new Map();
+  for (const e of d.equations) {
+    if (e.output && e.output.collapsible && e.output.name) m.set(e.output.name, e.id);
+  }
+  return m;
+}
+
+// Is a (collapsed) result local consumed by anything? A wire leaving the local
+// only exists when another block reads it (the gate→own-local wire is `from`
+// the gate, not the local), so this is exactly "output is wired somewhere".
+function localConsumed(d, name) {
+  return d.wires.some(w => w.from === name);
+}
+
 function computePositions(d) {
   // Automatic column layout, overridden by any persisted positions.
   const pos = {};
@@ -1326,7 +1390,10 @@ function computePositions(d) {
     pos[e.id] = { x: DIAG.X_EQ, y: ey, w: eqWidth(e), h };
     ey += Math.max(DIAG.ROW, h + 12);
   });
-  const right = d.outputs.map(p => p.name).concat(d.locals.map(l => l.name));
+  // Collapsed result locals have no box of their own — they live on their gate.
+  const collapsed = collapsedLocals(d);
+  const right = d.outputs.map(p => p.name)
+    .concat(d.locals.map(l => l.name).filter(n => !collapsed.has(n)));
   right.forEach((id, i) => pos[id] = { x: DIAG.X_OUT, y: 16 + i * DIAG.ROW, w: DIAG.OUTW, h: DIAG.BOXH });
   for (const [id, p] of Object.entries(d.positions || {})) {
     if (pos[id]) { pos[id].x = p.x; pos[id].y = p.y; }
@@ -1357,6 +1424,7 @@ function renderDiagram() {
   const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 240);
 
   const pinGhosts = operandGhostSet(d);
+  const collapsed = collapsedLocals(d);
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
     cls: boxCls("box", p), reason: p.reason }));
@@ -1374,11 +1442,17 @@ function renderDiagram() {
     reason: (e.reason ? e.reason + " — " : "") + e.text,
     calls: e.calls || [],
     inputs: e.inputs || [],
+    // The collapsed result local this gate produces (if any), so its right pin
+    // can render as the result — red until consumed.
+    outName: (e.output && e.output.collapsible) ? e.output.name : null,
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
     cls: boxCls("box", p), reason: p.reason }));
-  d.locals.forEach(l => items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
-    cls: boxCls("box", l), reason: l.reason }));
+  d.locals.forEach(l => {
+    if (collapsed.has(l.name)) return; // lives on its gate, not its own box
+    items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
+      cls: boxCls("box", l), reason: l.reason });
+  });
 
   // name -> type text, for SCADE-style wire labels.
   const typeOf = {};
@@ -1401,7 +1475,10 @@ function renderDiagram() {
   }
   const showLabels = document.getElementById("wire-labels").checked;
   for (const w of d.wires) {
-    const a = pos[w.from], b = pos[w.to];
+    // A collapsed result local has no box; its outgoing wires start at the gate
+    // that produces it (the gate→own-local wire is dropped — pos[local] is gone).
+    const fromId = collapsed.has(w.from) ? collapsed.get(w.from) : w.from;
+    const a = pos[fromId], b = pos[w.to];
     if (!a || !b) continue;
     const x1 = a.x + a.w, y1 = a.y + (a.h || DIAG.BOXH) / 2;
     const x2 = b.x;
@@ -1458,10 +1535,17 @@ function renderDiagram() {
         '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + p.x +
         '" cy="' + py + '" r="4"><title>' + escapeHTML(tip) + '</title></circle>';
     });
-    // Source pin on the right edge: drag it onto another box to wire.
+    // Source pin on the right edge: drag it onto another box to wire. A gate
+    // whose result is a collapsed local shows that result here — red ("output
+    // needed") until something consumes it.
     if (it.cls.indexOf("ghost") < 0) {
-      svg += '<circle class="pin" data-pin="' + it.id + '" cx="' + (p.x + p.w) +
-        '" cy="' + (p.y + h / 2) + '" r="4.5"><title>drag to wire</title></circle>';
+      const needsOut = it.outName != null && !localConsumed(d, it.outName);
+      const tip = needsOut
+        ? "output — needs a destination (drag onto an output or local)"
+        : "drag to wire";
+      svg += '<circle class="pin' + (needsOut ? " unbound" : "") + '" data-pin="' + it.id +
+        '" cx="' + (p.x + p.w) + '" cy="' + (p.y + h / 2) + '" r="4.5"><title>' +
+        escapeHTML(tip) + '</title></circle>';
     }
     svg += '</g>';
   }
@@ -2459,6 +2543,21 @@ function populateEditSelectors() {
     }
     if (names.includes(prev)) sel.value = prev;
     else if (state.selectedNode && names.includes(state.selectedNode.name)) sel.value = state.selectedNode.name;
+  }
+  // The Build-dock target: the engineer's chosen operator if still valid,
+  // otherwise the project's current root, otherwise the first operator.
+  const bt = document.getElementById("build-target");
+  if (bt) {
+    bt.innerHTML = "";
+    for (const n of names) {
+      const o = document.createElement("option");
+      o.value = n; o.textContent = n;
+      bt.appendChild(o);
+    }
+    const main = state.inspect.project.main;
+    const want = (state.buildTarget && names.includes(state.buildTarget)) ? state.buildTarget
+      : (names.includes(main) ? main : names[0]);
+    if (want) { bt.value = want; state.buildTarget = want; }
   }
   // Palette: stdlib blocks as insertable call chips (textual equation dialog).
   const pal = document.getElementById("palette");

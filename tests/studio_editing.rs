@@ -348,7 +348,101 @@ fn an_invalid_model_does_not_build() {
     let d: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(d["ok"], false, "broken model must not build: {d}");
     assert!(d["errors"].as_u64().unwrap() >= 1);
-    assert!(!g.tmp.join("Broken.lus").exists(), "no .lus for a model that didn't build");
+    // The operator got a blank .lus stub when it was created, but a failed
+    // build must NOT fill it — only a clean build writes the operator's Lustre.
+    let stub = g.tmp.join("Broken.lus");
+    assert!(stub.exists(), "operator gets a blank stub on creation");
+    let text = std::fs::read_to_string(&stub).unwrap();
+    assert!(text.contains("has not been built yet"), "stub stays blank: {text}");
+    assert!(!text.contains("node Broken"), "a failed build must not fill the stub: {text}");
+}
+
+/// Each operator has its own Lustre file: a blank stub the moment it is
+/// created, filled only when *that* operator builds. The Build dock can target
+/// any operator (not just the current root), and building it makes it the root
+/// — so an unrelated clean operator can be built even while the example's own
+/// root sits untouched.
+#[test]
+fn per_operator_lus_blank_on_create_filled_on_build() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+
+    post("/api/edit/add_node", r#"{"name":"Doubler2","kind":"operator"}"#);
+    // The .lus exists immediately — blank, not yet the built Lustre.
+    let lus = g.tmp.join("Doubler2.lus");
+    assert!(lus.exists(), "a blank stub is written on create");
+    let stub = std::fs::read_to_string(&lus).unwrap();
+    assert!(stub.contains("has not been built yet"), "stub: {stub}");
+    assert!(!stub.contains("node Doubler2"), "stub is not the built Lustre yet");
+
+    post("/api/edit/add_port", r#"{"node":"Doubler2","side":"input","name":"x","type":"int32"}"#);
+    post("/api/edit/add_port", r#"{"node":"Doubler2","side":"output","name":"y","type":"int32"}"#);
+    post("/api/edit/add_equation", r#"{"node":"Doubler2","lhs":"y","body":"x + x"}"#);
+
+    // The example's root is still ReleaseLogic — build Doubler2 by naming it.
+    let (s, body) = request(port, "POST", "/api/build", r#"{"node":"Doubler2"}"#).expect("build");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], true, "Doubler2 should build: {d}");
+    assert_eq!(d["main"], "Doubler2", "the built operator becomes the root: {d}");
+
+    // Its .lus is now the real Lustre, and the root switch persisted.
+    let built = std::fs::read_to_string(&lus).unwrap();
+    assert!(built.contains("node Doubler2"), "filled on build: {built}");
+    assert!(built.contains("y = x + x"), "the equation is in the file: {built}");
+    let (s, ins) = request(port, "GET", "/api/inspect", "").expect("inspect");
+    assert_eq!(s, 200);
+    let iv: serde_json::Value = serde_json::from_str(&ins).unwrap();
+    assert_eq!(iv["project"]["main"], "Doubler2", "root persisted: {}", iv["project"]["main"]);
+}
+
+/// A dropped operation advertises its result as a "collapsible" output, so the
+/// canvas draws the gate's own right pin as the result (red until consumed)
+/// rather than a separate auto-local box. Wiring the result to a real output
+/// makes it non-collapsible — the output keeps its box.
+#[test]
+fn dropped_operation_output_is_collapsible_until_wired() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+    let diagram = |node: &str| -> serde_json::Value {
+        let (s, b) = request(port, "GET", &format!("/api/diagram?node={node}"), "").expect("diagram");
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+
+    post("/api/edit/add_node", r#"{"name":"Summer","kind":"operator"}"#);
+    post("/api/edit/add_port", r#"{"node":"Summer","side":"input","name":"a","type":"int32"}"#);
+    post("/api/edit/add_port", r#"{"node":"Summer","side":"input","name":"b","type":"int32"}"#);
+    post("/api/edit/add_port", r#"{"node":"Summer","side":"output","name":"s","type":"int32"}"#);
+
+    // Drop a plus gate: its result is a fresh auto-local — collapsible and
+    // unconsumed, so the canvas paints the gate's right pin red.
+    post("/api/edit/add_operation", r#"{"node":"Summer","op":"plus","x":240.0,"y":40.0}"#);
+    let d = diagram("Summer");
+    let out = &d["equations"][0]["output"];
+    assert_eq!(out["collapsible"], true, "auto-local result is collapsible: {out}");
+    assert_eq!(out["bound"], true, "the auto-local is a declared local: {out}");
+    let res = out["name"].as_str().unwrap().to_string();
+    assert!(
+        !d["wires"].as_array().unwrap().iter().any(|w| w["from"] == res.as_str()),
+        "the result is unconsumed on drop (right pin renders red)"
+    );
+
+    // Route the result to the real output `s`.
+    post("/api/edit/update_equation", r#"{"node":"Summer","index":0,"lhs":"s","body":"a + b"}"#);
+    let d = diagram("Summer");
+    let out = &d["equations"][0]["output"];
+    assert_eq!(out["name"], "s");
+    assert_eq!(out["bound"], true);
+    assert_eq!(out["collapsible"], false, "an output keeps its own box, not collapsed: {out}");
 }
 
 #[test]

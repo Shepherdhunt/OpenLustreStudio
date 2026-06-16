@@ -1,6 +1,6 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-13.*
+*Updated 2026-06-16.*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove
@@ -13,13 +13,22 @@ cannot code your way to a qualification certificate), and prioritizes the former
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
 `main`). **Full check**: `cargo test --workspace --no-fail-fast` (56 result
-groups green as of 2026-06-13 on Windows/MSVC). The Studio GUI is one embedded
+groups green as of 2026-06-16 on Windows/MSVC). The Studio GUI is one embedded
 HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 `crates/ol_cli/src/studio_server.rs` (`openlustre studio serve <dir>`); the IR
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** held-input debug runs; the SCADE build
+**Landed recently (newest first):** a round of live-demo authoring fixes —
+the workspace tree no longer auto-collapses (folder disclosure survives the
+5 s inspect poll); a **Build-dock operator selector** (build any operator, not
+just the root — building makes it the root so Simulate/Generate/Run follow);
+**per-operator `.lus` files** (a blank `<Name>.lus` stub on create, filled when
+that operator builds; the build is scoped to the operator's slice so an
+unrelated broken operator can't block it); and **red I/O pins instead of ghost
+boxes** (a dropped operation shows red "needs a source" pins on the left and a
+red "needs a destination" pin on the right, with the carrier result-local
+collapsed into the gate). Before that: held-input debug runs; the SCADE build
 pipeline (Build → Run Simulation → Generate C-Lite → Compile & Run) with
 `<operator>.lus` written on a clean build, the Lustre pane gated on build, and
 **log messages** (debug probes printed every 50 cycles); canvas select /
@@ -52,12 +61,12 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
-| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with left input pins / right output, pin-to-pin wiring**, draggable grid-snapped canvas with persisted layout, multi-select + right-click menu + Delete, red invalid-link coding |
+| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, multi-select + right-click menu + Delete, red invalid-link coding |
 | Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
-| Build & codegen | KCG qualified C/Ada (TQL-1) | **Build pipeline** (validity check → `<op>.lus` → C-Lite → debug run in a terminal), C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing |
+| Build & codegen | KCG qualified C/Ada (TQL-1) | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing |
 | Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage **and unique-cause MC/DC** with uncovered reporting |
 | Deployment | Commercial installer suite | Inno Setup Windows installer, Start Menu/Desktop shortcuts, embedded stdlib, Linux install script, CI release workflow |
 | Qualification | DO-178C/DO-330 qualification kits, 20+ years of certification credit | None (see §4) |
@@ -132,6 +141,40 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 — live-demo authoring fixes (tree, build target, per-operator files, red I/O pins)
+
+Four round-three GUI gaps from a live demo:
+
+* **The workspace tree stops auto-collapsing.** The 5 s `/api/inspect` poll
+  rebuilds the tree, and every rebuild reset the `<details>` folders to their
+  default state — so a folder you expanded (the Libraries / stdlib root
+  especially) snapped shut a couple of seconds later. Disclosure state is now
+  remembered per folder (`state.treeOpen`, keyed `pkg:<name>` / `__libraries__`,
+  written from a `toggle` listener), so folders only close when *you* close
+  them.
+* **Choose which operator to build.** The Build dock has an *operator-to-build*
+  selector; `/api/build` takes an optional `{node}`, makes it the root (SCADE
+  "set as root", persisted + journaled), and scopes the validity check to that
+  operator's **slice** — so you can build a clean operator even while an
+  unrelated one is mid-edit. Simulate / Generate / Run all follow the chosen
+  operator; changing the selector re-locks the pipeline until it is built.
+* **Every operator has its own Lustre file.** Creating an operator writes a
+  blank `<Name>.lus` stub next to the model immediately; building that operator
+  fills it with its emitted Lustre (root + dependencies). The model JSON stays
+  the single source of truth — the `.lus` files are per-operator projections,
+  blank until built (a failed build never fills the stub).
+* **Red I/O pins instead of ghost boxes.** A dropped operation used to spawn a
+  separate result-local box on the right. Now the gate's own right pin *is* the
+  result: red ("output — needs a destination") until something consumes it, the
+  way unbound operands are already red pins on the left ("input — needs a
+  source"). The carrier local is preserved in the model (it still wires gates
+  together) but its box is collapsed into the gate, and wires leaving it are
+  drawn from the gate's pin. So a freshly dropped gate reads as red-in / red-out
+  and you wire your existing inputs straight onto it. Server marks each
+  single-output gate's result `collapsible`; the canvas does the hiding,
+  rerouting, and pin colouring. Covered by two new studio-API tests plus live
+  verification.
 
 ### 2026-06-13 — debug runs use the watch-table inputs
 

@@ -206,7 +206,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(body) => (200, "text/plain; charset=utf-8", body.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
         },
-        ("POST", "/api/build") => build_model_response(ctx),
+        ("POST", "/api/build") => build_model_response(ctx, body),
         ("GET", "/api/clite/header") => match build_clite(ctx) {
             Ok((h, _)) => (200, "text/plain; charset=utf-8", h.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
@@ -243,9 +243,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_main") => {
             apply_edit_response(ctx, body, edit_set_main)
         }
-        ("POST", "/api/edit/add_node") => {
-            apply_edit_response(ctx, body, edit_add_node)
-        }
+        ("POST", "/api/edit/add_node") => add_node_response(ctx, body),
         ("GET", "/api/tests") => match tests_list(ctx) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -473,47 +471,94 @@ fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
     Ok(format!("{lus}\n{con}"))
 }
 
-/// "Build the model": the SCADE model-checker step. Type- and contract-check
-/// the project; on a clean check, emit the main operator's Lustre (the root
-/// plus everything it uses) and write it to `<main>.lus` next to the model,
-/// then hand it back so the GUI can show it. A model that does not build is
-/// not simulated and has no generated `.lus` — failures are loud, never silent.
-fn build_model_response(ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
-    let project = match load(ctx) {
+/// The `.lus` projection file for one operator, written next to the model.
+/// Each operator/function has its own Lustre file (SCADE style); the model
+/// JSON stays the single source of truth and these files are projections of
+/// it — blank on create, filled on a clean build.
+fn operator_lus_path(ctx: &ServerCtx, name: &str) -> std::path::PathBuf {
+    let dir = ctx.model.parent().unwrap_or_else(|| std::path::Path::new("."));
+    dir.join(format!("{name}.lus"))
+}
+
+/// "Build the model": the SCADE model-checker step, for the operator the
+/// engineer chose to build. An optional `{"node": "X"}` body selects which
+/// operator/function to build and makes it the root (so Simulate / Generate /
+/// Run all follow it); with no body the current root is built. The validity
+/// check is scoped to that operator's *slice* (root + everything it uses), so
+/// you can build a clean operator even while an unrelated one is mid-edit. On
+/// a clean check the operator's Lustre is written to its own `<operator>.lus`
+/// next to the model and handed back so the GUI can show it. A model that does
+/// not build is not simulated and has no generated `.lus` — failures are loud.
+fn build_model_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let mut project = match load(ctx) {
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
     };
-    let report = ol_typecheck::check_project(&project);
-    let contract = ol_contract_check::check_project(&project);
+
+    // Resolve the build target: the explicitly chosen operator, else the root.
+    let selected = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("node").and_then(|n| n.as_str()).map(str::to_string));
+    let main = match selected.or_else(|| project.main.clone()) {
+        Some(m) => m,
+        None => {
+            let v = serde_json::json!({
+                "ok": false, "message":
+                "no operator selected and no root set — pick one in the Build dock",
+            });
+            return (200, "application/json", v.to_string().into_bytes());
+        }
+    };
+    if project.find_node(&main).is_none() {
+        let v = serde_json::json!({
+            "ok": false,
+            "message": format!("`{main}` is not an operator in this model"),
+        });
+        return (200, "application/json", v.to_string().into_bytes());
+    }
+    // Make the chosen operator the root (persisted to the model file, journaled
+    // for undo) so the rest of the toolchain drives it — SCADE "set as root".
+    if project.main.as_deref() != Some(main.as_str()) {
+        let before = take_snapshot(ctx);
+        match load_raw(ctx) {
+            Ok(mut raw) => {
+                raw.main = Some(main.clone());
+                if let Err(e) = save_raw(ctx, &raw) {
+                    return (500, "application/json", json_error(&e).into_bytes());
+                }
+                record_edit(ctx, before);
+                project.main = Some(main.clone());
+            }
+            Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+        }
+    }
+
+    // Slice to the operator and everything it uses, then check *that* — an
+    // unrelated broken operator must not block building this one.
+    let sliced = match project.slice_for_root(&main) {
+        Ok(s) => s,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let report = ol_typecheck::check_project(&sliced);
+    let contract = ol_contract_check::check_project(&sliced);
     let count = |sev: ol_ir::Severity| {
         report.diagnostics.iter().filter(|d| d.severity == sev).count()
             + contract.diagnostics.iter().filter(|d| d.severity == sev).count()
     };
     let errors = count(ol_ir::Severity::Error);
     let warnings = count(ol_ir::Severity::Warning);
-
-    let fail = |msg: String, warnings: usize| {
-        let v = serde_json::json!({ "ok": false, "errors": errors, "warnings": warnings, "message": msg });
-        (200, "application/json", v.to_string().into_bytes())
-    };
     if errors > 0 {
-        return fail(
-            format!("{errors} error(s) — fix them in Messages before building"),
-            warnings,
-        );
+        let v = serde_json::json!({
+            "ok": false, "errors": errors, "warnings": warnings, "main": main,
+            "message": format!("`{main}`: {errors} error(s) — fix them in Messages before building"),
+        });
+        return (200, "application/json", v.to_string().into_bytes());
     }
-    let Some(main) = project.main.clone() else {
-        return fail("no main operator — set one with File ▸ Set Main Operator".into(), warnings);
-    };
-    let sliced = match project.slice_for_root(&main) {
-        Ok(s) => s,
-        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
-    };
+
     let lus = ol_lustre_emit::emit_project(&sliced);
     let con = ol_cocospec_emit::emit_project(&sliced, ol_cocospec_emit::Target::Modern);
     let full = format!("{lus}\n{con}");
-    let dir = ctx.model.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let path = dir.join(format!("{main}.lus"));
+    let path = operator_lus_path(ctx, &main);
     if let Err(e) = std::fs::write(&path, &full) {
         return (
             500,
@@ -529,7 +574,7 @@ fn build_model_response(ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
         "main": main,
         "path": path.display().to_string(),
         "lustre": full,
-        "message": format!("model valid — wrote {fname}"),
+        "message": format!("`{main}` valid — wrote {fname}"),
     });
     (200, "application/json", value.to_string().into_bytes())
 }
@@ -850,15 +895,40 @@ fn build_diagram(
                 })
             })
             .unwrap_or(serde_json::Value::Null);
+        // The output side, SCADE-gate style. A single-output gate whose result
+        // is its own freshly-named local (the sole definer, a recognizable
+        // operation) is "collapsible": the client hides that intermediate
+        // local's box and draws the gate's own right pin as the result — red
+        // until something consumes it ("output needed"). Outputs and shared /
+        // multi-output locals keep their own boxes.
+        let symbol = eq_symbol(&eq.rhs);
+        let output = if eq.lhs.len() == 1 {
+            let l = &eq.lhs[0];
+            let is_local = node.locals.iter().any(|x| &x.name == l);
+            let sole_def = node
+                .equations
+                .iter()
+                .filter(|e| e.lhs.iter().any(|x| x == l))
+                .count()
+                == 1;
+            serde_json::json!({
+                "name": l,
+                "bound": known.contains(l.as_str()),
+                "collapsible": is_local && sole_def && !symbol.is_null(),
+            })
+        } else {
+            serde_json::Value::Null
+        };
         equations.push(serde_json::json!({
             "id": eq_id,
             "lhs": eq.lhs,
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
             "body": ol_lustre_emit::format_expr(&eq.rhs),
-            "symbol": eq_symbol(&eq.rhs),
+            "symbol": symbol,
             "nary": nary,
             "reads": reads,
             "inputs": input_pins,
+            "output": output,
             "calls": calls,
             "invalid": invalid,
             "reason": if invalid { serde_json::Value::String(reason) } else { serde_json::Value::Null },
@@ -998,6 +1068,32 @@ fn find_node_mut<'a>(
         "node `{name}` not found in {} (nodes in included files or the stdlib cannot be edited here)",
         "the model file"
     ))
+}
+
+/// Create an operator and give it its own Lustre file (SCADE style): on a
+/// successful create, a blank `<Name>.lus` stub is written next to the model,
+/// to be filled with the emitted Lustre once the operator builds. A stub-write
+/// failure never fails the edit — the model is already saved and the stub is a
+/// convenience projection, not the source of truth.
+fn add_node_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let resp = apply_edit_response(ctx, body, edit_add_node);
+    if resp.0 == 200 {
+        if let Some(name) = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        {
+            // `name` is a validated identifier (edit_add_node enforced it), so
+            // it is a safe file stem — no path traversal.
+            let path = operator_lus_path(ctx, &name);
+            let stub = format!(
+                "-- {name}.lus — generated by OpenLustre Studio.\n\
+                 -- `{name}` has not been built yet. Build it from the Build dock\n\
+                 -- (step 1) to fill this file with its Lustre.\n"
+            );
+            let _ = std::fs::write(&path, stub);
+        }
+    }
+    resp
 }
 
 fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
