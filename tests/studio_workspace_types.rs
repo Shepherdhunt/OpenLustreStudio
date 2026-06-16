@@ -213,6 +213,42 @@ fn project_constants_add_use_and_remove() {
     assert!(!still, "constant removed");
 }
 
+/// Import existing Lustre: a node, a type, and a const are parsed and added to
+/// the project; the imported operator builds and carries the imported const;
+/// re-importing the same name collides and is rejected (all-or-nothing).
+#[test]
+fn import_lustre_adds_nodes_types_constants() {
+    let g = start_server_on_workspace("ws_import");
+    let port = g.port;
+    let lus = "type Mode = enum { OFF, ON };\n\
+               const LIMIT : int = 7;\n\
+               node MyLimiter(x: int) returns (y: int);\n\
+               let y = if x > LIMIT then LIMIT else x; tel\n";
+    let payload = serde_json::json!({ "lustre": lus }).to_string();
+
+    let (s, body) = request(port, "POST", "/api/edit/import_lustre", &payload).expect("import");
+    assert_eq!(s, 200, "import failed: {body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], true, "{d}");
+    assert!(d["nodes"].as_array().unwrap().iter().any(|n| n == "MyLimiter"), "MyLimiter reported: {d}");
+
+    // It's in the project and builds, carrying the imported constant.
+    let ins = get_json(port, "/api/inspect");
+    let has_node = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .any(|n| n["name"] == "MyLimiter");
+    assert!(has_node, "MyLimiter imported into the project: {ins}");
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"MyLimiter"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "imported operator should build: {bd}");
+    assert!(bd["lustre"].as_str().unwrap().contains("LIMIT"), "imported const used: {bd}");
+
+    // Re-importing the same operator name collides.
+    let (s2, _) = request(port, "POST", "/api/edit/import_lustre", &payload).expect("reimport");
+    assert_eq!(s2, 400, "duplicate import must be rejected");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

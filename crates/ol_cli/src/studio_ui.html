@@ -243,6 +243,8 @@
       <div class="mi" onclick="openDialog('dlg-operator')">New Operator…</div>
       <div class="mi" onclick="openDialog('dlg-main')">Set Main Operator…</div>
       <div class="menu-sep"></div>
+      <div class="mi" onclick="openImportDialog()">Import Lustre…</div>
+      <div class="menu-sep"></div>
       <div class="mi" onclick="refresh()">Refresh Project</div>
     </div>
   </div>
@@ -575,6 +577,18 @@
     </div>
   </div>
 
+  <div class="dlg" id="dlg-import">
+    <p>Import existing Lustre — paste it below or choose a <code class="inline">.lus</code> file. Its <code class="inline">node</code> / <code class="inline">function</code> declarations (plus any <code class="inline">type</code> / <code class="inline">const</code>) are added to this project for reuse. The dataflow subset OpenLustre emits round-trips; unsupported constructs (assertions, inline contracts) report a located error.</p>
+    <div class="row">
+      <input type="file" id="import-file" accept=".lus,.lustre,text/plain" onchange="importFromFile(event)">
+    </div>
+    <textarea id="import-text" rows="12" style="width:100%; font-family:Consolas,monospace" placeholder="node Avg(a: int; b: int) returns (m: int);&#10;var s: int;&#10;let&#10;  s = a + b;&#10;  m = s / 2;&#10;tel"></textarea>
+    <div class="row">
+      <button class="primary" onclick="importLustre()">Import</button>
+      <span class="build-note" id="import-status"></span>
+    </div>
+  </div>
+
   <div class="dlg" id="dlg-fsm">
     <p>State machines lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
     <div class="row">machine <select id="fsm-select"></select> <button onclick="fsmView()">View</button></div>
@@ -721,7 +735,8 @@ document.querySelectorAll("#menubar .mi").forEach(mi => {
 const DLG_TITLES = {
   "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
-  "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-fsm": "State Machines",
+  "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
+  "dlg-fsm": "State Machines",
   "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
   "dlg-logmsg": "Insert Log Message",
 };
@@ -935,6 +950,44 @@ async function editAddConstant() {
 
 async function removeConstant(name) {
   await postEdit("/api/edit/remove_constant", { name });
+}
+
+// --- Import existing Lustre --------------------------------------------------
+
+function openImportDialog() {
+  openDialog("dlg-import");
+  document.getElementById("import-text").value = "";
+  document.getElementById("import-status").textContent = "";
+  const f = document.getElementById("import-file");
+  if (f) f.value = "";
+}
+
+// Read a chosen .lus file into the textarea (browsers can't hand us a path).
+function importFromFile(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => { document.getElementById("import-text").value = reader.result; };
+  reader.onerror = () => { document.getElementById("import-status").textContent = "could not read the file"; };
+  reader.readAsText(file);
+}
+
+async function importLustre() {
+  const text = document.getElementById("import-text").value;
+  if (!text.trim()) { document.getElementById("import-status").textContent = "paste Lustre or choose a file first"; return; }
+  const r = await fetch("/api/edit/import_lustre", { method: "POST", body: JSON.stringify({ lustre: text }) });
+  const body = await r.text();
+  let d; try { d = JSON.parse(body); } catch (_) { d = {}; }
+  if (!r.ok || !d.ok) {
+    document.getElementById("import-status").textContent = d.error || "import failed";
+    return;
+  }
+  closeDialog();
+  await refresh();
+  // Open the first imported operator so the result is visible immediately.
+  const first = (d.nodes || [])[0];
+  if (first) { const n = findNode(first); if (n) { selectNode(n); state.diagramStack = []; loadDiagram(first); } }
+  document.getElementById("diagram-status").textContent = d.message || "imported";
 }
 
 // --- Project refresh -------------------------------------------------------------

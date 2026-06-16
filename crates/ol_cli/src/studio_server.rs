@@ -278,6 +278,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/remove_type") => remove_type_response(ctx, body),
         ("POST", "/api/edit/add_constant") => add_constant_response(ctx, body),
         ("POST", "/api/edit/remove_constant") => remove_constant_response(ctx, body),
+        ("POST", "/api/edit/import_lustre") => import_lustre_response(ctx, body),
         ("POST", "/api/edit/update_port") => {
             apply_edit_response(ctx, body, edit_update_port)
         }
@@ -1896,6 +1897,124 @@ fn remove_constant_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str,
     (400, "application/json", json_error(&format!(
         "constant `{name}` not found in the editable files"
     )).into_bytes())
+}
+
+/// Import existing Lustre: parse `{lustre}` into nodes / types / constants and
+/// add them to the project for reuse. The parse is the dataflow subset the tool
+/// emits (so an operator's own `<op>.lus` round-trips); anything outside it
+/// fails loudly. The import is all-or-nothing: if any imported name already
+/// exists it is rejected before anything is written. Nodes land in the model
+/// file, types and constants in the project-global types file (like the
+/// dialogs); each imported operator also gets its blank `.lus` stub, filled
+/// when it is next built.
+fn import_lustre_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let text = match req.get("lustre").and_then(|v| v.as_str()) {
+        Some(t) => t,
+        None => return bad("missing string field `lustre`"),
+    };
+    let imported = match crate::lustre_import::parse_lustre(text) {
+        Ok(i) => i,
+        Err(e) => return bad(&format!("could not parse Lustre: {e}")),
+    };
+
+    // Collision check against the whole loaded project — all-or-nothing.
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let mut clashes: Vec<String> = Vec::new();
+    for n in &imported.nodes {
+        if full.find_node(&n.name).is_some() {
+            clashes.push(format!("operator `{}`", n.name));
+        }
+    }
+    for t in &imported.types {
+        if full.packages.iter().any(|p| p.types.iter().any(|x| x.name() == t.name())) {
+            clashes.push(format!("type `{}`", t.name()));
+        }
+    }
+    for c in &imported.constants {
+        if full.packages.iter().any(|p| p.constants.iter().any(|x| x.name == c.name)) {
+            clashes.push(format!("constant `{}`", c.name));
+        }
+    }
+    if !clashes.is_empty() {
+        return bad(&format!("already defined in this project: {}", clashes.join(", ")));
+    }
+
+    let before = take_snapshot(ctx);
+    // Types and constants are project-global (types file when present); nodes go
+    // in the model file. When there is no separate types file the two coincide,
+    // so do it all in one write.
+    let types_target = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let same = types_target == ctx.model;
+    {
+        let mut m = match load_raw(ctx) {
+            Ok(p) => p,
+            Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+        };
+        if m.packages.is_empty() {
+            m.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
+        }
+        m.packages[0].nodes.extend(imported.nodes.iter().cloned());
+        if same {
+            m.packages[0].types.extend(imported.types.iter().cloned());
+            m.packages[0].constants.extend(imported.constants.iter().cloned());
+        }
+        if let Err(e) = save_raw(ctx, &m) {
+            return (500, "application/json", json_error(&e).into_bytes());
+        }
+    }
+    if !same && (!imported.types.is_empty() || !imported.constants.is_empty()) {
+        let mut d = match load_raw_path(&types_target) {
+            Ok(p) => p,
+            Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+        };
+        if d.packages.is_empty() {
+            d.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
+        }
+        d.packages[0].types.extend(imported.types.iter().cloned());
+        d.packages[0].constants.extend(imported.constants.iter().cloned());
+        if let Err(e) = save_raw_path(&types_target, &d) {
+            return (500, "application/json", json_error(&e).into_bytes());
+        }
+    }
+    record_edit(ctx, before);
+
+    // A blank `.lus` stub per imported operator, filled when it next builds.
+    for n in &imported.nodes {
+        let path = operator_lus_path(ctx, &n.name);
+        let stub = format!(
+            "-- {0}.lus — generated by OpenLustre Studio.\n\
+             -- `{0}` was imported; build it from the Build dock to (re)generate its Lustre.\n",
+            n.name
+        );
+        let _ = std::fs::write(&path, stub);
+    }
+
+    let summary = |label: &str, n: usize| if n == 1 { format!("1 {label}") } else { format!("{n} {label}s") };
+    let parts: Vec<String> = [
+        (imported.nodes.len(), "operator"),
+        (imported.types.len(), "type"),
+        (imported.constants.len(), "constant"),
+    ]
+    .iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, l)| summary(l, *n))
+    .collect();
+    let value = serde_json::json!({
+        "ok": true,
+        "nodes": imported.nodes.iter().map(|n| &n.name).collect::<Vec<_>>(),
+        "types": imported.types.iter().map(|t| t.name()).collect::<Vec<_>>(),
+        "constants": imported.constants.iter().map(|c| &c.name).collect::<Vec<_>>(),
+        "message": format!("imported {}", if parts.is_empty() { "nothing".into() } else { parts.join(", ") }),
+    });
+    (200, "application/json", value.to_string().into_bytes())
 }
 
 // --- Variable properties + in-place equation editing -------------------------

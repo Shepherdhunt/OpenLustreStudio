@@ -19,7 +19,15 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Types and Constants tree nodes**
+**Landed recently (newest first):** **Import existing Lustre** (`File ▸ Import
+Lustre…`) — a small Lustre frontend (`crates/ol_cli/src/lustre_import.rs`)
+parses `type` / `const` / `node` / `function` declarations into the project,
+delegating equation bodies and constant values to `ol_stdlib::parse_expr` and
+types to `parse_type` (with the `elem^len` array form mapped). Paste or choose a
+`.lus` file; the dataflow subset OpenLustre emits round-trips (an operator's own
+`<op>.lus` re-imports and rebuilds), name clashes (including against stdlib) are
+rejected all-or-nothing, and unsupported constructs report a located error.
+Before that: **Types and Constants tree nodes**
 (SCADE-style, between the operators and the libraries) — a Types node listing
 the project's named types (opens the type editor), and a Constants node for
 project-wide constants (`NAME : type = value`, all-caps by convention, add via a
@@ -52,21 +60,15 @@ right) + pin-to-pin wiring; MC/DC coverage; array iterators (`map`/`fold`);
 boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
-**Best next gaps (pick up here)** — the top three are open demo requests:
-1. **Import existing Lustre** (P1, medium) — a `File ▸ Import Lustre` that
-   parses `node`/`function` declarations from a `.lus` file into the project for
-   reuse. There is **no node-level Lustre parser yet** (only
-   `ol_stdlib::parse_expr` / `parse_type`), so this means a small Lustre frontend
-   that reuses those for equation bodies and types; loud errors for the
-   unsupported surface (assertions, inline contracts).
-2. **State-machine authoring, SCADE-shaped** (P1, large) — a state machine
+**Best next gaps (pick up here):**
+1. **State-machine authoring, SCADE-shaped** (P1, large) — a state machine
    should live *inside* an operator (tree node `StateMachine: <name>` under the
    operator), authored with states / transitions / affected variables, default
    scaffolding (Initial state, `->` / `when` transitions), keyword colouring, and
    SCADE-style "every variable must be defined on every path" checking. Today
    `StateMachineDef` is *package*-level (`crates/ol_ir/src/state_machine.rs`),
    so this is structural (nest it in `NodeDef`) plus a real editor.
-3. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
+2. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
    on the canvas, and a right-click "wrap text / don't wrap" per box.
    *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
    it (construct an array/struct from element inputs, or destructure one) — a
@@ -74,16 +76,16 @@ symbols; typed wire labels.
    *Also:* **composite constant values** — array/struct/string (`char[]`)
    constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
    scalar constants parse) plus a `char` type; scalar constants already work.
-4. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
+3. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
    add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
    generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
    pattern.
-5. **Tool Operational Requirements document** (P1 if certification-adjacent) —
+4. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-6. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
+5. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
    copy/paste, distinct per-family gate silhouettes (§2).
-7. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
+6. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 
 Everything ships across all stages — IR → typecheck → sim → generated C →
@@ -173,6 +175,33 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (import) — import existing Lustre
+
+`File ▸ Import Lustre…` reuses models authored elsewhere. There was no
+node-level Lustre parser (only `ol_stdlib::parse_expr` / `parse_type`), so this
+adds a small frontend, `crates/ol_cli/src/lustre_import.rs`:
+
+* **What it parses** — `type` (enum / struct / alias), `const`, `node`, and
+  `function` declarations, including the `var` section, multi-output tuple
+  left-hand sides `(a, b) = …`, `--` and `(* *)` comments, and the `elem^len`
+  array form our own emitter produces. Equation bodies and constant values go to
+  `parse_expr`; types to `parse_type`. So the dataflow subset the tool emits
+  round-trips — an operator's own `<op>.lus` re-imports and rebuilds — and the
+  `function Inc … node Pipeline … t = Inc(a); out = Inc(t)` example imports,
+  appears in the tree and toolbox, and builds.
+* **How it lands** — `/api/edit/import_lustre` parses, then checks every
+  imported name against the whole loaded project (operators *and* the stdlib,
+  types, constants): any clash rejects the import all-or-nothing before a byte
+  is written. Nodes go to the model file, types and constants to the
+  project-global types file (matching the dialogs), each imported operator gets
+  its blank `.lus` stub, and the whole thing is one journaled (undoable) edit.
+  Unsupported surface (assertions, inline contracts, malformed declarations)
+  produces a located error rather than a silent or wrong import.
+* **Tested** — parser unit tests (node/function, Lustre `real`/`int`, `^`
+  arrays, types+consts, `assert` rejection, empty input) plus a workspace
+  integration test (import a type+const+node, build it, reject the re-import);
+  verified live.
 
 ### 2026-06-16 (later still) — Types & Constants tree nodes
 
