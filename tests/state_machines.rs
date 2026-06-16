@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use ol_ir::{
-    Equation, Expr, NodeKind, Package, Port, Project, StateDef, StateMachineDef, Transition,
-    Type,
+    Equation, Expr, NodeKind, Package, Port, Project, Region, StateDef, StateMachineDef,
+    Transition, Type,
 };
 use ol_sim::{Sim, Value};
 
@@ -30,6 +30,7 @@ fn toggle_machine() -> StateMachineDef {
                     guard: Expr::var("pulse"),
                     target: "ON".into(),
                 }],
+                regions: vec![],
             },
             StateDef {
                 name: "ON".into(),
@@ -41,6 +42,7 @@ fn toggle_machine() -> StateMachineDef {
                     guard: Expr::var("pulse"),
                     target: "OFF".into(),
                 }],
+                regions: vec![],
             },
         ],
         contract: None,
@@ -205,6 +207,7 @@ fn three_state_traffic_light_simulates_correctly() {
                 target: advance_to.into(),
             },
         ],
+        regions: vec![],
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -264,6 +267,123 @@ fn three_state_traffic_light_simulates_correctly() {
         (false, false), // Red
         (true, false),  // Green (emergency only takes effect on next cycle)
         (false, false), // Red
+    ];
+    assert_eq!(trace, expected);
+}
+
+/// Hierarchical automaton: `Mode` has top states Idle/Active; while in Active a
+/// nested region runs Lo<->Hi (toggled by `tick`) and drives `level`. `level`
+/// is the nested region's value in Active, 0 in Idle; the nested region
+/// restarts at Lo each time Active is (re-)entered.
+fn hierarchical_mode_machine() -> StateMachineDef {
+    let lo = StateDef {
+        name: "Lo".into(),
+        equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(1) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
+        regions: vec![],
+    };
+    let hi = StateDef {
+        name: "Hi".into(),
+        equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(2) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
+        regions: vec![],
+    };
+    let idle = StateDef {
+        name: "Idle".into(),
+        equations: vec![
+            Equation { lhs: vec!["mode_active".into()], rhs: Expr::bool_lit(false) },
+            Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(0) },
+        ],
+        transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
+        regions: vec![],
+    };
+    let active = StateDef {
+        name: "Active".into(),
+        // mode_active is driven here; level is driven by the nested region.
+        equations: vec![Equation { lhs: vec!["mode_active".into()], rhs: Expr::bool_lit(true) }],
+        transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
+        regions: vec![Region {
+            initial_state: "Lo".into(),
+            states: vec![lo, hi],
+            history: false,
+        }],
+    };
+    StateMachineDef {
+        name: "Mode".into(),
+        inputs: vec![
+            Port { name: "go".into(), ty: Type::Bool },
+            Port { name: "stop".into(), ty: Type::Bool },
+            Port { name: "tick".into(), ty: Type::Bool },
+        ],
+        outputs: vec![
+            Port { name: "mode_active".into(), ty: Type::Bool },
+            Port { name: "level".into(), ty: Type::Int32 },
+        ],
+        locals: vec![],
+        initial_state: "Idle".into(),
+        states: vec![idle, active],
+        contract: None,
+    }
+}
+
+#[test]
+fn hierarchical_machine_lowers_with_a_region_local_and_two_enums() {
+    let mut project = Project {
+        name: "h".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![hierarchical_mode_machine()], ..Default::default() }],
+        main: Some("Mode".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("lowers cleanly");
+    assert!(!ol_typecheck::check_project(&project).has_errors());
+    let pkg = &project.packages[0];
+    // Top enum + one nested-region enum.
+    assert!(pkg.types.iter().any(|t| t.name() == "Mode_StateEnum"));
+    assert!(pkg.types.iter().any(|t| t.name() == "Mode_r1_StateEnum"));
+    // Top state local + the nested region's own state local.
+    let node = pkg.find_node("Mode").unwrap();
+    assert!(node.locals.iter().any(|l| l.name == "__sm_state"));
+    assert!(node.locals.iter().any(|l| l.name == "__sm_r1_state"));
+}
+
+#[test]
+fn hierarchical_machine_simulates_with_restart_on_entry() {
+    let mut project = Project {
+        name: "h".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![hierarchical_mode_machine()], ..Default::default() }],
+        main: Some("Mode".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().unwrap();
+    let mut sim = Sim::new(&project, "Mode").unwrap();
+
+    // (go, stop, tick) per cycle.
+    let seq = [
+        (false, false, false), // c0: Idle
+        (true, false, false),  // c1: Idle, then -> Active
+        (false, false, true),  // c2: Active/Lo, tick -> Hi next
+        (false, false, true),  // c3: Active/Hi, tick -> Lo next
+        (false, true, false),  // c4: Active/Lo, stop -> Idle next
+        (true, false, false),  // c5: Idle, go -> Active next
+        (false, false, false), // c6: Active, restarts at Lo
+    ];
+    let mut trace = Vec::new();
+    for (go, stop, tick) in seq {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("go".into(), Value::Bool(go));
+        inputs.insert("stop".into(), Value::Bool(stop));
+        inputs.insert("tick".into(), Value::Bool(tick));
+        let out = sim.step(&inputs).unwrap();
+        trace.push((out["mode_active"].as_bool().unwrap(), out["level"].as_int().unwrap()));
+    }
+    let expected = vec![
+        (false, 0), // c0 Idle
+        (false, 0), // c1 Idle
+        (true, 1),  // c2 Active, nested Lo
+        (true, 2),  // c3 Active, nested Hi
+        (true, 1),  // c4 Active, nested Lo
+        (false, 0), // c5 Idle (level held at 0, nested frozen)
+        (true, 1),  // c6 Active re-entered -> nested restarts at Lo
     ];
     assert_eq!(trace, expected);
 }

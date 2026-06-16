@@ -19,7 +19,18 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Text-based state-machine authoring** —
+**Landed recently (newest first):** **Hierarchical (nested) automata — the
+engine.** A state can now contain nested `Region`s (sub-automata); `lower()`
+walks the tree recursively — each region gets its own state enum and a state
+variable that advances only while its parent state is active and restarts at
+its initial state on (re-)entry (or keeps history), and every output is a
+selection over the whole state tree. It lowers to the same flat dataflow, so
+typecheck / sim / generated C need no changes; a hierarchical `Mode` machine
+simulates correctly (restart-on-entry verified) and its C carries both region
+enums. SCADE-strict "every output assigned on every path" is checked
+recursively. The server accepts nested `regions` in the state-machine payload;
+GUI authoring of the nesting is the next step. Before that: **Text-based
+state-machine authoring** —
 state machines are a first-class tree group (parallel to Types / Constants),
 created and **edited** textually (states, transitions, per-state variable
 equations) with default scaffolding, a keyword-coloured live preview, and
@@ -70,11 +81,15 @@ boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
 **Best next gaps (pick up here):**
-1. **Hierarchical / parallel automata** (P1, large, structural) — text-based
-   state-machine *authoring* now lands (create / edit / use-as-a-block in an
-   operator — see §6), but each machine is still a single flat Moore layer
-   (`crates/ol_ir/src/state_machine.rs` lowers one). SCADE automata nest, run in
-   parallel, and carry history/signals; that is the remaining structural work.
+1. **Nested-automaton GUI authoring** (P1, medium) — the hierarchical-automaton
+   *engine* now lands: nested `Region`s in a state, recursive lowering with
+   restart-on-entry / freeze / history, verified IR↔C (§6), and the server
+   already accepts nested `regions` in the state-machine payload. What remains
+   is letting the engineer *author* the nesting in the Studio (today only flat
+   machines have a text form) — a nested-region syntax/section in `dlg-fsm` and
+   tree display of the hierarchy — plus history/signals UI. (Top-level parallel
+   composition is already available by instantiating several machines in one
+   operator.)
 2. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
    on the canvas, and a right-click "wrap text / don't wrap" per box.
    *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
@@ -138,7 +153,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | Our FSMs are flat Moore-style; SCADE automata nest, run in parallel, carry history and signals | P1 |
+| Hierarchical/parallel automata | **Nesting landed (engine)**: a state can hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: GUI authoring of the nesting, signals, and richer parallel/history UI. Top-level parallel runs today via several machine instances in one operator | P1 (GUI) |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
@@ -182,6 +197,35 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (hierarchy) — hierarchical (nested) automata: the engine
+
+The big structural step for automata. A `StateDef` can now hold nested
+`Region`s — sub-automata that run while the containing state is active — and
+`crates/ol_ir/src/state_machine.rs::lower` walks the tree recursively:
+
+* **Per-region state machinery.** Each region (the top automaton and every
+  nested one) gets its own `<machine>[_rN]_StateEnum` and a state variable. A
+  nested region also gets a boolean activation local (`parent active and
+  parent_state = S`) so its activation can be `pre`'d within the profile's
+  `pre <var>` rule. The region's next-state advances only while active and
+  otherwise **freezes**; on (re-)entry it **restarts** at its initial state
+  (`active and not pre active`) unless `history` is set, in which case it
+  resumes. Outputs are a single selection chain over the whole state tree — a
+  state's value for an output is its nested region's value when one drives it,
+  else the state's own equation.
+* **Lowers to the same flat dataflow**, so typecheck, the simulator, and the
+  C-Lite emitter need *no* changes. A hierarchical `Mode(go,stop,tick)` machine
+  (top Idle/Active; Active nests Lo↔Hi driving `level`) simulates correctly —
+  including restart-on-entry and freeze-while-inactive — and its generated C
+  carries both region enums (`Mode_StateEnum`, `Mode_r1_StateEnum`); a cc-gated
+  byte-for-byte IR↔C test guards equivalence.
+* **Validation is recursive**: unique state names across all regions, per-region
+  initial/target checks, and SCADE-strict "every output assigned along every
+  path" with a precise offending-state error.
+* The Studio server already accepts nested `regions` in the create/update
+  state-machine payload (and `fsm_get` returns them); **authoring the nesting in
+  the editor is the next step** (today the text form covers flat machines).
 
 ### 2026-06-16 (automata) — text-based state-machine authoring, used as a block
 

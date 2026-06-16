@@ -152,7 +152,7 @@ impl Project {
             for sm in machines {
                 match lower(&sm) {
                     Ok(low) => {
-                        pkg.types.push(low.state_type);
+                        pkg.types.extend(low.state_types);
                         pkg.nodes.push(low.node);
                     }
                     Err(e) => errors.push(e),

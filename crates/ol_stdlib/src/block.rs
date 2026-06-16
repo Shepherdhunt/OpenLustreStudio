@@ -244,6 +244,7 @@ impl LibBlock {
                 name: s.name.clone(),
                 equations: eqs,
                 transitions,
+                regions: vec![],
             });
         }
 
@@ -267,7 +268,7 @@ impl LibBlock {
             node: lowered.node,
             contract,
             category: self.category.clone(),
-            extra_types: vec![lowered.state_type],
+            extra_types: lowered.state_types,
         })
     }
 

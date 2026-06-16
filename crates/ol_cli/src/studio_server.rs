@@ -1434,6 +1434,27 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
     Err(format!("node `{node_name}` not found in the model file"))
 }
 
+/// Serialize a state (recursively, including nested regions) for the editor,
+/// with expressions rendered back to text.
+fn sm_state_json(st: &ol_ir::StateDef) -> serde_json::Value {
+    serde_json::json!({
+        "name": st.name,
+        "equations": st.equations.iter().map(|eq| serde_json::json!({
+            "lhs": eq.lhs.join(", "),
+            "body": ol_lustre_emit::format_expr(&eq.rhs),
+        })).collect::<Vec<_>>(),
+        "transitions": st.transitions.iter().map(|t| serde_json::json!({
+            "guard": ol_lustre_emit::format_expr(&t.guard),
+            "target": t.target,
+        })).collect::<Vec<_>>(),
+        "regions": st.regions.iter().map(|r| serde_json::json!({
+            "initial_state": r.initial_state,
+            "history": r.history,
+            "states": r.states.iter().map(sm_state_json).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
+}
+
 /// List the model file's state machines, or return one machine's full
 /// definition (`?name=X`) with expressions rendered as text for the editor.
 fn fsm_get(
@@ -1454,23 +1475,8 @@ fn fsm_get(
             for pkg in &project.packages {
                 for m in &pkg.state_machines {
                     if &m.name == name {
-                        let states: Vec<serde_json::Value> = m
-                            .states
-                            .iter()
-                            .map(|st| {
-                                serde_json::json!({
-                                    "name": st.name,
-                                    "equations": st.equations.iter().map(|eq| serde_json::json!({
-                                        "lhs": eq.lhs.join(", "),
-                                        "body": ol_lustre_emit::format_expr(&eq.rhs),
-                                    })).collect::<Vec<_>>(),
-                                    "transitions": st.transitions.iter().map(|t| serde_json::json!({
-                                        "guard": ol_lustre_emit::format_expr(&t.guard),
-                                        "target": t.target,
-                                    })).collect::<Vec<_>>(),
-                                })
-                            })
-                            .collect();
+                        let states: Vec<serde_json::Value> =
+                            m.states.iter().map(sm_state_json).collect();
                         let value = serde_json::json!({
                             "schema_version": 1,
                             "name": m.name,
@@ -1496,6 +1502,54 @@ fn fsm_get(
 /// validated by lowering it once before the file is saved, so malformed
 /// machines (unknown initial state, unassigned outputs, ...) are rejected
 /// with the lowering error and the file stays untouched.
+/// Parse a `states` array (recursively, so a state's nested `regions` parse
+/// too) into `StateDef`s. A region is `{initial_state, states[], history?}`.
+fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir::StateDef>, String> {
+    let empty: Vec<serde_json::Value> = vec![];
+    let mut states = Vec::new();
+    for st in states_json.and_then(|v| v.as_array()).unwrap_or(&empty) {
+        let sname = st.get("name").and_then(|v| v.as_str()).ok_or("state missing name")?;
+        let mut equations = Vec::new();
+        for eq in st.get("equations").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            let lhs_str = eq.get("lhs").and_then(|v| v.as_str()).ok_or("equation missing lhs")?;
+            let body = eq.get("body").and_then(|v| v.as_str()).ok_or("equation missing body")?;
+            let lhs: Vec<String> = lhs_str
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect();
+            let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("state `{sname}` equation: {e}"))?;
+            equations.push(ol_ir::Equation { lhs, rhs });
+        }
+        let mut transitions = Vec::new();
+        for t in st.get("transitions").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            let guard_str = t.get("guard").and_then(|v| v.as_str()).ok_or("transition missing guard")?;
+            let target = t.get("target").and_then(|v| v.as_str()).ok_or("transition missing target")?;
+            let guard = ol_stdlib::parse_expr(guard_str)
+                .map_err(|e| format!("state `{sname}` transition guard: {e}"))?;
+            transitions.push(ol_ir::Transition { guard, target: target.to_string() });
+        }
+        let mut regions = Vec::new();
+        for r in st.get("regions").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            let initial_state = r
+                .get("initial_state")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("state `{sname}` region missing `initial_state`"))?
+                .to_string();
+            let history = r.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
+            let rstates = parse_sm_states(r.get("states"))?;
+            regions.push(ol_ir::Region { initial_state, states: rstates, history });
+        }
+        states.push(ol_ir::StateDef {
+            name: sname.to_string(),
+            equations,
+            transitions,
+            regions,
+        });
+    }
+    Ok(states)
+}
+
 /// Parse the structured state-machine editor payload into a `StateMachineDef`,
 /// validating it by lowering once (so unknown initial state, unknown transition
 /// targets, and outputs unassigned in a state are rejected). Shared by create
@@ -1529,39 +1583,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         .ok_or("missing string field `initial_state`")?
         .to_string();
 
-    let mut states = Vec::new();
-    for st in req.get("states").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
-        let sname = st
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or("state missing name")?;
-        let mut equations = Vec::new();
-        for eq in st.get("equations").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
-            let lhs_str = eq.get("lhs").and_then(|v| v.as_str()).ok_or("equation missing lhs")?;
-            let body = eq.get("body").and_then(|v| v.as_str()).ok_or("equation missing body")?;
-            let lhs: Vec<String> = lhs_str
-                .split(',')
-                .map(|x| x.trim().to_string())
-                .filter(|x| !x.is_empty())
-                .collect();
-            let rhs = ol_stdlib::parse_expr(body)
-                .map_err(|e| format!("state `{sname}` equation: {e}"))?;
-            equations.push(ol_ir::Equation { lhs, rhs });
-        }
-        let mut transitions = Vec::new();
-        for t in st.get("transitions").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
-            let guard_str = t.get("guard").and_then(|v| v.as_str()).ok_or("transition missing guard")?;
-            let target = t.get("target").and_then(|v| v.as_str()).ok_or("transition missing target")?;
-            let guard = ol_stdlib::parse_expr(guard_str)
-                .map_err(|e| format!("state `{sname}` transition guard: {e}"))?;
-            transitions.push(ol_ir::Transition { guard, target: target.to_string() });
-        }
-        states.push(ol_ir::StateDef {
-            name: sname.to_string(),
-            equations,
-            transitions,
-        });
-    }
+    let states = parse_sm_states(req.get("states"))?;
 
     let machine = ol_ir::StateMachineDef {
         name: name.to_string(),

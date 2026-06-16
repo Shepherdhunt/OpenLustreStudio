@@ -53,11 +53,28 @@ pub struct Transition {
 pub struct StateDef {
     pub name: String,
     /// Equations active while the machine is in this state. Each must assign
-    /// exactly one variable; one equation per output is required.
+    /// exactly one variable; every output must be assigned along every path.
     #[serde(default)]
     pub equations: Vec<Equation>,
     #[serde(default)]
     pub transitions: Vec<Transition>,
+    /// Nested automata (SCADE hierarchy) that run while this state is active.
+    /// A region drives the outputs it assigns; on (re-)entry it restarts at its
+    /// initial state unless `history` is set. Empty for a flat state.
+    #[serde(default)]
+    pub regions: Vec<Region>,
+}
+
+/// A nested automaton inside a state: its own initial state and states (each of
+/// which may nest further). Active only while the containing state is active.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Region {
+    pub initial_state: String,
+    pub states: Vec<StateDef>,
+    /// Resume at the sub-state held on exit when the region re-activates
+    /// (SCADE history), instead of restarting at `initial_state`.
+    #[serde(default)]
+    pub history: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,12 +90,12 @@ pub struct StateMachineDef {
     pub contract: Option<String>,
 }
 
-/// Lowering result: the auto-generated state-enum type, the resulting
-/// dataflow node, and the conventional name of the state local (so callers
-/// can inspect or label it in a UI).
+/// Lowering result: the auto-generated state-enum types (one per region — the
+/// top automaton and every nested one), the resulting dataflow node, and the
+/// conventional name of the top state local (so callers can label it in a UI).
 #[derive(Debug)]
 pub struct LoweredMachine {
-    pub state_type: TypeDef,
+    pub state_types: Vec<TypeDef>,
     pub node: NodeDef,
     pub state_local: String,
 }
@@ -93,6 +110,8 @@ pub enum LowerError {
     UnknownTarget(String, String, String),
     #[error("machine `{0}`: output `{1}` is not assigned in state `{2}`")]
     OutputUnassigned(String, String, String),
+    #[error("machine `{0}`: state name `{1}` is used more than once (state names must be unique across all regions)")]
+    DuplicateState(String, String),
 }
 
 const STATE_LOCAL: &str = "__sm_state";
@@ -102,116 +121,223 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
     if sm.states.is_empty() {
         return Err(LowerError::NoStates(sm.name.clone()));
     }
-    if !sm.states.iter().any(|s| s.name == sm.initial_state) {
-        return Err(LowerError::UnknownInitialState(
-            sm.name.clone(),
-            sm.initial_state.clone(),
-        ));
-    }
-    for s in &sm.states {
-        for t in &s.transitions {
-            if !sm.states.iter().any(|x| x.name == t.target) {
-                return Err(LowerError::UnknownTarget(
-                    sm.name.clone(),
-                    s.name.clone(),
-                    t.target.clone(),
-                ));
-            }
+    // Validate the whole tree before emitting: unique state names, known
+    // per-region initial states and transition targets, and SCADE strictness
+    // (every output assigned along every path).
+    let mut names: Vec<String> = Vec::new();
+    collect_state_names(&sm.states, &mut names);
+    let mut seen = std::collections::HashSet::new();
+    for n in &names {
+        if !seen.insert(n.clone()) {
+            return Err(LowerError::DuplicateState(sm.name.clone(), n.clone()));
         }
     }
+    validate_region(sm, &sm.initial_state, &sm.states)?;
     for out in &sm.outputs {
-        for s in &sm.states {
-            if !state_assigns(s, &out.name) {
-                return Err(LowerError::OutputUnassigned(
-                    sm.name.clone(),
-                    out.name.clone(),
-                    s.name.clone(),
-                ));
-            }
-        }
+        require_cover(sm, &out.name, &sm.states)?;
     }
 
-    let state_type_name = format!("{}_StateEnum", sm.name);
-    let state_ty = Type::named(state_type_name.clone());
-
-    let state_type = TypeDef {
-        body: TypeBody::Enum(EnumDef {
-            name: state_type_name.clone(),
-            variants: sm.states.iter().map(|s| s.name.clone()).collect(),
-        }),
+    let mut lo = Lower {
+        machine: sm,
+        enums: Vec::new(),
+        locals: sm.locals.clone(),
+        equations: Vec::new(),
+        next_id: 0,
     };
-
-    let state_eq = Equation {
-        lhs: vec![STATE_LOCAL.into()],
-        rhs: Expr::arrow(
-            Expr::var(&sm.initial_state),
-            Expr::pre(Expr::var(NEXT_STATE_LOCAL)),
-        ),
-    };
-
-    let next_state_eq = Equation {
-        lhs: vec![NEXT_STATE_LOCAL.into()],
-        rhs: build_next_state_expr(sm),
-    };
-
-    let mut equations = vec![state_eq, next_state_eq];
-
+    let top = lo.emit_region(&sm.initial_state, &sm.states, Expr::bool_lit(true), false);
     for out in &sm.outputs {
-        equations.push(Equation {
-            lhs: vec![out.name.clone()],
-            rhs: build_output_chain(sm, &out.name, &out.ty),
-        });
+        let rhs = lo.value_of(&out.name, &top, &out.ty);
+        lo.equations.push(Equation { lhs: vec![out.name.clone()], rhs });
     }
-
-    let mut locals = sm.locals.clone();
-    locals.push(Local {
-        name: STATE_LOCAL.into(),
-        ty: state_ty.clone(),
-    });
-    locals.push(Local {
-        name: NEXT_STATE_LOCAL.into(),
-        ty: state_ty,
-    });
 
     let node = NodeDef {
         name: sm.name.clone(),
         kind: NodeKind::Operator,
         inputs: sm.inputs.clone(),
         outputs: sm.outputs.clone(),
-        locals,
-        equations,
+        locals: lo.locals,
+        equations: lo.equations,
         contract: sm.contract.clone(),
         diagram: Default::default(),
         probes: Vec::new(),
     };
-
     Ok(LoweredMachine {
-        state_type,
+        state_types: lo.enums,
         node,
         state_local: STATE_LOCAL.into(),
     })
 }
 
-fn state_assigns(state: &StateDef, name: &str) -> bool {
-    state
-        .equations
-        .iter()
-        .any(|eq| eq.lhs.len() == 1 && eq.lhs[0] == name)
+// --- recursive lowering ------------------------------------------------------
+
+/// The lowered shape of one region: the name of its state variable and, per
+/// state, the state's definition plus the regions nested inside it (paired with
+/// their lowered handles) — enough to build each output's selection chain.
+struct RegionInfo<'a> {
+    state_var: String,
+    states: Vec<StateNode<'a>>,
+}
+struct StateNode<'a> {
+    def: &'a StateDef,
+    nested: Vec<(&'a Region, RegionInfo<'a>)>,
 }
 
-fn build_next_state_expr(sm: &StateMachineDef) -> Expr {
-    // Innermost else: stay in the current state.
-    let stay = Expr::var(STATE_LOCAL);
+struct Lower<'a> {
+    machine: &'a StateMachineDef,
+    enums: Vec<TypeDef>,
+    locals: Vec<Local>,
+    equations: Vec<Equation>,
+    next_id: usize,
+}
+
+impl<'a> Lower<'a> {
+    /// Emit the state-enum, state/next locals and equations for one region (and
+    /// recursively its nested regions), and return its handle. `active` is the
+    /// boolean condition under which the region runs (the constant `true` for
+    /// the top automaton; `parent_active and parent_state = S` for a region
+    /// nested in state `S`).
+    fn emit_region(
+        &mut self,
+        initial: &str,
+        states: &'a [StateDef],
+        active: Expr,
+        history: bool,
+    ) -> RegionInfo<'a> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let (state_var, next_var, enum_name) = if id == 0 {
+            (
+                STATE_LOCAL.to_string(),
+                NEXT_STATE_LOCAL.to_string(),
+                format!("{}_StateEnum", self.machine.name),
+            )
+        } else {
+            (
+                format!("__sm_r{id}_state"),
+                format!("__sm_r{id}_next"),
+                format!("{}_r{id}_StateEnum", self.machine.name),
+            )
+        };
+        let state_ty = Type::named(enum_name.clone());
+        self.enums.push(TypeDef {
+            body: TypeBody::Enum(EnumDef {
+                name: enum_name,
+                variants: states.iter().map(|s| s.name.clone()).collect(),
+            }),
+        });
+        self.locals.push(Local { name: state_var.clone(), ty: state_ty.clone() });
+        self.locals.push(Local { name: next_var.clone(), ty: state_ty });
+
+        // next-state transition chain over this region's states.
+        let chain = build_next_state_chain(states, &state_var);
+        let top_level = matches!(&active, Expr::Const { lit: Literal::Bool { value: true } });
+
+        // For a nested region, materialise the activation condition into a bool
+        // local so it can be `pre`'d (the profile only allows `pre <var>`); the
+        // top automaton runs every cycle and needs none.
+        let active_var = if top_level {
+            None
+        } else {
+            let av = format!("__sm_r{id}_active");
+            self.locals.push(Local { name: av.clone(), ty: Type::Bool });
+            self.equations.push(Equation { lhs: vec![av.clone()], rhs: active });
+            Some(av)
+        };
+
+        if let Some(av) = &active_var {
+            // Nested: advance only while active, else freeze; restart at the
+            // initial state on (re-)entry unless this region keeps history.
+            let next_rhs = Expr::if_then_else(Expr::var(av), chain, Expr::var(&state_var));
+            let state_rhs = if history {
+                Expr::arrow(Expr::var(initial), Expr::pre(Expr::var(&next_var)))
+            } else {
+                let just_entered = Expr::and(
+                    Expr::var(av),
+                    Expr::arrow(Expr::bool_lit(true), Expr::not(Expr::pre(Expr::var(av)))),
+                );
+                Expr::if_then_else(
+                    just_entered,
+                    Expr::var(initial),
+                    Expr::arrow(Expr::var(initial), Expr::pre(Expr::var(&next_var))),
+                )
+            };
+            self.equations.push(Equation { lhs: vec![state_var.clone()], rhs: state_rhs });
+            self.equations.push(Equation { lhs: vec![next_var.clone()], rhs: next_rhs });
+        } else {
+            // Top automaton: identical to the flat lowering.
+            self.equations.push(Equation {
+                lhs: vec![state_var.clone()],
+                rhs: Expr::arrow(Expr::var(initial), Expr::pre(Expr::var(&next_var))),
+            });
+            self.equations.push(Equation { lhs: vec![next_var.clone()], rhs: chain });
+        }
+
+        let mut nodes = Vec::with_capacity(states.len());
+        for st in states {
+            let mut nested = Vec::new();
+            for region in &st.regions {
+                let in_state = Expr::bin(BinOp::Eq, Expr::var(&state_var), Expr::var(&st.name));
+                let nested_active = match &active_var {
+                    Some(av) => Expr::and(Expr::var(av), in_state),
+                    None => in_state,
+                };
+                let info = self.emit_region(
+                    &region.initial_state,
+                    &region.states,
+                    nested_active,
+                    region.history,
+                );
+                nested.push((region, info));
+            }
+            nodes.push(StateNode { def: st, nested });
+        }
+        RegionInfo { state_var, states: nodes }
+    }
+
+    /// The value of output `o` selected across this region's state tree:
+    /// `if state = S1 then <value in S1> else if state = S2 then … else default`.
+    fn value_of(&self, o: &str, region: &RegionInfo, ty: &Type) -> Expr {
+        let mut chain = default_expr_for_type(ty);
+        for node in region.states.iter().rev() {
+            let val = self.value_in_state(o, node, ty);
+            chain = Expr::if_then_else(
+                Expr::bin(BinOp::Eq, Expr::var(&region.state_var), Expr::var(&node.def.name)),
+                val,
+                chain,
+            );
+        }
+        chain
+    }
+
+    fn value_in_state(&self, o: &str, node: &StateNode, ty: &Type) -> Expr {
+        // A nested region that drives `o` on every path takes precedence (the
+        // sub-automaton refines this state's behaviour); otherwise the state's
+        // own equation.
+        for (rdef, rinfo) in &node.nested {
+            if region_covers(o, rdef) {
+                return self.value_of(o, rinfo, ty);
+            }
+        }
+        node.def
+            .equations
+            .iter()
+            .find(|e| e.lhs.len() == 1 && e.lhs[0] == o)
+            .map(|e| e.rhs.clone())
+            .unwrap_or_else(|| default_expr_for_type(ty))
+    }
+}
+
+/// The next-state chain for one region's states, keyed off `state_var`.
+fn build_next_state_chain(states: &[StateDef], state_var: &str) -> Expr {
+    let stay = Expr::var(state_var);
     let mut chain = stay.clone();
-    for s in sm.states.iter().rev() {
-        // For each transition in declaration order, build a guarded chain
-        // ending in `stay`. The first transition whose guard is true wins.
+    for s in states.iter().rev() {
         let mut inner = stay.clone();
         for t in s.transitions.iter().rev() {
             inner = Expr::if_then_else(t.guard.clone(), Expr::var(&t.target), inner);
         }
         chain = Expr::if_then_else(
-            Expr::bin(BinOp::Eq, Expr::var(STATE_LOCAL), Expr::var(&s.name)),
+            Expr::bin(BinOp::Eq, Expr::var(state_var), Expr::var(&s.name)),
             inner,
             chain,
         );
@@ -219,22 +345,73 @@ fn build_next_state_expr(sm: &StateMachineDef) -> Expr {
     chain
 }
 
-fn build_output_chain(sm: &StateMachineDef, output: &str, ty: &Type) -> Expr {
-    let mut chain = default_expr_for_type(ty);
-    for s in sm.states.iter().rev() {
-        let assigned = s
-            .equations
-            .iter()
-            .find(|eq| eq.lhs.len() == 1 && eq.lhs[0] == output)
-            .map(|eq| eq.rhs.clone())
-            .unwrap_or_else(|| default_expr_for_type(ty));
-        chain = Expr::if_then_else(
-            Expr::bin(BinOp::Eq, Expr::var(STATE_LOCAL), Expr::var(&s.name)),
-            assigned,
-            chain,
-        );
+// --- validation (operates on the raw definition tree) ------------------------
+
+fn collect_state_names(states: &[StateDef], into: &mut Vec<String>) {
+    for s in states {
+        into.push(s.name.clone());
+        for r in &s.regions {
+            collect_state_names(&r.states, into);
+        }
     }
-    chain
+}
+
+fn validate_region(sm: &StateMachineDef, initial: &str, states: &[StateDef]) -> Result<(), LowerError> {
+    if !states.iter().any(|s| s.name == initial) {
+        return Err(LowerError::UnknownInitialState(sm.name.clone(), initial.to_string()));
+    }
+    for s in states {
+        for t in &s.transitions {
+            if !states.iter().any(|x| x.name == t.target) {
+                return Err(LowerError::UnknownTarget(
+                    sm.name.clone(),
+                    s.name.clone(),
+                    t.target.clone(),
+                ));
+            }
+        }
+        for r in &s.regions {
+            validate_region(sm, &r.initial_state, &r.states)?;
+        }
+    }
+    Ok(())
+}
+
+/// Does `state` assign `o` (directly, or via a nested region that covers it on
+/// every path)?
+fn state_covers(o: &str, state: &StateDef) -> bool {
+    state.equations.iter().any(|e| e.lhs.len() == 1 && e.lhs[0] == o)
+        || state.regions.iter().any(|r| region_covers(o, r))
+}
+fn region_covers(o: &str, region: &Region) -> bool {
+    region.states.iter().all(|s| state_covers(o, s))
+}
+
+/// SCADE strictness: every state in the list must cover `o`, recursively, with
+/// a precise error pointing at the offending state.
+fn require_cover(sm: &StateMachineDef, o: &str, states: &[StateDef]) -> Result<(), LowerError> {
+    for st in states {
+        if st.equations.iter().any(|e| e.lhs.len() == 1 && e.lhs[0] == o) {
+            continue;
+        }
+        if st.regions.is_empty() {
+            return Err(LowerError::OutputUnassigned(sm.name.clone(), o.to_string(), st.name.clone()));
+        }
+        let mut covered = false;
+        let mut first_err = None;
+        for r in &st.regions {
+            match require_cover(sm, o, &r.states) {
+                Ok(()) => { covered = true; break; }
+                Err(e) => { first_err.get_or_insert(e); }
+            }
+        }
+        if !covered {
+            return Err(first_err.unwrap_or_else(|| {
+                LowerError::OutputUnassigned(sm.name.clone(), o.to_string(), st.name.clone())
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn default_expr_for_type(ty: &Type) -> Expr {
