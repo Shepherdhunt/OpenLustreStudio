@@ -63,6 +63,13 @@ pub struct StateDef {
     /// initial state unless `history` is set. Empty for a flat state.
     #[serde(default)]
     pub regions: Vec<Region>,
+    /// "Refine" this state into another state machine by name: while the state
+    /// is active that machine runs as a nested region. Resolved against the
+    /// project's machines at lowering time (so edits to the sub-machine
+    /// propagate), then validated like any nested region. `None` for a state
+    /// that does not delegate.
+    #[serde(default)]
+    pub refines: Option<String>,
 }
 
 /// A nested automaton inside a state: its own initial state and states (each of
@@ -112,6 +119,102 @@ pub enum LowerError {
     OutputUnassigned(String, String, String),
     #[error("machine `{0}`: state name `{1}` is used more than once (state names must be unique across all regions)")]
     DuplicateState(String, String),
+    #[error("machine `{0}`: state `{1}` refines unknown machine `{2}`")]
+    UnknownRefine(String, String, String),
+    #[error("machine `{0}`: refinement cycle through machine `{1}`")]
+    RefineCycle(String, String),
+}
+
+/// Resolve every `refines` reference in `sm` into an inlined nested [`Region`]
+/// built from the referenced machine's (recursively resolved) states. Looks
+/// machines up in `by_name`; reports an unknown reference or a refinement
+/// cycle. The result has `refines: None` everywhere and is ready for [`lower`].
+/// Name collisions between a parent and a sub-machine surface later as
+/// `DuplicateState` (state names must be unique across the whole machine).
+pub fn resolve_refines(
+    sm: &StateMachineDef,
+    by_name: &std::collections::HashMap<String, StateMachineDef>,
+) -> Result<StateMachineDef, LowerError> {
+    let mut stack = vec![sm.name.clone()];
+    let states = resolve_states(&sm.name, &sm.states, by_name, &mut stack)?;
+    Ok(StateMachineDef { states, ..sm.clone() })
+}
+
+/// Prefix every state name (and the transition targets / region initial-states
+/// that reference them) throughout a resolved subtree, so an inlined
+/// sub-machine's states are globally unique. Equations and guards reference
+/// only inputs/outputs/locals, so they are untouched.
+fn prefix_states(states: Vec<StateDef>, prefix: &str) -> Vec<StateDef> {
+    states
+        .into_iter()
+        .map(|s| StateDef {
+            name: format!("{prefix}{}", s.name),
+            equations: s.equations,
+            transitions: s
+                .transitions
+                .into_iter()
+                .map(|t| Transition { guard: t.guard, target: format!("{prefix}{}", t.target) })
+                .collect(),
+            regions: s
+                .regions
+                .into_iter()
+                .map(|r| Region {
+                    initial_state: format!("{prefix}{}", r.initial_state),
+                    states: prefix_states(r.states, prefix),
+                    history: r.history,
+                })
+                .collect(),
+            refines: None,
+        })
+        .collect()
+}
+
+fn resolve_states(
+    machine: &str,
+    states: &[StateDef],
+    by_name: &std::collections::HashMap<String, StateMachineDef>,
+    stack: &mut Vec<String>,
+) -> Result<Vec<StateDef>, LowerError> {
+    let mut out = Vec::with_capacity(states.len());
+    for st in states {
+        // Resolve any already-inline regions, then the `refines` delegation.
+        let mut regions = Vec::with_capacity(st.regions.len());
+        for r in &st.regions {
+            regions.push(Region {
+                initial_state: r.initial_state.clone(),
+                states: resolve_states(machine, &r.states, by_name, stack)?,
+                history: r.history,
+            });
+        }
+        if let Some(target) = &st.refines {
+            if stack.contains(target) {
+                return Err(LowerError::RefineCycle(machine.to_string(), target.clone()));
+            }
+            let sub = by_name.get(target).ok_or_else(|| {
+                LowerError::UnknownRefine(machine.to_string(), st.name.clone(), target.clone())
+            })?;
+            stack.push(target.clone());
+            let sub_states = resolve_states(machine, &sub.states, by_name, stack)?;
+            stack.pop();
+            // Qualify the inlined sub-machine's state names per refinement site
+            // (`<parent state>_`) so they collide with neither the standalone
+            // version of the sub-machine nor another refinement of it.
+            let prefix = format!("{}_", st.name);
+            regions.push(Region {
+                initial_state: format!("{prefix}{}", sub.initial_state),
+                states: prefix_states(sub_states, &prefix),
+                history: false,
+            });
+        }
+        out.push(StateDef {
+            name: st.name.clone(),
+            equations: st.equations.clone(),
+            transitions: st.transitions.clone(),
+            regions,
+            refines: None,
+        });
+    }
+    Ok(out)
 }
 
 const STATE_LOCAL: &str = "__sm_state";

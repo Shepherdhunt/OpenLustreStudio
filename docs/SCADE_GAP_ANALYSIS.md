@@ -19,8 +19,14 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Hierarchical (nested) automata — the
-engine.** A state can now contain nested `Region`s (sub-automata); `lower()`
+**Landed recently (newest first):** **Hierarchical automata — authoring, by
+refinement.** A state can now `refine` another machine in the editor: write
+`Active: refine Spin` in the states box and, while `Active` is active, the
+`Spin` machine runs nested (its states inlined as a region, names qualified per
+site so they never collide, resolved live so edits to `Spin` propagate). It
+validates on save (unknown/cyclic refinement reported), builds to nested
+dataflow, round-trips back into the form, and the keyword preview colours the
+`refine`. Before that: **Hierarchical (nested) automata — the engine.** A state can now contain nested `Region`s (sub-automata); `lower()`
 walks the tree recursively — each region gets its own state enum and a state
 variable that advances only while its parent state is active and restarts at
 its initial state on (re-)entry (or keeps history), and every output is a
@@ -81,16 +87,7 @@ boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
 **Best next gaps (pick up here):**
-1. **Nested-automaton GUI authoring** (P1, medium) — the hierarchical-automaton
-   *engine* now lands: nested `Region`s in a state, recursive lowering with
-   restart-on-entry / freeze / history, verified IR↔C (§6), and the server
-   already accepts nested `regions` in the state-machine payload. What remains
-   is letting the engineer *author* the nesting in the Studio (today only flat
-   machines have a text form) — a nested-region syntax/section in `dlg-fsm` and
-   tree display of the hierarchy — plus history/signals UI. (Top-level parallel
-   composition is already available by instantiating several machines in one
-   operator.)
-2. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
+1. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
    on the canvas, and a right-click "wrap text / don't wrap" per box.
    *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
    it (construct an array/struct from element inputs, or destructure one) — a
@@ -98,17 +95,19 @@ symbols; typed wire labels.
    *Also:* **composite constant values** — array/struct/string (`char[]`)
    constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
    scalar constants parse) plus a `char` type; scalar constants already work.
-3. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
+2. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
    add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
    generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
    pattern.
-4. **Tool Operational Requirements document** (P1 if certification-adjacent) —
+3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-5. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
+4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
    copy/paste, distinct per-family gate silhouettes (§2).
-6. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
+5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
+6. **Automata depth** (P2) — history / signals UI, and richer parallel
+   composition beyond instantiating several machines in one operator.
 
 Everything ships across all stages — IR → typecheck → sim → generated C →
 dual-backend equivalence test — or it isn't done. The §6 log records each slice.
@@ -197,6 +196,25 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (refine) — authoring hierarchy by refinement
+
+The editor half of nested automata, in the spirit the user asked for —
+text-based, composed by reference. A state can `refine` another machine: in the
+state-machine editor's states box, write `Active: refine Spin` (alongside any of
+the state's own equations). At lowering time `resolve_refines` looks `Spin` up
+among the project's machines and inlines its (recursively resolved) states as a
+nested region of that state — **qualifying the inlined state names per site**
+(`Active_Lo`, …) so they collide with neither the standalone `Spin` nor a second
+refinement, and resolving **live** so edits to `Spin` propagate. Unknown and
+cyclic refinements are reported; the machine validates on save (resolve + lower)
+and round-trips back into the form (`fsm_get` returns each state's `refines`).
+The keyword preview colours `refine`. Verified end to end in the Studio: author
+flat `Spin`, refine it from `RefMode`'s `Active`, build → nested lowering
+(`RefMode_r1_StateEnum`, `Active_Lo`); tests in `tests/state_machines.rs`
+(`refine_resolves_a_sub_machine_and_simulates`, `refine_to_unknown_machine_is_rejected`).
+Top-level parallel composition is already available by instantiating several
+machines in one operator; history/signals UI remains (§ best-next #6).
 
 ### 2026-06-16 (hierarchy) — hierarchical (nested) automata: the engine
 

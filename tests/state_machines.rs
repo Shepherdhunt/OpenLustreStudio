@@ -31,6 +31,7 @@ fn toggle_machine() -> StateMachineDef {
                     target: "ON".into(),
                 }],
                 regions: vec![],
+                refines: None,
             },
             StateDef {
                 name: "ON".into(),
@@ -43,6 +44,7 @@ fn toggle_machine() -> StateMachineDef {
                     target: "OFF".into(),
                 }],
                 regions: vec![],
+                refines: None,
             },
         ],
         contract: None,
@@ -208,6 +210,7 @@ fn three_state_traffic_light_simulates_correctly() {
             },
         ],
         regions: vec![],
+        refines: None,
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -281,12 +284,14 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(1) }],
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
+        refines: None,
     };
     let hi = StateDef {
         name: "Hi".into(),
         equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(2) }],
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
+        refines: None,
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -296,6 +301,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         ],
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
+        refines: None,
     };
     let active = StateDef {
         name: "Active".into(),
@@ -307,6 +313,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
             states: vec![lo, hi],
             history: false,
         }],
+        refines: None,
     };
     StateMachineDef {
         name: "Mode".into(),
@@ -344,6 +351,122 @@ fn hierarchical_machine_lowers_with_a_region_local_and_two_enums() {
     let node = pkg.find_node("Mode").unwrap();
     assert!(node.locals.iter().any(|l| l.name == "__sm_state"));
     assert!(node.locals.iter().any(|l| l.name == "__sm_r1_state"));
+}
+
+/// `Spin` is a flat machine (Lo<->Hi driving `level`); `RefMode` is Idle/Active
+/// where Active *refines* Spin. After resolution the behaviour is identical to
+/// the inline hierarchical `Mode`, proving refine-by-reference.
+fn spin_and_refmode() -> Vec<StateMachineDef> {
+    let spin = StateMachineDef {
+        name: "Spin".into(),
+        inputs: vec![Port { name: "tick".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "level".into(), ty: Type::Int32 }],
+        locals: vec![],
+        initial_state: "Lo".into(),
+        states: vec![
+            StateDef {
+                name: "Lo".into(),
+                equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(1) }],
+                transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
+                regions: vec![],
+                refines: None,
+            },
+            StateDef {
+                name: "Hi".into(),
+                equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(2) }],
+                transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
+                regions: vec![],
+                refines: None,
+            },
+        ],
+        contract: None,
+    };
+    let refmode = StateMachineDef {
+        name: "RefMode".into(),
+        inputs: vec![
+            Port { name: "go".into(), ty: Type::Bool },
+            Port { name: "stop".into(), ty: Type::Bool },
+            Port { name: "tick".into(), ty: Type::Bool },
+        ],
+        outputs: vec![
+            Port { name: "mode_active".into(), ty: Type::Bool },
+            Port { name: "level".into(), ty: Type::Int32 },
+        ],
+        locals: vec![],
+        initial_state: "Idle".into(),
+        states: vec![
+            StateDef {
+                name: "Idle".into(),
+                equations: vec![
+                    Equation { lhs: vec!["mode_active".into()], rhs: Expr::bool_lit(false) },
+                    Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(0) },
+                ],
+                transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
+                regions: vec![],
+                refines: None,
+            },
+            StateDef {
+                name: "Active".into(),
+                equations: vec![Equation { lhs: vec!["mode_active".into()], rhs: Expr::bool_lit(true) }],
+                transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
+                regions: vec![],
+                refines: Some("Spin".into()), // delegate to the Spin machine
+            },
+        ],
+        contract: None,
+    };
+    vec![spin, refmode]
+}
+
+#[test]
+fn refine_resolves_a_sub_machine_and_simulates() {
+    let mut project = Project {
+        name: "ref".into(),
+        packages: vec![Package { name: "user".into(), state_machines: spin_and_refmode(), ..Default::default() }],
+        main: Some("RefMode".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("refine resolves and lowers");
+    assert!(!ol_typecheck::check_project(&project).has_errors());
+
+    let mut sim = Sim::new(&project, "RefMode").unwrap();
+    let seq = [
+        (false, false, false),
+        (true, false, false),
+        (false, false, true),
+        (false, false, true),
+        (false, true, false),
+        (true, false, false),
+        (false, false, false),
+    ];
+    let mut trace = Vec::new();
+    for (go, stop, tick) in seq {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("go".into(), Value::Bool(go));
+        inputs.insert("stop".into(), Value::Bool(stop));
+        inputs.insert("tick".into(), Value::Bool(tick));
+        let out = sim.step(&inputs).unwrap();
+        trace.push((out["mode_active"].as_bool().unwrap(), out["level"].as_int().unwrap()));
+    }
+    // Identical to the inline hierarchical Mode.
+    assert_eq!(
+        trace,
+        vec![(false, 0), (false, 0), (true, 1), (true, 2), (true, 1), (false, 0), (true, 1)]
+    );
+}
+
+#[test]
+fn refine_to_unknown_machine_is_rejected() {
+    let mut machines = spin_and_refmode();
+    machines[1].states[1].refines = Some("Ghost".into()); // Active refines a missing machine
+    let mut project = Project {
+        name: "ref".into(),
+        packages: vec![Package { name: "user".into(), state_machines: machines, ..Default::default() }],
+        main: Some("RefMode".into()),
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::UnknownRefine(_, _, _)), "{errs:?}");
 }
 
 #[test]

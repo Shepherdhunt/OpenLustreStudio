@@ -245,6 +245,7 @@ impl LibBlock {
                 equations: eqs,
                 transitions,
                 regions: vec![],
+                refines: None,
             });
         }
 

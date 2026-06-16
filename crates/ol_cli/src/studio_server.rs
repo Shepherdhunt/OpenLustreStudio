@@ -1452,6 +1452,7 @@ fn sm_state_json(st: &ol_ir::StateDef) -> serde_json::Value {
             "history": r.history,
             "states": r.states.iter().map(sm_state_json).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
+        "refines": st.refines,
     })
 }
 
@@ -1540,11 +1541,17 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
             let rstates = parse_sm_states(r.get("states"))?;
             regions.push(ol_ir::Region { initial_state, states: rstates, history });
         }
+        let refines = st
+            .get("refines")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         states.push(ol_ir::StateDef {
             name: sname.to_string(),
             equations,
             transitions,
             regions,
+            refines,
         });
     }
     Ok(states)
@@ -1594,10 +1601,24 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         states,
         contract: None,
     };
-    // Validate before saving: lowering reports unknown initial state,
-    // unknown transition targets, and outputs unassigned in a state.
-    ol_ir::lower_state_machine(&machine).map_err(|e| e.to_string())?;
     Ok(machine)
+}
+
+/// Validate a machine by resolving its `refines` references against the
+/// project's machines and lowering the result — so unknown initial states,
+/// unknown transition targets, unassigned outputs, unknown/cyclic refinements,
+/// and name collisions are all reported before the machine is saved.
+fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachineDef) -> Result<(), String> {
+    let by_name: std::collections::HashMap<String, ol_ir::StateMachineDef> = project
+        .packages
+        .iter()
+        .flat_map(|p| p.state_machines.iter().cloned())
+        .chain(std::iter::once(machine.clone()))
+        .map(|m| (m.name.clone(), m))
+        .collect();
+    let resolved = ol_ir::resolve_refines(machine, &by_name).map_err(|e| e.to_string())?;
+    ol_ir::lower_state_machine(&resolved).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Create a new state machine. The name must be free (no node or machine).
@@ -1611,6 +1632,7 @@ fn edit_add_state_machine(
     {
         return Err(format!("`{}` already exists", machine.name));
     }
+    validate_state_machine(project, &machine)?;
     if project.packages.is_empty() {
         project.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
     }
@@ -1625,6 +1647,7 @@ fn edit_update_state_machine(
     req: &serde_json::Value,
 ) -> Result<(), String> {
     let machine = parse_state_machine_req(req)?;
+    validate_state_machine(project, &machine)?;
     for pkg in &mut project.packages {
         if let Some(slot) = pkg.state_machines.iter_mut().find(|m| m.name == machine.name) {
             *slot = machine;

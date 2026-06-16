@@ -597,7 +597,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>State machines are authored as text — states, transitions, and the variables each state drives — and lower to dataflow automatically. Use one inside an operator as a <strong>block</strong>: drop it from the Operations toolbox, wire the operator's inputs into it, and read its outputs back out. Every output must be assigned in every state (SCADE strictness), or the build reports it.</p>
+    <p>State machines are authored as text — states, transitions, and the variables each state drives — and lower to dataflow automatically. Use one inside an operator as a <strong>block</strong>: drop it from the Operations toolbox, wire the operator's inputs into it, and read its outputs back out. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -2821,13 +2821,21 @@ function fsmBuildPayload() {
     const t = line.trim();
     if (!t) continue;
     const ci = t.indexOf(":");
-    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return null; }
+    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr` or `Name: refine Machine` — got: " + t); return null; }
     const name = t.slice(0, ci).trim();
-    const eqs = t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean).map(e => {
-      const ei = e.indexOf("=");
-      return { lhs: e.slice(0, ei).trim(), body: e.slice(ei + 1).trim() };
-    });
-    states[name] = { name, equations: eqs, transitions: [] };
+    const eqs = [];
+    let refines = null;
+    for (const seg of t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean)) {
+      // `refine Machine` delegates this state to another state machine.
+      const rm = seg.match(/^refine\s+(\w+)$/);
+      if (rm) { refines = rm[1]; continue; }
+      const ei = seg.indexOf("=");
+      if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr` or `refine Machine` — got: " + seg); return null; }
+      eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
+    }
+    const st = { name, equations: eqs, transitions: [] };
+    if (refines) st.refines = refines;
+    states[name] = st;
     order.push(name);
   }
   for (const line of transText.split("\n")) {
@@ -2905,7 +2913,12 @@ function fsmLoadIntoForm(m) {
   document.getElementById("fsm-inputs").value = ports(m.inputs);
   document.getElementById("fsm-outputs").value = ports(m.outputs);
   document.getElementById("fsm-states").value = (m.states || [])
-    .map(s => s.name + ": " + (s.equations || []).map(e => e.lhs + " = " + e.body).join("; "))
+    .map(s => {
+      const parts = [];
+      if (s.refines) parts.push("refine " + s.refines);
+      for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
+      return s.name + ": " + parts.join("; ");
+    })
     .join("\n");
   const trans = [];
   for (const s of (m.states || [])) {
@@ -2953,7 +2966,16 @@ function fsmPreview() {
     if (ci < 0) { html += '<span class="err">' + escapeHTML(t) + " — needs `Name: …`</span>\n"; continue; }
     const nm = t.slice(0, ci).trim();
     const tag = nm === initial ? ' <span class="kw">(initial)</span>' : "";
-    html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + escapeHTML(t.slice(ci + 1).trim()) + "\n";
+    const rest = t.slice(ci + 1).trim();
+    const body = rest.split(";").map(seg => {
+      seg = seg.trim();
+      if (!seg) return "";
+      const rm = seg.match(/^refine\s+(\w+)$/);
+      return rm
+        ? '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>'
+        : escapeHTML(seg);
+    }).filter(Boolean).join("; ");
+    html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + body + "\n";
   }
   for (const line of transText.split("\n")) {
     const t = line.trim();

@@ -33,7 +33,8 @@ pub use order::evaluation_order;
 pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
 pub use slice::slice_for_root;
 pub use state_machine::{
-    lower as lower_state_machine, LoweredMachine, Region, StateDef, StateMachineDef, Transition,
+    lower as lower_state_machine, resolve_refines, LoweredMachine, Region, StateDef,
+    StateMachineDef, Transition,
 };
 pub use types::Type;
 pub use loader::{load_project, LoadError};

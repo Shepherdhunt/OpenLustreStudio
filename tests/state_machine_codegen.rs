@@ -33,6 +33,7 @@ fn traffic_light_project() -> Project {
             Transition { guard: Expr::var("tick"), target: advance_to.into() },
         ],
         regions: vec![],
+        refines: None,
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -174,12 +175,14 @@ fn mode_project() -> Project {
         equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(1) }],
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
+        refines: None,
     };
     let hi = StateDef {
         name: "Hi".into(),
         equations: vec![Equation { lhs: vec!["level".into()], rhs: Expr::int_lit(2) }],
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
+        refines: None,
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -189,12 +192,14 @@ fn mode_project() -> Project {
         ],
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
+        refines: None,
     };
     let active = StateDef {
         name: "Active".into(),
         equations: vec![Equation { lhs: vec!["active".into()], rhs: Expr::bool_lit(true) }],
         transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
         regions: vec![Region { initial_state: "Lo".into(), states: vec![lo, hi], history: false }],
+        refines: None,
     };
     let sm = StateMachineDef {
         name: "Mode".into(),

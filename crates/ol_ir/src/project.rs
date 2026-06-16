@@ -149,8 +149,19 @@ impl Project {
         let mut errors = Vec::new();
         for pkg in &mut self.packages {
             let machines = std::mem::take(&mut pkg.state_machines);
-            for sm in machines {
-                match lower(&sm) {
+            // Resolve `refines` references against the package's machines
+            // (so a state can delegate to another machine), then lower.
+            let by_name: std::collections::HashMap<String, crate::StateMachineDef> =
+                machines.iter().map(|m| (m.name.clone(), m.clone())).collect();
+            for sm in &machines {
+                let resolved = match crate::state_machine::resolve_refines(sm, &by_name) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                };
+                match lower(&resolved) {
                     Ok(low) => {
                         pkg.types.extend(low.state_types);
                         pkg.nodes.push(low.node);
