@@ -69,7 +69,13 @@
   #sidetext .dock-title { display: flex; gap: 10px; align-items: center; }
   #sidetext .dock-title span[data-pane] { cursor: pointer; padding: 0 4px; text-transform: none; font-weight: 400; }
   #sidetext .dock-title span[data-pane].active { font-weight: 700; color: #2b579a; }
-  #sidetext pre { flex: 1; margin: 0; border: none; }
+  #sidetext .dock-title .copy-btn { margin-left: auto; cursor: pointer; font-weight: 400;
+    text-transform: none; padding: 1px 8px; border: 1px solid #9aa6b2; border-radius: 3px;
+    background: #fff; color: #1e1e1e; }
+  #sidetext .dock-title .copy-btn:hover { background: #2b579a; color: #fff; }
+  /* The code is selectable so the engineer can copy it out (the dock title bar
+     above sets user-select:none, which the panes must not inherit). */
+  #sidetext pre { flex: 1; margin: 0; border: none; user-select: text; }
   #bottomdock {
     grid-column: 1 / 3; grid-row: 4; background: #f5f5f5;
     border-top: 1px solid #c5c5c5; overflow: auto; display: flex; flex-direction: column;
@@ -343,9 +349,10 @@
     <div class="dock-title">
       <span data-pane="lustre" class="active" onclick="setSidePane('lustre')">Lustre</span>
       <span data-pane="c" onclick="setSidePane('c')">Generated C</span>
+      <span class="copy-btn" onclick="copySidePane(this)" title="Copy the visible code to the clipboard">⧉ Copy</span>
     </div>
-    <pre id="side-lustre">loading…</pre>
-    <pre id="side-c" style="display:none">loading…</pre>
+    <pre id="side-lustre">— Build the model (Build dock ▸ 1) to generate and view the Lustre. —</pre>
+    <pre id="side-c" style="display:none">— Generate C-Lite (Build dock ▸ 3) to view the generated C. —</pre>
   </div>
 </div>
 
@@ -745,16 +752,44 @@ function setSidePane(name) {
 }
 
 async function refreshSideText() {
-  // The Lustre model code only exists once the operator has built — the SCADE
-  // model-checker gate. Before that the pane invites a build.
+  // Both panes are gated like SCADE's: the Lustre exists only after a clean
+  // Build, and the generated C only after the Generate C-Lite step. Before
+  // each, the pane is empty and invites the step (an edit re-locks both).
   if (document.getElementById("side-lustre").style.display !== "none") {
     document.getElementById("side-lustre").textContent = state.pipeline.built
       ? state.pipeline.lustre
       : "— Build the model (Build dock ▸ 1 · Build Model) to generate and view the Lustre. —";
   } else {
-    const h = await fetchText("/api/clite/header");
-    const c = await fetchText("/api/clite/source");
-    document.getElementById("side-c").textContent = h + "\n/* ---- source ---- */\n\n" + c;
+    if (state.pipeline.generated) {
+      const h = await fetchText("/api/clite/header");
+      const c = await fetchText("/api/clite/source");
+      document.getElementById("side-c").textContent = h + "\n/* ---- source ---- */\n\n" + c;
+    } else {
+      document.getElementById("side-c").textContent =
+        "— Generate C-Lite (Build dock ▸ 3 · Generate C-Lite) to view the generated C. —";
+    }
+  }
+}
+
+/// Copy the visible code pane to the clipboard. The panes are already
+/// selectable; this is the one-click path. Falls back to a manual select if
+/// the async clipboard API is unavailable (e.g. an insecure context).
+async function copySidePane(btn) {
+  const showingLustre = document.getElementById("side-lustre").style.display !== "none";
+  const pane = document.getElementById(showingLustre ? "side-lustre" : "side-c");
+  const text = pane.textContent || "";
+  const flash = msg => { if (btn) { const o = btn.textContent; btn.textContent = msg; setTimeout(() => btn.textContent = o, 1200); } };
+  try {
+    await navigator.clipboard.writeText(text);
+    flash("✓ Copied");
+  } catch (_) {
+    // Fallback: select the pane so the engineer can Ctrl+C.
+    const r = document.createRange();
+    r.selectNodeContents(pane);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(r);
+    flash("selected — Ctrl+C");
   }
 }
 
@@ -788,6 +823,7 @@ async function refresh() {
       state.diagramStack = [];
       loadDiagram(n.name);
     };
+    d.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
     return d;
   };
   // A <details> whose open/closed state is remembered across tree rebuilds:
@@ -1114,8 +1150,8 @@ function pipeSimulate() {
 
 function pipeGenerate() {
   if (!state.pipeline.built) return;
+  state.pipeline.generated = true; // unlock the C pane *before* showing it
   setSidePane("c");                 // the generated C is now the visible model code
-  state.pipeline.generated = true;
   document.getElementById("pipe-gen-status").textContent = "✓ generated — see the Generated C pane";
   document.getElementById("pipe-run-status").textContent = "ready";
   reflectPipeline();
@@ -1982,6 +2018,50 @@ function showCtxMenu(x, y) {
 function hideCtxMenu() {
   const m = document.getElementById("ctx-menu");
   if (m) m.style.display = "none";
+}
+
+/// Right-click menu for an operator in the workspace tree: build it (which also
+/// makes it the root), add an Input / Output / Local to it, or set it as main.
+/// This is the discoverable path to "build *this* operator".
+function operatorTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const node = findNode(name);
+  if (node) selectNode(node); // so the Add… dialogs prefill this operator
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const item = (label, fn) => {
+    const d = document.createElement("div");
+    d.className = "ctx-item";
+    d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    m.appendChild(d);
+  };
+  const sep = () => { const s = document.createElement("div"); s.className = "ctx-sep"; m.appendChild(s); };
+  item("Build " + name, () => pipeBuildNode(name));
+  sep();
+  item("Add Input…", () => openPortDialog("input"));
+  item("Add Output…", () => openPortDialog("output"));
+  item("Add Local…", () => openPortDialog("local"));
+  sep();
+  item("Set as Main", () => setMainNode(name));
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
+}
+
+/// Build a specific operator (the right-click "Build" path): make it the build
+/// target, show the Build dock, and run the pipeline's Build step on it.
+async function pipeBuildNode(name) {
+  state.buildTarget = name;
+  const bt = document.getElementById("build-target");
+  if (bt && [...bt.options].some(o => o.value === name)) bt.value = name;
+  showDock("build");
+  await pipeBuild();
+}
+
+async function setMainNode(name) {
+  await postEdit("/api/edit/set_main", { main: name });
 }
 
 /// Delete the selected item(s): variables via remove_port, equations via

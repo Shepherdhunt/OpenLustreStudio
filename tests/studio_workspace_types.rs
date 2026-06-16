@@ -135,6 +135,43 @@ fn opening_a_workspace_directory_creates_the_project_skeleton() {
     assert!(on_disk.contains("types.json"), "project must include types.json");
 }
 
+/// `openlustre new --empty` seeds a project with no operators; the Studio
+/// serves it without trouble and it stays editable (you can add operators in).
+#[test]
+fn empty_new_project_has_no_operators_and_is_editable() {
+    let tmp = make_tempdir("ws_empty");
+    let ws = tmp.join("ws");
+    let status = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "new", "--empty"])
+        .arg(&ws)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .status()
+        .expect("new --empty");
+    assert!(status.success(), "`new --empty` should succeed");
+
+    let g = start_server(tmp, &ws);
+    let port = g.port;
+
+    // No root, and no operators in the (non-stdlib) packages.
+    let ins = get_json(port, "/api/inspect");
+    assert!(ins["project"]["main"].is_null(), "empty project has no main: {}", ins["project"]["main"]);
+    let user_nodes: usize = ins["project"]["packages"].as_array().unwrap().iter()
+        .filter(|p| p["name"] != "stdlib")
+        .map(|p| p["nodes"].as_array().map_or(0, |a| a.len()))
+        .sum();
+    assert_eq!(user_nodes, 0, "an empty project starts with no operators: {ins}");
+
+    // It is still fully editable — add an operator into the empty project.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"First","kind":"operator"}"#);
+    let ins2 = get_json(port, "/api/inspect");
+    let names: Vec<String> = ins2["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|n| n["name"].as_str().map(str::to_string))
+        .collect();
+    assert!(names.contains(&"First".to_string()), "added operator should appear: {names:?}");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

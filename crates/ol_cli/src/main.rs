@@ -135,12 +135,16 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TestCmd,
     },
-    /// Create a new workspace folder: project.json (starter operator),
-    /// types.json (named type definitions), and scenarios/. Open it with
+    /// Create a new workspace folder: project.json, types.json (named type
+    /// definitions), and scenarios/. Open it with
     /// `openlustre studio launch <dir>`.
     New {
         /// Workspace directory (created if missing).
         dir: PathBuf,
+        /// Start with no operators or functions (an empty project). Without
+        /// this, a small starter operator is created.
+        #[arg(long)]
+        empty: bool,
     },
 }
 
@@ -332,11 +336,15 @@ fn main() -> Result<()> {
                 no_open,
             } => cmd_studio_launch(model, port, with_stdlib, no_stdlib, no_open),
         },
-        Cmd::New { dir } => {
+        Cmd::New { dir, empty } => {
             std::fs::create_dir_all(&dir)
                 .with_context(|| format!("creating {}", dir.display()))?;
-            let project = resolve_workspace(&dir)?;
-            println!("new: workspace ready at {}", dir.display());
+            let project = resolve_workspace(&dir, empty)?;
+            println!(
+                "new: workspace ready at {} ({})",
+                dir.display(),
+                if empty { "empty — add operators in the Studio" } else { "with a starter operator" }
+            );
             println!("new: project file {}", project.display());
             println!("new: open it with `openlustre studio launch {}`", dir.display());
             Ok(())
@@ -863,8 +871,11 @@ fn serve_studio(
     open_browser: bool,
 ) -> Result<()> {
     // Opening a directory opens it as a workspace: `<dir>/project.json`
-    // (created on first open along with types.json and scenarios/).
-    let model = &resolve_workspace(model)?;
+    // (created on first open along with types.json and scenarios/). Serving a
+    // not-yet-created workspace seeds the starter operator so a double-clicked
+    // shortcut always opens something runnable; `openlustre new --empty` is the
+    // path to a blank project.
+    let model = &resolve_workspace(model, false)?;
     let use_embedded = with_stdlib.is_none() && !no_stdlib;
     // Eagerly load once to surface configuration errors before starting the
     // server — better to fail fast than to spin up a UI that only ever shows
@@ -911,7 +922,7 @@ fn serve_studio(
 /// directory creates the project skeleton on first open — `project.json`
 /// (with a starter operator, including `types.json`), the types file, and a
 /// `scenarios/` directory — and resolves to the project file.
-fn resolve_workspace(path: &Path) -> Result<PathBuf> {
+fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
     if !path.is_dir() {
         return Ok(path.to_path_buf());
     }
@@ -930,7 +941,7 @@ fn resolve_workspace(path: &Path) -> Result<PathBuf> {
             .with_context(|| format!("writing {}", types_path.display()))?;
     }
     if !project_path.exists() {
-        let mut project = starter_project();
+        let mut project = if empty { empty_project() } else { starter_project() };
         project.name = path
             .file_name()
             .and_then(|s| s.to_str())
@@ -978,6 +989,19 @@ fn welcome_project_path() -> Result<PathBuf> {
         println!("studio: created starter project at {}", path.display());
     }
     Ok(path)
+}
+
+/// An empty project: one `user` package, no operators, no `main`. The Studio
+/// opens it as a blank canvas — add operators from Insert ▸ Operator or by
+/// right-clicking in the workspace tree.
+fn empty_project() -> ol_ir::Project {
+    ol_ir::Project {
+        packages: vec![ol_ir::Package {
+            name: "user".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
 }
 
 /// A small self-contained model: `Heartbeat(enable) -> beat` toggles every

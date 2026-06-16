@@ -19,8 +19,15 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** a round of live-demo authoring fixes —
-the workspace tree no longer auto-collapses (folder disclosure survives the
+**Landed recently (newest first):** project & code-pane fixes from demo
+feedback — **empty new projects** (`openlustre new --empty`, no starter
+operator; the Studio serves a blank project and stays editable); a **right-click
+operator menu** in the workspace tree (Build this operator / Add Input / Add
+Output / Add Local / Set as Main — the discoverable "build *this* operator"
+path); and **both code side-panes now gated and copyable** (Lustre appears only
+after a clean Build, the generated C only after Generate C-Lite, each with a
+Copy button and selectable text). Before that: a round of live-demo authoring
+fixes — the workspace tree no longer auto-collapses (folder disclosure survives the
 5 s inspect poll); a **Build-dock operator selector** (build any operator, not
 just the root — building makes it the root so Simulate/Generate/Run follow);
 **per-operator `.lus` files** (a blank `<Name>.lus` stub on create, filled when
@@ -38,20 +45,32 @@ right) + pin-to-pin wiring; MC/DC coverage; array iterators (`map`/`fold`);
 boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
-**Best next gaps (pick up here):**
-1. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
+**Best next gaps (pick up here)** — the top three are open demo requests:
+1. **Import existing Lustre** (P1, medium) — a `File ▸ Import Lustre` that
+   parses `node`/`function` declarations from a `.lus` file into the project for
+   reuse. There is **no node-level Lustre parser yet** (only
+   `ol_stdlib::parse_expr` / `parse_type`), so this means a small Lustre frontend
+   that reuses those for equation bodies and types; loud errors for the
+   unsupported surface (assertions, inline contracts).
+2. **State-machine authoring, SCADE-shaped** (P1, large) — a state machine
+   should live *inside* an operator (tree node `StateMachine: <name>` under the
+   operator), authored with states / transitions / affected variables, default
+   scaffolding (Initial state, `->` / `when` transitions), keyword colouring, and
+   SCADE-style "every variable must be defined on every path" checking. Today
+   `StateMachineDef` is *package*-level (`crates/ol_ir/src/state_machine.rs`),
+   so this is structural (nest it in `NodeDef`) plus a real editor.
+3. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
+   on the canvas, and a right-click "wrap text / don't wrap" per box.
+4. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
    add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
    generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
-   pattern. Good first slice in a fresh session.
-2. **Hierarchical / parallel automata** (P1, large, structural) — today's FSMs
-   are flat Moore-style (`crates/ol_ir/src/state_machine.rs` lowers them);
-   SCADE automata nest, run in parallel, and carry history/signals.
-3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
+   pattern.
+5. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
+6. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
    copy/paste, distinct per-family gate silhouettes (§2).
-5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
+7. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 
 Everything ships across all stages — IR → typecheck → sim → generated C →
@@ -141,6 +160,31 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (later) — empty projects, operator right-click menu, gated/copyable code panes
+
+A second demo-feedback batch:
+
+* **Empty new projects.** `openlustre new --empty` seeds a project with no
+  operators (one `user` package, no `main`); the Studio serves a blank project
+  and stays fully editable. The default `new` and a served not-yet-created
+  workspace still seed the starter operator (a double-clicked shortcut opens
+  something runnable). Covered by a workspace test.
+* **Right-click an operator in the workspace tree.** Each operator row now has a
+  context menu: **Build** (makes it the build target, opens the Build dock, and
+  builds it — the discoverable answer to "let me pick which operator to
+  build"), **Add Input / Add Output / Add Local** (prefilled for that operator),
+  and **Set as Main**.
+* **Both code panes gated and copyable.** The Generated-C side pane used to
+  always show C; now it is empty until **Generate C-Lite** is pressed, exactly
+  as the Lustre pane is empty until a clean **Build**. (Both re-lock on an
+  edit.) Each pane has a **Copy** button and is text-selectable, so the engineer
+  can lift the Lustre or C straight out. The earlier `pipeGenerate` ordering bug
+  (switching to the C pane *before* marking it generated) is fixed.
+
+Still open from the same demo (logged in §0): import existing Lustre (needs a
+node-level parser), SCADE-shaped state-machine authoring nested in an operator,
+and canvas item resize / text-wrap.
 
 ### 2026-06-16 — live-demo authoring fixes (tree, build target, per-operator files, red I/O pins)
 
