@@ -161,12 +161,28 @@ impl Project {
                         continue;
                     }
                 };
-                match lower(&resolved) {
-                    Ok(low) => {
-                        pkg.types.extend(low.state_types);
-                        pkg.nodes.push(low.node);
+                let low = match lower(&resolved) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
                     }
-                    Err(e) => errors.push(e),
+                };
+                pkg.types.extend(low.state_types);
+                match &sm.owner {
+                    // Owner-less (e.g. stdlib library blocks): a standalone node.
+                    None => pkg.nodes.push(low.node),
+                    // Operator-owned: merge the automaton into the operator's
+                    // body — its state locals and state/next/output equations
+                    // drive the operator's outputs (no separate node).
+                    Some(op) => match pkg.nodes.iter_mut().find(|n| &n.name == op) {
+                        Some(node) => {
+                            node.locals.extend(low.node.locals);
+                            node.equations.extend(low.node.equations);
+                        }
+                        None => errors
+                            .push(LowerError::UnknownOwner(sm.name.clone(), op.clone())),
+                    },
                 }
             }
         }

@@ -95,6 +95,12 @@ pub struct StateMachineDef {
     pub states: Vec<StateDef>,
     #[serde(default)]
     pub contract: Option<String>,
+    /// The operator this machine belongs to. `Some(op)` machines are
+    /// operator-owned: lowering merges the automaton into operator `op`'s body
+    /// (it drives `op`'s outputs) rather than emitting a standalone node. `None`
+    /// machines (e.g. stdlib library blocks) lower to their own node.
+    #[serde(default)]
+    pub owner: Option<String>,
 }
 
 /// Lowering result: the auto-generated state-enum types (one per region — the
@@ -123,6 +129,8 @@ pub enum LowerError {
     UnknownRefine(String, String, String),
     #[error("machine `{0}`: refinement cycle through machine `{1}`")]
     RefineCycle(String, String),
+    #[error("machine `{0}` is owned by operator `{1}`, which does not exist")]
+    UnknownOwner(String, String),
 }
 
 /// Resolve every `refines` reference in `sm` into an inlined nested [`Region`]

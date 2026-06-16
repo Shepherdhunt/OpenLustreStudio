@@ -112,6 +112,12 @@
   .node .kind { display: inline-block; width: 13px; color: #2b579a; font-weight: 600; }
   .node .tree-meta { color: #888; }
   .node.add-row { color: #2b579a; font-style: italic; }
+  /* Operator sub-structure in the tree (Inputs / Locals / StateMachine / Outputs). */
+  .tree-sub { padding: 2px 16px 2px 30px; color: #8a8a8a; font-size: 10.5px;
+    text-transform: uppercase; letter-spacing: 0.4px; }
+  .node.port { padding-left: 34px; color: #444; cursor: default; }
+  .node.port:hover { background: transparent; }
+  #packages details details > summary { padding-left: 28px; }
   /* State-machine editor: keyword-coloured preview of states/transitions. */
   .fsm-preview { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap;
     background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 3px; padding: 6px 8px;
@@ -597,7 +603,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>State machines are authored as text — states, transitions, and the variables each state drives — and lower to dataflow automatically. Use one inside an operator as a <strong>block</strong>: drop it from the Operations toolbox, wire the operator's inputs into it, and read its outputs back out. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry.</p>
+    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -606,14 +612,15 @@
         <button onclick="fsmTemplate()">Load template</button>
       </div>
       <div class="row">
-        <label>name</label><input id="fsm-name" placeholder="TrafficLight">
+        <label>name</label><input id="fsm-name" placeholder="Lights">
+        <label>operator</label><select id="fsm-operator" onchange="fsmOperatorChanged()"></select>
         <label>initial</label><input id="fsm-initial" placeholder="Red" oninput="fsmPreview()">
       </div>
       <div class="row">
-        <label>inputs</label><input id="fsm-inputs" style="flex:1" placeholder="tick: bool, emergency: bool">
+        <label>inputs</label><input id="fsm-inputs" style="flex:1" readonly title="the owning operator's inputs" placeholder="(from the operator)">
       </div>
       <div class="row">
-        <label>outputs</label><input id="fsm-outputs" style="flex:1" placeholder="go: bool, warn: bool">
+        <label>outputs</label><input id="fsm-outputs" style="flex:1" readonly title="the owning operator's outputs — the machine drives these" placeholder="(from the operator)">
       </div>
       <div class="row" style="align-items:flex-start">
         <label>states</label>
@@ -1075,38 +1082,72 @@ async function refresh() {
   // standard library under a collapsed Libraries root.
   const pkgs = document.getElementById("packages");
   pkgs.innerHTML = "";
-  const mkNodeRow = n => {
-    const d = document.createElement("div");
-    d.className = "node";
-    d.dataset.name = n.name;
-    d.innerHTML = '<span class="kind">' + n.kind[0] + "</span> " + n.name;
-    d.onclick = () => {
-      selectNode(n);
-      state.diagramStack = [];
-      loadDiagram(n.name);
+  const machines = ins.project.state_machines || [];
+  // A `<name>_StateEnum` type and `__sm_*` locals are generated when an
+  // operator-owned machine lowers; keep them out of the Types / Locals views.
+  const smEnumTypes = new Set(machines.map(m => m.name + "_StateEnum"));
+  // An operator: expandable into Inputs / Locals / StateMachine: Name / Outputs
+  // (SCADE-style). A state machine always lives under the operator that owns it.
+  const mkOperatorNode = (n, editable) => {
+    const det = mkDetails("op:" + n.name, false);
+    const sum = document.createElement("summary");
+    sum.innerHTML = '<span class="kind">' + escapeHTML(n.kind[0]) + "</span> " + escapeHTML(n.name);
+    sum.onclick = () => { selectNode(n); state.diagramStack = []; loadDiagram(n.name); };
+    if (editable) sum.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
+    det.appendChild(sum);
+    const group = (label, rows) => {
+      const h = document.createElement("div");
+      h.className = "tree-sub";
+      h.textContent = label;
+      det.appendChild(h);
+      for (const r of rows) {
+        const d = document.createElement("div");
+        d.className = "node port";
+        d.textContent = r;
+        det.appendChild(d);
+      }
     };
-    d.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
-    return d;
+    group("Inputs", (n.inputs || []).map(p => p.name + " : " + typeName(p.type)));
+    group("Locals", (n.locals || []).filter(l => !l.name.startsWith("__sm")).map(l => l.name + " : " + typeName(l.type)));
+    const sm = machines.find(m => m.owner === n.name);
+    if (sm) {
+      const smDet = mkDetails("sm:" + sm.name, false);
+      const ss = document.createElement("summary");
+      ss.innerHTML = '<span class="kind">S</span> StateMachine: ' + escapeHTML(sm.name);
+      ss.onclick = e => { e.stopPropagation(); openFsmEditor(sm.name); };
+      if (editable) ss.oncontextmenu = ev => { ev.stopPropagation(); stateMachineTreeMenu(ev, sm.name); };
+      smDet.appendChild(ss);
+      for (const st of (sm.states || [])) {
+        const d = document.createElement("div");
+        d.className = "node port";
+        d.textContent = st + (st === sm.initial ? "  (initial)" : "");
+        smDet.appendChild(d);
+      }
+      det.appendChild(smDet);
+    } else if (editable) {
+      const add = document.createElement("div");
+      add.className = "node add-row";
+      add.textContent = "＋ Add state machine…";
+      add.onclick = e => { e.stopPropagation(); openFsmEditor(null, n.name); };
+      det.appendChild(add);
+    }
+    group("Outputs", (n.outputs || []).map(p => p.name + " : " + typeName(p.type)));
+    return det;
   };
-  // State machines lower to nodes (and a `<name>_StateEnum` type); list them as
-  // their own tree group, and keep the lowered node + enum type out of the
-  // Operators / Types views so a machine reads as one thing.
-  const smNames = new Set((ins.project.state_machines || []).map(m => m.name));
-  const smEnumTypes = new Set([...smNames].map(n => n + "_StateEnum"));
   const mkPackage = (pkg, host) => {
     const det = mkDetails("pkg:" + pkg.name, pkg.name !== "stdlib");
+    const editable = pkg.name !== "stdlib";
     const sum = document.createElement("summary");
     sum.textContent = pkg.name + " ";
-    const nodes = pkg.nodes.filter(n => !smNames.has(n.name));
     const b = document.createElement("span");
     b.className = "badge";
-    b.textContent = nodes.length + " operators";
+    b.textContent = pkg.nodes.length + " operators";
     sum.appendChild(b);
     det.appendChild(sum);
     const h = document.createElement("h3");
     h.textContent = "Operators";
     det.appendChild(h);
-    for (const n of nodes) det.appendChild(mkNodeRow(n));
+    for (const n of pkg.nodes) det.appendChild(mkOperatorNode(n, editable));
     if (pkg.contracts && pkg.contracts.length) {
       const h2 = document.createElement("h3");
       h2.textContent = "Contracts";
@@ -1124,11 +1165,11 @@ async function refresh() {
     mkPackage(pkg, pkgs);
   }
   // SCADE-style project-wide Types and Constants, between the operators and the
-  // libraries. Aggregated across the user packages.
+  // libraries. State machines are NOT a separate group — each lives under its
+  // owning operator (above). Aggregated across the user packages.
   const userPkgs = ins.project.packages.filter(p => p.name !== "stdlib");
   buildTypesNode(pkgs, userPkgs.flatMap(p => p.types || []).filter(t => !smEnumTypes.has(t.name)));
   buildConstantsNode(pkgs, userPkgs.flatMap(p => p.constants || []));
-  buildStateMachinesNode(pkgs, ins.project.state_machines || []);
   const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
   if (libPkgs.length) {
     const lib = mkDetails("__libraries__", false);
@@ -2309,6 +2350,9 @@ function operatorTreeMenu(ev, name) {
   item("Add Input…", () => openPortDialog("input"));
   item("Add Output…", () => openPortDialog("output"));
   item("Add Local…", () => openPortDialog("local"));
+  // Only one machine per operator; offer to add when there isn't one yet.
+  const ownsSM = (state.inspect?.project?.state_machines || []).some(m => m.owner === name);
+  if (!ownsSM) item("Add State Machine…", () => openFsmEditor(null, name));
   sep();
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";
@@ -2849,6 +2893,7 @@ function fsmBuildPayload() {
   }
   return {
     name: document.getElementById("fsm-name").value.trim(),
+    operator: document.getElementById("fsm-operator").value,
     initial_state: document.getElementById("fsm-initial").value.trim(),
     inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
     outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
@@ -2861,6 +2906,7 @@ async function fsmSave() {
   const payload = fsmBuildPayload();
   if (!payload) return;
   if (!payload.name) { setFsmStatus(false, "the machine needs a name"); return; }
+  if (!payload.operator) { setFsmStatus(false, "choose the operator this machine belongs to"); return; }
   const editing = state.fsmEditing;
   if (editing) payload.name = editing; // name is fixed while editing
   const url = editing ? "/api/edit/update_state_machine" : "/api/edit/add_state_machine";
@@ -2873,8 +2919,8 @@ async function fsmSave() {
     return;
   }
   setFsmStatus(true, editing
-    ? "saved ✓ — the machine re-lowers to dataflow"
-    : "created ✓ — drop it into an operator from the Operations toolbox to use it as a block");
+    ? "saved ✓ — the machine re-lowers into " + payload.operator
+    : "created ✓ — it is now " + payload.operator + "'s state machine (drives its outputs)");
   state.fsmEditing = payload.name;
   document.getElementById("fsm-form-title").textContent = "Editing " + payload.name;
   document.getElementById("fsm-save-btn").textContent = "Save changes";
@@ -2884,10 +2930,36 @@ async function fsmSave() {
   fsmView();
 }
 
-// Open the editor for an existing machine (load it into the form), or a new one.
-async function openFsmEditor(name) {
+// The project's operators, for the owning-operator selector.
+function populateFsmOperators() {
+  const sel = document.getElementById("fsm-operator");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const names = (state.inspect?.project?.packages || [])
+    .filter(p => p.name !== "stdlib")
+    .flatMap(p => (p.nodes || []).map(n => n.name));
+  for (const nm of names) {
+    const o = document.createElement("option");
+    o.value = nm; o.textContent = nm;
+    sel.appendChild(o);
+  }
+  if (names.includes(prev)) sel.value = prev;
+}
+
+// A machine drives its operator's outputs and reads its inputs, so the I/O
+// fields mirror the chosen operator (read-only).
+function fsmOperatorChanged() {
+  const n = findNode(document.getElementById("fsm-operator").value);
+  const fmt = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
+  document.getElementById("fsm-inputs").value = n ? fmt(n.inputs) : "";
+  document.getElementById("fsm-outputs").value = n ? fmt(n.outputs) : "";
+}
+
+// Open the editor for an existing machine, or a new one owned by `ownerOp`.
+async function openFsmEditor(name, ownerOp) {
   openDialog("dlg-fsm");
   await loadFsmList();
+  populateFsmOperators();
   setFsmStatus(true, "");
   if (name) {
     let m;
@@ -2898,6 +2970,11 @@ async function openFsmEditor(name) {
     renderFsm(m);
   } else {
     fsmTemplate(true);
+    const op = ownerOp || (state.selectedNode && state.selectedNode.name);
+    const sel = document.getElementById("fsm-operator");
+    if (op && [...sel.options].some(o => o.value === op)) sel.value = op;
+    sel.disabled = false;
+    fsmOperatorChanged();
   }
 }
 
@@ -2908,6 +2985,9 @@ function fsmLoadIntoForm(m) {
   document.getElementById("fsm-save-btn").textContent = "Save changes";
   document.getElementById("fsm-name").value = m.name;
   document.getElementById("fsm-name").readOnly = true;
+  const opSel = document.getElementById("fsm-operator");
+  if (m.owner && [...opSel.options].some(o => o.value === m.owner)) opSel.value = m.owner;
+  opSel.disabled = true; // can't reassign the owner while editing
   document.getElementById("fsm-initial").value = m.initial_state || "";
   const ports = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
   document.getElementById("fsm-inputs").value = ports(m.inputs);
@@ -2935,10 +3015,10 @@ function fsmTemplate(reset) {
   document.getElementById("fsm-save-btn").textContent = "Create machine";
   const name = document.getElementById("fsm-name");
   name.readOnly = false;
-  if (reset || !name.value.trim()) name.value = "TrafficLight";
+  if (reset || !name.value.trim()) name.value = "Lights";
+  document.getElementById("fsm-operator").disabled = false;
   document.getElementById("fsm-initial").value = "Red";
-  document.getElementById("fsm-inputs").value = "tick: bool, emergency: bool";
-  document.getElementById("fsm-outputs").value = "go: bool, warn: bool";
+  // inputs/outputs are derived from the owning operator (fsmOperatorChanged).
   document.getElementById("fsm-states").value =
     "Red: go = false; warn = false\n" +
     "Green: go = true; warn = false\n" +

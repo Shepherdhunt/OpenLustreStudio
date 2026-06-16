@@ -456,9 +456,9 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
                 .map(|m| {
                     serde_json::json!({
                         "name": m.name,
-                        "states": m.states.len(),
-                        "inputs": m.inputs.len(),
-                        "outputs": m.outputs.len(),
+                        "owner": m.owner,
+                        "states": m.states.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                        "initial": m.initial_state,
                     })
                 })
                 .collect()
@@ -1481,6 +1481,7 @@ fn fsm_get(
                         let value = serde_json::json!({
                             "schema_version": 1,
                             "name": m.name,
+                            "owner": m.owner,
                             "inputs": m.inputs.iter().map(|p| serde_json::json!({
                                 "name": p.name, "type": p.ty,
                             })).collect::<Vec<_>>(),
@@ -1591,6 +1592,13 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         .to_string();
 
     let states = parse_sm_states(req.get("states"))?;
+    // The operator this machine belongs to (operator-owned model). The editor
+    // sends it; a machine always belongs to exactly one operator.
+    let owner = req
+        .get("operator")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
 
     let machine = ol_ir::StateMachineDef {
         name: name.to_string(),
@@ -1600,6 +1608,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         initial_state,
         states,
         contract: None,
+        owner,
     };
     Ok(machine)
 }
@@ -1631,6 +1640,22 @@ fn edit_add_state_machine(
         || project.packages.iter().any(|p| p.state_machines.iter().any(|m| m.name == machine.name))
     {
         return Err(format!("`{}` already exists", machine.name));
+    }
+    // A machine is owned by exactly one operator, which must exist and not
+    // already own a machine (one per operator).
+    let owner = machine
+        .owner
+        .clone()
+        .ok_or("a state machine must belong to an operator (missing `operator`)")?;
+    if project.find_node(&owner).is_none() {
+        return Err(format!("operator `{owner}` not found"));
+    }
+    if project
+        .packages
+        .iter()
+        .any(|p| p.state_machines.iter().any(|m| m.owner.as_deref() == Some(owner.as_str())))
+    {
+        return Err(format!("operator `{owner}` already owns a state machine"));
     }
     validate_state_machine(project, &machine)?;
     if project.packages.is_empty() {

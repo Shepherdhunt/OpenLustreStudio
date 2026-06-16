@@ -53,6 +53,7 @@ fn traffic_light_project() -> Project {
             make_state("Yellow", false, true, "Red"),
         ],
         contract: None,
+        owner: None,
     };
     Project {
         name: "tl".into(),
@@ -216,6 +217,7 @@ fn mode_project() -> Project {
         initial_state: "Idle".into(),
         states: vec![idle, active],
         contract: None,
+        owner: None,
     };
     Project {
         name: "mode".into(),

@@ -19,7 +19,16 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Hierarchical automata — authoring, by
+**Landed recently (newest first):** **State machines are operator-owned.** A
+machine now belongs to exactly one operator and *is* its body: `StateMachineDef`
+gained an `owner`, and lowering merges an owned machine's state/transition/output
+logic into that operator's node (it drives the operator's outputs) — no separate
+node, no separate tree group. The workspace tree shows operators expandable into
+**Inputs / Locals / StateMachine: Name → states / Outputs**, the machine nested
+under its operator and nowhere else. Created from the operator (right-click ▸ Add
+State Machine, or the editor's operator picker), one per operator, I/O inherited
+from the operator. Owner-less machines (stdlib library blocks like `srff`) still
+lower to standalone nodes. Before that: **Hierarchical automata — authoring, by
 refinement.** A state can now `refine` another machine in the editor: write
 `Active: refine Spin` in the states box and, while `Active` is active, the
 `Spin` machine runs nested (its states inlined as a region, names qualified per
@@ -152,7 +161,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | **Nesting landed (engine)**: a state can hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: GUI authoring of the nesting, signals, and richer parallel/history UI. Top-level parallel runs today via several machine instances in one operator | P1 (GUI) |
+| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: signals, and richer parallel/history UI (a state's inline nested-region authoring beyond `refine`) | P2 |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
@@ -196,6 +205,36 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (owned) — state machines are operator-owned
+
+Per the SCADE shape the user asked for: a state machine belongs to exactly one
+operator and *is* (part of) its body, shown nested under it in the tree and
+nowhere else.
+
+* **IR/lowering.** `StateMachineDef` gained `owner: Option<String>`.
+  `lower_state_machines` now branches: an owned machine (`owner = Some(op)`) has
+  its lowered state/next/output equations + locals + state-enum merged into
+  operator `op`'s node (driving `op`'s outputs); an owner-less machine (stdlib
+  library blocks such as `libraries/state_machines/srff.yaml`) still lowers to a
+  standalone node. Refine resolution and the nested-region engine are unchanged.
+  An `UnknownOwner` error guards a machine whose operator is missing.
+* **Server.** `add_state_machine` takes `operator`, requires it to exist, and
+  allows one machine per operator; inputs/outputs come from that operator.
+  `inspect` lists each machine's `owner` + state names; `fsm_get` returns the
+  owner.
+* **Tree.** Operators are now expandable: **Inputs / Locals / StateMachine: Name
+  → states / Outputs** (the generated `__sm_*` locals and `*_StateEnum` type are
+  hidden). The separate "State Machines" group is gone. Create from an operator
+  (right-click ▸ Add State Machine, or the editor's operator selector — I/O
+  auto-filled and read-only).
+* **Verified** end to end: `MyTrafficLight(tick, emergency) → (go, warn)` with an
+  owned `Lights` machine (Red/Green/Yellow) renders as the exact requested tree,
+  merges, and builds. Tests:
+  `operator_owned_machine_merges_into_the_operator_and_simulates`
+  (tests/state_machines.rs) and `state_machine_owned_by_operator_*`
+  (tests/studio_workspace_types.rs); the critical-items FSM test was updated to
+  the owned model.
 
 ### 2026-06-16 (refine) — authoring hierarchy by refinement
 

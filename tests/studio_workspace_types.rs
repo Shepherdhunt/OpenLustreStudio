@@ -250,17 +250,22 @@ fn import_lustre_adds_nodes_types_constants() {
 }
 
 /// State machines: create one textually, see it listed distinctly in inspect,
-/// edit it in place (update adds a state), use it inside an operator as a block
-/// (`on = Toggle(press)`) so the operator builds, and remove it (missing-name
-/// rejected, existing removed).
+/// edit it in place (update adds a state), and confirm it is owned by exactly
+/// one operator (merged into its body, not a standalone node), that the owning
+/// operator builds, and the one-per-operator / owner-exists rules hold.
 #[test]
-fn state_machine_create_edit_use_as_block_and_remove() {
+fn state_machine_owned_by_operator_create_edit_build_remove() {
     let g = start_server_on_workspace("ws_sm");
     let port = g.port;
 
-    let machine = |states: &str| -> String {
+    // The owning operator: Switch(flip) returns (lit).
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Switch","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Switch","side":"input","name":"flip","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Switch","side":"output","name":"lit","type":"bool"}"#);
+
+    let machine = |name: &str, op: &str, states: &str| -> String {
         format!(
-            r#"{{"name":"Toggle","initial_state":"Off",
+            r#"{{"name":"{name}","operator":"{op}","initial_state":"Off",
                  "inputs":[{{"name":"flip","type":"bool"}}],
                  "outputs":[{{"name":"lit","type":"bool"}}],
                  "states":[{states}]}}"#
@@ -270,29 +275,40 @@ fn state_machine_create_edit_use_as_block_and_remove() {
     let on = r#"{"name":"On","equations":[{"lhs":"lit","body":"true"}],"transitions":[{"guard":"flip","target":"Off"}]}"#;
     let blink = r#"{"name":"Blink","equations":[{"lhs":"lit","body":"true"}],"transitions":[]}"#;
 
-    post_ok(port, "/api/edit/add_state_machine", &machine(&format!("{off},{on}")));
+    post_ok(port, "/api/edit/add_state_machine", &machine("Toggle", "Switch", &format!("{off},{on}")));
 
-    // Listed as a state machine in inspect (2 states), distinct from operators.
+    // Owned by Switch, with its state names; NOT a standalone operator node.
     let ins = get_json(port, "/api/inspect");
-    let sms = ins["project"]["state_machines"].as_array().unwrap();
-    assert!(sms.iter().any(|m| m["name"] == "Toggle" && m["states"] == 2), "Toggle listed: {sms:?}");
+    let sm = ins["project"]["state_machines"].as_array().unwrap().iter()
+        .find(|m| m["name"] == "Toggle").cloned().expect("Toggle present");
+    assert_eq!(sm["owner"], "Switch", "owned by Switch: {sm}");
+    assert_eq!(sm["states"].as_array().unwrap().len(), 2);
+    let is_node = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .any(|n| n["name"] == "Toggle");
+    assert!(!is_node, "an owned machine must not be a standalone operator node");
 
     // Edit in place: add a third state.
-    post_ok(port, "/api/edit/update_state_machine", &machine(&format!("{off},{on},{blink}")));
+    post_ok(port, "/api/edit/update_state_machine", &machine("Toggle", "Switch", &format!("{off},{on},{blink}")));
     let ins = get_json(port, "/api/inspect");
     let sm = ins["project"]["state_machines"].as_array().unwrap().iter()
         .find(|m| m["name"] == "Toggle").cloned().unwrap();
-    assert_eq!(sm["states"], 3, "update added a state: {sm}");
+    assert_eq!(sm["states"].as_array().unwrap().len(), 3, "update added a state");
 
-    // Use it as a block inside an operator: Lamp feeds `press` in, reads `on`.
-    post_ok(port, "/api/edit/add_node", r#"{"name":"Lamp","kind":"operator"}"#);
-    post_ok(port, "/api/edit/add_port", r#"{"node":"Lamp","side":"input","name":"press","type":"bool"}"#);
-    post_ok(port, "/api/edit/add_port", r#"{"node":"Lamp","side":"output","name":"on","type":"bool"}"#);
-    post_ok(port, "/api/edit/add_equation", r#"{"node":"Lamp","lhs":"on","body":"Toggle(press)"}"#);
-    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Lamp"}"#).expect("build");
+    // The owning operator builds — its merged automaton drives `lit`.
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Switch"}"#).expect("build");
     assert_eq!(sb, 200);
     let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
-    assert_eq!(bd["ok"], true, "operator using the SM block should build: {bd}");
+    assert_eq!(bd["ok"], true, "operator with an owned machine should build: {bd}");
+    assert!(bd["lustre"].as_str().unwrap().contains("node Switch"), "Switch in lustre: {bd}");
+
+    // One machine per operator, and the owner must exist.
+    let (s2, _) = request(port, "POST", "/api/edit/add_state_machine",
+        &machine("Toggle2", "Switch", &format!("{off},{on}"))).expect("dup owner");
+    assert_eq!(s2, 400, "an operator owns at most one machine");
+    let (s3, _) = request(port, "POST", "/api/edit/add_state_machine",
+        &machine("Orphan", "Ghost", &format!("{off},{on}"))).expect("bad owner");
+    assert_eq!(s3, 400, "the owning operator must exist");
 
     // Remove: missing rejected, existing succeeds.
     let (sr, _) = request(port, "POST", "/api/edit/remove_state_machine", r#"{"name":"Nope"}"#).expect("rm");

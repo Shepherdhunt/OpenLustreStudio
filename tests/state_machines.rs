@@ -48,6 +48,7 @@ fn toggle_machine() -> StateMachineDef {
             },
         ],
         contract: None,
+        owner: None,
     }
 }
 
@@ -224,6 +225,7 @@ fn three_state_traffic_light_simulates_correctly() {
             make_state("Yellow", false, true, "Red"),
         ],
         contract: None,
+        owner: None,
     };
     let mut project = Project {
         name: "tl".into(),
@@ -330,6 +332,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         initial_state: "Idle".into(),
         states: vec![idle, active],
         contract: None,
+        owner: None,
     }
 }
 
@@ -380,6 +383,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
             },
         ],
         contract: None,
+        owner: None,
     };
     let refmode = StateMachineDef {
         name: "RefMode".into(),
@@ -414,6 +418,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
             },
         ],
         contract: None,
+        owner: None,
     };
     vec![spin, refmode]
 }
@@ -453,6 +458,79 @@ fn refine_resolves_a_sub_machine_and_simulates() {
         trace,
         vec![(false, 0), (false, 0), (true, 1), (true, 2), (true, 1), (false, 0), (true, 1)]
     );
+}
+
+#[test]
+fn operator_owned_machine_merges_into_the_operator_and_simulates() {
+    // Operator `Lamp` with an empty body; its owned machine drives `on`.
+    let lamp = ol_ir::NodeDef {
+        name: "Lamp".into(),
+        kind: NodeKind::Operator,
+        inputs: vec![Port { name: "press".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "on".into(), ty: Type::Bool }],
+        locals: vec![],
+        equations: vec![],
+        contract: None,
+        diagram: Default::default(),
+        probes: vec![],
+    };
+    let sm = StateMachineDef {
+        name: "LampSM".into(),
+        inputs: vec![Port { name: "press".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "on".into(), ty: Type::Bool }],
+        locals: vec![],
+        initial_state: "Off".into(),
+        states: vec![
+            StateDef {
+                name: "Off".into(),
+                equations: vec![Equation { lhs: vec!["on".into()], rhs: Expr::bool_lit(false) }],
+                transitions: vec![Transition { guard: Expr::var("press"), target: "On".into() }],
+                regions: vec![],
+                refines: None,
+            },
+            StateDef {
+                name: "On".into(),
+                equations: vec![Equation { lhs: vec!["on".into()], rhs: Expr::bool_lit(true) }],
+                transitions: vec![Transition { guard: Expr::var("press"), target: "Off".into() }],
+                regions: vec![],
+                refines: None,
+            },
+        ],
+        contract: None,
+        owner: Some("Lamp".into()), // operator-owned: merge into Lamp's body
+    };
+    let mut project = Project {
+        name: "owned".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            nodes: vec![lamp],
+            state_machines: vec![sm],
+            ..Default::default()
+        }],
+        main: Some("Lamp".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("owned machine merges");
+    assert!(!ol_typecheck::check_project(&project).has_errors());
+
+    // The machine merged into Lamp — it is NOT a standalone node.
+    assert!(project.find_node("LampSM").is_none(), "owned machine must not be a separate node");
+    let lamp_node = project.find_node("Lamp").unwrap();
+    assert!(lamp_node.locals.iter().any(|l| l.name == "__sm_state"), "state local merged into Lamp");
+    assert!(
+        lamp_node.equations.iter().any(|e| e.lhs == vec!["on".to_string()]),
+        "`on` is driven by the merged automaton"
+    );
+
+    // Lamp simulates as the toggle (one-cycle lag).
+    let mut sim = Sim::new(&project, "Lamp").unwrap();
+    let mut ons = Vec::new();
+    for p in [false, true, true, false, false, true, false] {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("press".into(), Value::Bool(p));
+        ons.push(sim.step(&inputs).unwrap()["on"].as_bool().unwrap());
+    }
+    assert_eq!(ons, vec![false, false, true, false, false, false, true]);
 }
 
 #[test]

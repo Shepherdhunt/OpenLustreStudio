@@ -266,9 +266,21 @@ fn fsm_create_view_and_simulate_through_the_studio() {
     let g = start_server_on_copy("fsm");
     let port = g.port;
 
-    // Create a two-state toggle machine through the editor payload.
+    // The owning operator: Switch(pulse) returns (light). A machine belongs to
+    // an operator and is its body.
+    for (p, b) in [
+        ("/api/edit/add_node", r#"{"name":"Switch","kind":"operator"}"#),
+        ("/api/edit/add_port", r#"{"node":"Switch","side":"input","name":"pulse","type":"bool"}"#),
+        ("/api/edit/add_port", r#"{"node":"Switch","side":"output","name":"light","type":"bool"}"#),
+    ] {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    }
+
+    // Create a two-state toggle machine owned by Switch.
     let payload = serde_json::json!({
         "name": "Toggle",
+        "operator": "Switch",
         "initial_state": "OFF",
         "inputs": [{"name": "pulse", "type": "bool"}],
         "outputs": [{"name": "light", "type": "bool"}],
@@ -284,7 +296,7 @@ fn fsm_create_view_and_simulate_through_the_studio() {
     ).expect("add fsm");
     assert_eq!(s, 200, "add_state_machine failed: {body}");
 
-    // Listed and viewable.
+    // Listed and viewable, owned by Switch.
     let (s, body) = request(port, "GET", "/api/fsm", "").expect("list");
     assert_eq!(s, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -294,18 +306,19 @@ fn fsm_create_view_and_simulate_through_the_studio() {
     assert_eq!(s, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["initial_state"], "OFF");
+    assert_eq!(v["owner"], "Switch");
     assert_eq!(v["states"][0]["transitions"][0]["guard"], "pulse");
 
-    // It lowers through the serve pipeline: set as main and step it.
-    let (s, b) = request(port, "POST", "/api/edit/set_main", r#"{"main":"Toggle"}"#)
+    // The machine merged into Switch: set Switch as main and step it.
+    let (s, b) = request(port, "POST", "/api/edit/set_main", r#"{"main":"Switch"}"#)
         .expect("set_main");
     assert_eq!(s, 200, "{b}");
     let csv = "pulse\nfalse\ntrue\ntrue\nfalse\n";
     let (s, trace) = request(port, "POST", "/api/simulate?full=1", csv).expect("simulate");
     assert_eq!(s, 200, "{trace}");
     let lines: Vec<&str> = trace.trim().lines().collect();
-    // The full trace exposes the lowered machine's state locals too — the
-    // SCADE watch view shows the FSM's current state every step.
+    // The full trace exposes the merged machine's state locals too — the SCADE
+    // watch view shows the FSM's current state every step.
     assert_eq!(lines[0], "cycle,pulse,__sm_state,__sm_next_state,light");
     // OFF (f) -> pulse arms ON for next cycle -> ON (t) -> pulse back to OFF.
     assert_eq!(lines[1], "0,false,OFF,OFF,false");
@@ -313,10 +326,14 @@ fn fsm_create_view_and_simulate_through_the_studio() {
     assert_eq!(lines[3], "2,true,ON,OFF,true");
     assert_eq!(lines[4], "3,false,OFF,OFF,false");
 
-    // A malformed machine (unknown initial state) is rejected and the file
-    // stays untouched.
+    // A malformed machine (unknown initial state) is rejected. Give it its own
+    // operator so it gets past the owner check and hits the state validation.
+    let (s, _) = request(port, "POST", "/api/edit/add_node", r#"{"name":"Sink","kind":"operator"}"#).expect("op");
+    assert_eq!(s, 200);
+    let (s, _) = request(port, "POST", "/api/edit/add_port", r#"{"node":"Sink","side":"output","name":"z","type":"bool"}"#).expect("port");
+    assert_eq!(s, 200);
     let bad = serde_json::json!({
-        "name": "Broken", "initial_state": "Nowhere",
+        "name": "Broken", "operator": "Sink", "initial_state": "Nowhere",
         "inputs": [], "outputs": [{"name": "z", "type": "bool"}],
         "states": [{"name": "A", "equations": [{"lhs": "z", "body": "true"}],
                     "transitions": []}]
