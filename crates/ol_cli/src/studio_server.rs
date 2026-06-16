@@ -270,6 +270,12 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/add_state_machine") => {
             apply_edit_response(ctx, body, edit_add_state_machine)
         }
+        ("POST", "/api/edit/update_state_machine") => {
+            apply_edit_response(ctx, body, edit_update_state_machine)
+        }
+        ("POST", "/api/edit/remove_state_machine") => {
+            apply_edit_response(ctx, body, edit_remove_state_machine)
+        }
         ("GET", "/api/types") => match types_list(ctx) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -439,6 +445,25 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
         .iter()
         .map(crate::package_to_json)
         .collect();
+    // State machines are lowered to nodes in `project`, so list them from the
+    // raw model so the UI can show them distinctly (and exclude the lowered
+    // node + its `*_StateEnum` type from the Operators / Types views).
+    let state_machines: Vec<serde_json::Value> = load_raw(ctx)
+        .map(|raw| {
+            raw.packages
+                .iter()
+                .flat_map(|p| p.state_machines.iter())
+                .map(|m| {
+                    serde_json::json!({
+                        "name": m.name,
+                        "states": m.states.len(),
+                        "inputs": m.inputs.len(),
+                        "outputs": m.outputs.len(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let (undo_depth, redo_depth) = {
         let h = ctx.history.lock().unwrap();
         (h.undo.len(), h.redo.len())
@@ -452,6 +477,7 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
             "package_count": project.packages.len(),
             "node_count": project.all_nodes().count(),
             "packages": packages,
+            "state_machines": state_machines,
         },
         "history": { "undo": undo_depth, "redo": redo_depth },
         "diagnostics": diagnostics,
@@ -1470,23 +1496,15 @@ fn fsm_get(
 /// validated by lowering it once before the file is saved, so malformed
 /// machines (unknown initial state, unassigned outputs, ...) are rejected
 /// with the lowering error and the file stays untouched.
-fn edit_add_state_machine(
-    project: &mut ol_ir::Project,
-    req: &serde_json::Value,
-) -> Result<(), String> {
+/// Parse the structured state-machine editor payload into a `StateMachineDef`,
+/// validating it by lowering once (so unknown initial state, unknown transition
+/// targets, and outputs unassigned in a state are rejected). Shared by create
+/// and update.
+fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachineDef, String> {
     let name = req
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or("missing string field `name`")?;
-    if project.find_node(name).is_some()
-        || project
-            .packages
-            .iter()
-            .any(|p| p.state_machines.iter().any(|m| m.name == name))
-    {
-        return Err(format!("`{name}` already exists"));
-    }
-
     let parse_ports = |key: &str| -> Result<Vec<ol_ir::Port>, String> {
         let mut out = Vec::new();
         for item in req.get(key).and_then(|v| v.as_array()).unwrap_or(&vec![]) {
@@ -1557,15 +1575,59 @@ fn edit_add_state_machine(
     // Validate before saving: lowering reports unknown initial state,
     // unknown transition targets, and outputs unassigned in a state.
     ol_ir::lower_state_machine(&machine).map_err(|e| e.to_string())?;
+    Ok(machine)
+}
 
+/// Create a new state machine. The name must be free (no node or machine).
+fn edit_add_state_machine(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let machine = parse_state_machine_req(req)?;
+    if project.find_node(&machine.name).is_some()
+        || project.packages.iter().any(|p| p.state_machines.iter().any(|m| m.name == machine.name))
+    {
+        return Err(format!("`{}` already exists", machine.name));
+    }
     if project.packages.is_empty() {
-        project.packages.push(ol_ir::Package {
-            name: "user".into(),
-            ..Default::default()
-        });
+        project.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
     }
     project.packages[0].state_machines.push(machine);
     Ok(())
+}
+
+/// Replace an existing state machine in place (edit its states / transitions /
+/// interface). The machine must already exist.
+fn edit_update_state_machine(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let machine = parse_state_machine_req(req)?;
+    for pkg in &mut project.packages {
+        if let Some(slot) = pkg.state_machines.iter_mut().find(|m| m.name == machine.name) {
+            *slot = machine;
+            return Ok(());
+        }
+    }
+    Err(format!("state machine `{}` not found", machine.name))
+}
+
+fn edit_remove_state_machine(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let name = req_str(req, "name")?.to_string();
+    let mut removed = false;
+    for pkg in &mut project.packages {
+        let n = pkg.state_machines.len();
+        pkg.state_machines.retain(|m| m.name != name);
+        removed |= pkg.state_machines.len() != n;
+    }
+    if removed {
+        Ok(())
+    } else {
+        Err(format!("state machine `{name}` not found"))
+    }
 }
 
 // --- Types file: named types, structs, enums, arrays ------------------------

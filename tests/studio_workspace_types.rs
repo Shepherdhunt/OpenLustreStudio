@@ -249,6 +249,60 @@ fn import_lustre_adds_nodes_types_constants() {
     assert_eq!(s2, 400, "duplicate import must be rejected");
 }
 
+/// State machines: create one textually, see it listed distinctly in inspect,
+/// edit it in place (update adds a state), use it inside an operator as a block
+/// (`on = Toggle(press)`) so the operator builds, and remove it (missing-name
+/// rejected, existing removed).
+#[test]
+fn state_machine_create_edit_use_as_block_and_remove() {
+    let g = start_server_on_workspace("ws_sm");
+    let port = g.port;
+
+    let machine = |states: &str| -> String {
+        format!(
+            r#"{{"name":"Toggle","initial_state":"Off",
+                 "inputs":[{{"name":"flip","type":"bool"}}],
+                 "outputs":[{{"name":"lit","type":"bool"}}],
+                 "states":[{states}]}}"#
+        )
+    };
+    let off = r#"{"name":"Off","equations":[{"lhs":"lit","body":"false"}],"transitions":[{"guard":"flip","target":"On"}]}"#;
+    let on = r#"{"name":"On","equations":[{"lhs":"lit","body":"true"}],"transitions":[{"guard":"flip","target":"Off"}]}"#;
+    let blink = r#"{"name":"Blink","equations":[{"lhs":"lit","body":"true"}],"transitions":[]}"#;
+
+    post_ok(port, "/api/edit/add_state_machine", &machine(&format!("{off},{on}")));
+
+    // Listed as a state machine in inspect (2 states), distinct from operators.
+    let ins = get_json(port, "/api/inspect");
+    let sms = ins["project"]["state_machines"].as_array().unwrap();
+    assert!(sms.iter().any(|m| m["name"] == "Toggle" && m["states"] == 2), "Toggle listed: {sms:?}");
+
+    // Edit in place: add a third state.
+    post_ok(port, "/api/edit/update_state_machine", &machine(&format!("{off},{on},{blink}")));
+    let ins = get_json(port, "/api/inspect");
+    let sm = ins["project"]["state_machines"].as_array().unwrap().iter()
+        .find(|m| m["name"] == "Toggle").cloned().unwrap();
+    assert_eq!(sm["states"], 3, "update added a state: {sm}");
+
+    // Use it as a block inside an operator: Lamp feeds `press` in, reads `on`.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Lamp","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Lamp","side":"input","name":"press","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Lamp","side":"output","name":"on","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Lamp","lhs":"on","body":"Toggle(press)"}"#);
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Lamp"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "operator using the SM block should build: {bd}");
+
+    // Remove: missing rejected, existing succeeds.
+    let (sr, _) = request(port, "POST", "/api/edit/remove_state_machine", r#"{"name":"Nope"}"#).expect("rm");
+    assert_eq!(sr, 400, "removing a missing machine is rejected");
+    post_ok(port, "/api/edit/remove_state_machine", r#"{"name":"Toggle"}"#);
+    let ins = get_json(port, "/api/inspect");
+    let gone = !ins["project"]["state_machines"].as_array().unwrap().iter().any(|m| m["name"] == "Toggle");
+    assert!(gone, "Toggle removed");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

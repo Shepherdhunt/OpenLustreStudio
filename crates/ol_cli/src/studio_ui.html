@@ -112,6 +112,13 @@
   .node .kind { display: inline-block; width: 13px; color: #2b579a; font-weight: 600; }
   .node .tree-meta { color: #888; }
   .node.add-row { color: #2b579a; font-style: italic; }
+  /* State-machine editor: keyword-coloured preview of states/transitions. */
+  .fsm-preview { font-family: Consolas, monospace; font-size: 12px; white-space: pre-wrap;
+    background: #f6f8fa; border: 1px solid #e1e4e8; border-radius: 3px; padding: 6px 8px;
+    margin: 6px 0; min-height: 1.3em; color: #333; }
+  .fsm-preview .kw { color: #2b579a; font-weight: 600; }
+  .fsm-preview .st { color: #7a3e9d; font-weight: 600; }
+  .fsm-preview .err { color: #c42b1c; }
   .diag { padding: 3px 12px; font-size: 12px; line-height: 1.45; cursor: default;
           border-bottom: 1px solid #e6e6e6; background: #fff; }
   .diag:hover { background: #f0f6fc; }
@@ -265,7 +272,7 @@
       <div class="mi" onclick="openPortDialog('local')">Local…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-equation')">Equation…</div>
-      <div class="mi" id="mi-insert-fsm" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machine…</div>
+      <div class="mi" id="mi-insert-fsm" onclick="openFsmEditor(null)">State Machine…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openLogMsgDialog()">Log Message…</div>
     </div>
@@ -326,7 +333,7 @@
       <div class="mi" onclick="showDock('tests'); testsRecord()">Record Golden Traces</div>
       <div class="mi" onclick="showDock('verify'); proveRun()">Verify with Kind 2</div>
       <div class="menu-sep"></div>
-      <div class="mi" onclick="openDialog('dlg-fsm'); loadFsmList()">State Machines…</div>
+      <div class="mi" onclick="openFsmEditor(null)">State Machines…</div>
     </div>
   </div>
 </div>
@@ -590,14 +597,17 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>State machines lower to dataflow automatically — once created, they simulate, generate C, and verify like any operator.</p>
-    <div class="row">machine <select id="fsm-select"></select> <button onclick="fsmView()">View</button></div>
+    <p>State machines are authored as text — states, transitions, and the variables each state drives — and lower to dataflow automatically. Use one inside an operator as a <strong>block</strong>: drop it from the Operations toolbox, wire the operator's inputs into it, and read its outputs back out. Every output must be assigned in every state (SCADE strictness), or the build reports it.</p>
+    <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
-      <h4>New state machine</h4>
+      <div class="row" style="justify-content:space-between">
+        <h4 id="fsm-form-title">New state machine</h4>
+        <button onclick="fsmTemplate()">Load template</button>
+      </div>
       <div class="row">
         <label>name</label><input id="fsm-name" placeholder="TrafficLight">
-        <label>initial</label><input id="fsm-initial" placeholder="Red">
+        <label>initial</label><input id="fsm-initial" placeholder="Red" oninput="fsmPreview()">
       </div>
       <div class="row">
         <label>inputs</label><input id="fsm-inputs" style="flex:1" placeholder="tick: bool, emergency: bool">
@@ -607,14 +617,18 @@
       </div>
       <div class="row" style="align-items:flex-start">
         <label>states</label>
-        <textarea id="fsm-states" rows="4" style="flex:1" placeholder="One state per line:&#10;Red:    go = false; warn = false&#10;Green:  go = true;  warn = false&#10;Yellow: go = false; warn = true"></textarea>
+        <textarea id="fsm-states" rows="4" style="flex:1" oninput="fsmPreview()" placeholder="One state per line:&#10;Red:    go = false; warn = false&#10;Green:  go = true;  warn = false&#10;Yellow: go = false; warn = true"></textarea>
       </div>
       <div class="row" style="align-items:flex-start">
         <label>transitions</label>
-        <textarea id="fsm-transitions" rows="4" style="flex:1" placeholder="One per line:&#10;Red -> Green when tick&#10;Green -> Yellow when tick&#10;Yellow -> Red when tick&#10;Green -> Red when emergency"></textarea>
+        <textarea id="fsm-transitions" rows="4" style="flex:1" oninput="fsmPreview()" placeholder="One per line:&#10;Red -> Green when tick&#10;Green -> Yellow when tick&#10;Yellow -> Red when tick&#10;Green -> Red when emergency"></textarea>
       </div>
-      <div class="row"><button class="primary" onclick="fsmCreate()">Create machine</button>
-      <span class="build-note" id="fsm-status"></span></div>
+      <div id="fsm-preview" class="fsm-preview"></div>
+      <div class="row">
+        <button class="primary" id="fsm-save-btn" onclick="fsmSave()">Create machine</button>
+        <button onclick="fsmTemplate(true)">New / reset</button>
+        <span class="build-note" id="fsm-status"></span>
+      </div>
     </div>
   </div>
 
@@ -677,6 +691,9 @@ const state = {
   // folder the user expanded survives the 5 s inspect-poll tree rebuild
   // (folders only close when the user closes them).
   treeOpen: {},
+  // The state machine currently open for editing in dlg-fsm (its original
+  // name), or null when creating a new one.
+  fsmEditing: null,
 };
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
@@ -889,6 +906,54 @@ function buildConstantsNode(host, consts) {
   host.appendChild(det);
 }
 
+// SCADE-style "State Machines" tree node: each machine authored textually
+// (states / transitions / variables), used inside operators as a block. Click
+// to edit, right-click to delete.
+function buildStateMachinesNode(host, machines) {
+  const det = mkDetails("__statemachines__", false);
+  const sum = document.createElement("summary");
+  sum.innerHTML = 'State Machines <span class="badge">' + machines.length + '</span>';
+  det.appendChild(sum);
+  for (const m of machines) {
+    const d = document.createElement("div");
+    d.className = "node";
+    d.innerHTML = '<span class="kind">S</span> ' + escapeHTML(m.name) +
+      ' <span class="tree-meta">' + m.states + (m.states === 1 ? " state" : " states") + '</span>';
+    d.title = "Edit the " + m.name + " state machine";
+    d.onclick = () => openFsmEditor(m.name);
+    d.oncontextmenu = ev => stateMachineTreeMenu(ev, m.name);
+    det.appendChild(d);
+  }
+  const add = document.createElement("div");
+  add.className = "node add-row";
+  add.textContent = "＋ New state machine…";
+  add.onclick = () => openFsmEditor(null);
+  det.appendChild(add);
+  host.appendChild(det);
+}
+
+function stateMachineTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const item = (label, fn) => {
+    const d = document.createElement("div");
+    d.className = "ctx-item"; d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    m.appendChild(d);
+  };
+  item("Edit " + name, () => openFsmEditor(name));
+  item("Delete " + name, () => removeStateMachine(name));
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
+}
+
+async function removeStateMachine(name) {
+  await postEdit("/api/edit/remove_state_machine", { name });
+}
+
 function typeTreeMenu(ev, name) {
   ev.preventDefault();
   ev.stopPropagation();
@@ -1023,19 +1088,25 @@ async function refresh() {
     d.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
     return d;
   };
+  // State machines lower to nodes (and a `<name>_StateEnum` type); list them as
+  // their own tree group, and keep the lowered node + enum type out of the
+  // Operators / Types views so a machine reads as one thing.
+  const smNames = new Set((ins.project.state_machines || []).map(m => m.name));
+  const smEnumTypes = new Set([...smNames].map(n => n + "_StateEnum"));
   const mkPackage = (pkg, host) => {
     const det = mkDetails("pkg:" + pkg.name, pkg.name !== "stdlib");
     const sum = document.createElement("summary");
     sum.textContent = pkg.name + " ";
+    const nodes = pkg.nodes.filter(n => !smNames.has(n.name));
     const b = document.createElement("span");
     b.className = "badge";
-    b.textContent = pkg.nodes.length + " operators";
+    b.textContent = nodes.length + " operators";
     sum.appendChild(b);
     det.appendChild(sum);
     const h = document.createElement("h3");
     h.textContent = "Operators";
     det.appendChild(h);
-    for (const n of pkg.nodes) det.appendChild(mkNodeRow(n));
+    for (const n of nodes) det.appendChild(mkNodeRow(n));
     if (pkg.contracts && pkg.contracts.length) {
       const h2 = document.createElement("h3");
       h2.textContent = "Contracts";
@@ -1055,8 +1126,9 @@ async function refresh() {
   // SCADE-style project-wide Types and Constants, between the operators and the
   // libraries. Aggregated across the user packages.
   const userPkgs = ins.project.packages.filter(p => p.name !== "stdlib");
-  buildTypesNode(pkgs, userPkgs.flatMap(p => p.types || []));
+  buildTypesNode(pkgs, userPkgs.flatMap(p => p.types || []).filter(t => !smEnumTypes.has(t.name)));
   buildConstantsNode(pkgs, userPkgs.flatMap(p => p.constants || []));
+  buildStateMachinesNode(pkgs, ins.project.state_machines || []);
   const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
   if (libPkgs.length) {
     const lib = mkDetails("__libraries__", false);
@@ -2738,7 +2810,9 @@ function parsePortsSpec(text) {
   });
 }
 
-async function fsmCreate() {
+// Parse the textual editor into the structured payload, or null on a syntax
+// error (with a status message). Shared by create and update.
+function fsmBuildPayload() {
   const statesText = document.getElementById("fsm-states").value;
   const transText = document.getElementById("fsm-transitions").value;
   const states = {};
@@ -2747,7 +2821,7 @@ async function fsmCreate() {
     const t = line.trim();
     if (!t) continue;
     const ci = t.indexOf(":");
-    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return; }
+    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr; ...` — got: " + t); return null; }
     const name = t.slice(0, ci).trim();
     const eqs = t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean).map(e => {
       const ei = e.indexOf("=");
@@ -2760,22 +2834,29 @@ async function fsmCreate() {
     const t = line.trim();
     if (!t) continue;
     const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
-    if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return; }
+    if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return null; }
     const [, from, to, guard] = m;
-    if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return; }
+    if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return null; }
     states[from].transitions.push({ guard: guard.trim(), target: to });
   }
-  const payload = {
+  return {
     name: document.getElementById("fsm-name").value.trim(),
     initial_state: document.getElementById("fsm-initial").value.trim(),
     inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
     outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
     states: order.map(n => states[n]),
   };
-  const r = await fetch("/api/edit/add_state_machine", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
+}
+
+// Create a new machine, or update the one being edited (state.fsmEditing).
+async function fsmSave() {
+  const payload = fsmBuildPayload();
+  if (!payload) return;
+  if (!payload.name) { setFsmStatus(false, "the machine needs a name"); return; }
+  const editing = state.fsmEditing;
+  if (editing) payload.name = editing; // name is fixed while editing
+  const url = editing ? "/api/edit/update_state_machine" : "/api/edit/add_state_machine";
+  const r = await fetch(url, { method: "POST", body: JSON.stringify(payload) });
   const text = await r.text();
   if (!r.ok) {
     let msg = text;
@@ -2783,11 +2864,106 @@ async function fsmCreate() {
     setFsmStatus(false, msg);
     return;
   }
-  setFsmStatus(true, "created ✓ — the machine lowers to dataflow and is ready to simulate");
+  setFsmStatus(true, editing
+    ? "saved ✓ — the machine re-lowers to dataflow"
+    : "created ✓ — drop it into an operator from the Operations toolbox to use it as a block");
+  state.fsmEditing = payload.name;
+  document.getElementById("fsm-form-title").textContent = "Editing " + payload.name;
+  document.getElementById("fsm-save-btn").textContent = "Save changes";
   await refresh();
   await loadFsmList();
   document.getElementById("fsm-select").value = payload.name;
   fsmView();
+}
+
+// Open the editor for an existing machine (load it into the form), or a new one.
+async function openFsmEditor(name) {
+  openDialog("dlg-fsm");
+  await loadFsmList();
+  setFsmStatus(true, "");
+  if (name) {
+    let m;
+    try { m = await fetchJSON("/api/fsm?name=" + encodeURIComponent(name)); }
+    catch (e) { setFsmStatus(false, "" + e); return; }
+    fsmLoadIntoForm(m);
+    document.getElementById("fsm-select").value = name;
+    renderFsm(m);
+  } else {
+    fsmTemplate(true);
+  }
+}
+
+// Fill the textual form from a fetched machine (the inverse of fsmBuildPayload).
+function fsmLoadIntoForm(m) {
+  state.fsmEditing = m.name;
+  document.getElementById("fsm-form-title").textContent = "Editing " + m.name;
+  document.getElementById("fsm-save-btn").textContent = "Save changes";
+  document.getElementById("fsm-name").value = m.name;
+  document.getElementById("fsm-name").readOnly = true;
+  document.getElementById("fsm-initial").value = m.initial_state || "";
+  const ports = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
+  document.getElementById("fsm-inputs").value = ports(m.inputs);
+  document.getElementById("fsm-outputs").value = ports(m.outputs);
+  document.getElementById("fsm-states").value = (m.states || [])
+    .map(s => s.name + ": " + (s.equations || []).map(e => e.lhs + " = " + e.body).join("; "))
+    .join("\n");
+  const trans = [];
+  for (const s of (m.states || [])) {
+    for (const t of (s.transitions || [])) trans.push(s.name + " -> " + t.target + " when " + t.guard);
+  }
+  document.getElementById("fsm-transitions").value = trans.join("\n");
+  fsmPreview();
+}
+
+// Reset the form to a small worked example (scaffolding) for a new machine.
+function fsmTemplate(reset) {
+  state.fsmEditing = null;
+  document.getElementById("fsm-form-title").textContent = "New state machine";
+  document.getElementById("fsm-save-btn").textContent = "Create machine";
+  const name = document.getElementById("fsm-name");
+  name.readOnly = false;
+  if (reset || !name.value.trim()) name.value = "TrafficLight";
+  document.getElementById("fsm-initial").value = "Red";
+  document.getElementById("fsm-inputs").value = "tick: bool, emergency: bool";
+  document.getElementById("fsm-outputs").value = "go: bool, warn: bool";
+  document.getElementById("fsm-states").value =
+    "Red: go = false; warn = false\n" +
+    "Green: go = true; warn = false\n" +
+    "Yellow: go = false; warn = true";
+  document.getElementById("fsm-transitions").value =
+    "Red -> Green when tick\n" +
+    "Green -> Yellow when tick\n" +
+    "Yellow -> Red when tick\n" +
+    "Green -> Red when emergency";
+  setFsmStatus(true, "");
+  fsmPreview();
+}
+
+// A keyword-coloured, read-only echo of the states/transitions, so the textual
+// syntax is easy to follow (state names purple, `->` / `when` / initial blue).
+function fsmPreview() {
+  const initial = document.getElementById("fsm-initial").value.trim();
+  const statesText = document.getElementById("fsm-states").value;
+  const transText = document.getElementById("fsm-transitions").value;
+  let html = "";
+  for (const line of statesText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const ci = t.indexOf(":");
+    if (ci < 0) { html += '<span class="err">' + escapeHTML(t) + " — needs `Name: …`</span>\n"; continue; }
+    const nm = t.slice(0, ci).trim();
+    const tag = nm === initial ? ' <span class="kw">(initial)</span>' : "";
+    html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + escapeHTML(t.slice(ci + 1).trim()) + "\n";
+  }
+  for (const line of transText.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
+    if (!m) { html += '<span class="err">' + escapeHTML(t) + " — needs `From -> To when guard`</span>\n"; continue; }
+    html += '<span class="st">' + escapeHTML(m[1]) + '</span> <span class="kw">-&gt;</span> ' +
+      '<span class="st">' + escapeHTML(m[2]) + '</span> <span class="kw">when</span> ' + escapeHTML(m[3]) + "\n";
+  }
+  document.getElementById("fsm-preview").innerHTML = html || '<span style="color:#888">preview…</span>';
 }
 
 function setFsmStatus(ok, msg) {

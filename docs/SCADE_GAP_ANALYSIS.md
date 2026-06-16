@@ -19,8 +19,17 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Import existing Lustre** (`File ▸ Import
-Lustre…`) — a small Lustre frontend (`crates/ol_cli/src/lustre_import.rs`)
+**Landed recently (newest first):** **Text-based state-machine authoring** —
+state machines are a first-class tree group (parallel to Types / Constants),
+created and **edited** textually (states, transitions, per-state variable
+equations) with default scaffolding, a keyword-coloured live preview, and
+SCADE-strict "every output assigned in every state" checking. A machine is used
+inside an operator as a **block**: drop it from the Operations toolbox, the
+operator's inputs feed in on the left and its outputs come out on the right
+(`out = TrafficLight(tick, emergency)`). The lowered node + its `_StateEnum`
+type are kept out of the Operators / Types views so a machine reads as one
+thing. (Deeper hierarchical/parallel automata remain — see §1.) Before that:
+**Import existing Lustre** (`File ▸ Import Lustre…`) — a small Lustre frontend (`crates/ol_cli/src/lustre_import.rs`)
 parses `type` / `const` / `node` / `function` declarations into the project,
 delegating equation bodies and constant values to `ol_stdlib::parse_expr` and
 types to `parse_type` (with the `elem^len` array form mapped). Paste or choose a
@@ -61,13 +70,11 @@ boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
 **Best next gaps (pick up here):**
-1. **State-machine authoring, SCADE-shaped** (P1, large) — a state machine
-   should live *inside* an operator (tree node `StateMachine: <name>` under the
-   operator), authored with states / transitions / affected variables, default
-   scaffolding (Initial state, `->` / `when` transitions), keyword colouring, and
-   SCADE-style "every variable must be defined on every path" checking. Today
-   `StateMachineDef` is *package*-level (`crates/ol_ir/src/state_machine.rs`),
-   so this is structural (nest it in `NodeDef`) plus a real editor.
+1. **Hierarchical / parallel automata** (P1, large, structural) — text-based
+   state-machine *authoring* now lands (create / edit / use-as-a-block in an
+   operator — see §6), but each machine is still a single flat Moore layer
+   (`crates/ol_ir/src/state_machine.rs` lowers one). SCADE automata nest, run in
+   parallel, and carry history/signals; that is the remaining structural work.
 2. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
    on the canvas, and a right-click "wrap text / don't wrap" per box.
    *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
@@ -175,6 +182,36 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-16 (automata) — text-based state-machine authoring, used as a block
+
+State machines already had a solid IR (`crates/ol_ir/src/state_machine.rs`):
+they lower to a dataflow node + a `<name>_StateEnum` enum, and lowering already
+enforces SCADE strictness (unknown initial/target states, and **every output
+assigned in every state**). What was missing was authoring and presence. Added:
+
+* **Edit, not just create.** `/api/edit/update_state_machine` (replace in place)
+  and `/api/edit/remove_state_machine`, sharing one validated parser with the
+  create path. The editor (`dlg-fsm`) now loads an existing machine back into
+  its text form (name fixed, states/transitions/IO re-filled), so you can change
+  it and **Save changes**; "Load template" drops a worked Initial→…→ example.
+* **A keyword-coloured live preview** under the textareas — state names, `->`,
+  `when`, and the initial-state tag highlight as you type, so the textual syntax
+  is easy to follow without a rich-text editor.
+* **First-class in the tree.** `build_inspect` lists the raw machines, so a
+  **State Machines** group (parallel to Types / Constants) shows each one
+  (`name · N states`, click to edit, right-click to delete). The lowered node
+  and its `_StateEnum` type are filtered out of the Operators / Types views so a
+  machine reads as a single thing — it still appears in the Operations toolbox.
+* **Used as a block inside an operator** — the model the user asked for: drop the
+  machine from the toolbox onto an operator's canvas, the operator's inputs wire
+  into the block on the left, its outputs come out on the right
+  (`go, warn = TrafficLight(tick, emergency)`), and the operator builds. Verified
+  end to end (create → edit → drop-as-block → wire → build); workspace test
+  `state_machine_create_edit_use_as_block_and_remove`.
+
+This is text-based authoring on top of the existing flat lowering; nested /
+parallel automata (history, signals) are the remaining structural step (§1).
 
 ### 2026-06-16 (import) — import existing Lustre
 
