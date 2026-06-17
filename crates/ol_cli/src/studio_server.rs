@@ -267,6 +267,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_layout") => {
             apply_edit_response(ctx, body, edit_set_layout)
         }
+        ("POST", "/api/edit/set_project_name") => {
+            apply_edit_response(ctx, body, edit_set_project_name)
+        }
         ("POST", "/api/edit/add_state_machine") => {
             apply_edit_response(ctx, body, edit_add_state_machine)
         }
@@ -1250,6 +1253,17 @@ fn edit_set_main(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
     Ok(())
 }
 
+/// Set the workspace name (the named root of the model tree, like a SCADE
+/// `.vsw`). Persisted to the model file's `name` field.
+fn edit_set_project_name(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let name = req_str(req, "name")?.trim();
+    if name.is_empty() {
+        return Err("workspace name cannot be empty".into());
+    }
+    project.name = name.to_string();
+    Ok(())
+}
+
 fn is_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
@@ -1623,6 +1637,20 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
 /// project's machines and lowering the result — so unknown initial states,
 /// unknown transition targets, unassigned outputs, unknown/cyclic refinements,
 /// and name collisions are all reported before the machine is saved.
+/// Validate a state machine on create/modify so it is GUARANTEED to translate:
+/// it lowers to Lustre and autogenerates C-Lite without errors. Two stages:
+///
+/// 1. Structural check in isolation — resolve `refines` and lower the machine
+///    on its own, for a precise machine-local message on the common mistakes
+///    (unknown initial/target state, an output not assigned in every state, a
+///    refine cycle, …).
+/// 2. Integration check — apply the candidate to a copy of the project, merge
+///    the standard library, lower every machine into its operator (exactly as a
+///    build does), slice to the owning operator, and type-check that slice. This
+///    proves the transition conditions and per-state outputs are well-typed
+///    against the operator's interface, so codegen can't fail later. The slice
+///    keeps an unrelated broken operator elsewhere in the model from blocking
+///    this edit.
 fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachineDef) -> Result<(), String> {
     let by_name: std::collections::HashMap<String, ol_ir::StateMachineDef> = project
         .packages
@@ -1633,6 +1661,49 @@ fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachin
         .collect();
     let resolved = ol_ir::resolve_refines(machine, &by_name).map_err(|e| e.to_string())?;
     ol_ir::lower_state_machine(&resolved).map_err(|e| e.to_string())?;
+
+    // --- Integration check -------------------------------------------------
+    let mut candidate = project.clone();
+    for pkg in &mut candidate.packages {
+        pkg.state_machines.retain(|m| m.name != machine.name);
+    }
+    match candidate.packages.iter_mut().find(|p| p.name != "stdlib") {
+        Some(pkg) => pkg.state_machines.push(machine.clone()),
+        None => candidate.packages.push(ol_ir::Package {
+            name: "user".into(),
+            state_machines: vec![machine.clone()],
+            ..Default::default()
+        }),
+    }
+    // Best-effort: include the embedded standard library so a machine that calls
+    // a library block in a transition/output checks against it. If it can't be
+    // loaded, fall back to checking without it.
+    if let Ok(lib) = ol_stdlib::load_embedded() {
+        lib.merge_into(&mut candidate, "stdlib");
+    }
+    candidate
+        .lower_state_machines()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+
+    // The machine merges into its owning operator; check that operator's slice.
+    let to_check = match machine.owner.as_deref() {
+        Some(owner) => candidate.slice_for_root(owner).map_err(|e| e.to_string())?,
+        None => candidate.clone(),
+    };
+    let report = ol_typecheck::check_project(&to_check);
+    let errors: Vec<String> = report
+        .errors()
+        .map(|d| {
+            if d.context.is_empty() {
+                format!("{}: {}", d.code, d.message)
+            } else {
+                format!("{}: {} [{}]", d.code, d.message, d.context.join(" · "))
+            }
+        })
+        .collect();
+    if !errors.is_empty() {
+        return Err(format!("the machine would not translate cleanly — {}", errors.join("; ")));
+    }
     Ok(())
 }
 

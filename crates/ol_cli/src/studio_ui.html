@@ -1099,6 +1099,10 @@ async function refresh() {
     sum.innerHTML = '<span class="kind">' + escapeHTML(n.kind[0]) + "</span> " + escapeHTML(n.name);
     sum.onclick = () => { selectNode(n); state.diagramStack = []; loadDiagram(n.name); };
     if (editable) sum.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
+    // Drag an operator from the tree onto another operator's canvas to
+    // instantiate it as a sub-node (the canvas drop handler reads `call:`).
+    sum.draggable = true;
+    sum.ondragstart = ev => { ev.stopPropagation(); ev.dataTransfer.setData("text/plain", "call:" + n.name); };
     det.appendChild(sum);
     const group = (label, rows) => {
       const h = document.createElement("div");
@@ -1129,19 +1133,31 @@ async function refresh() {
         smDet.appendChild(d);
       }
       det.appendChild(smDet);
-    } else if (editable) {
-      const add = document.createElement("div");
-      add.className = "node add-row";
-      add.textContent = "＋ Add state machine…";
-      add.onclick = e => { e.stopPropagation(); openFsmEditor(null, n.name); };
-      det.appendChild(add);
     }
+    // A state machine is added from the right Operations palette (drag/select
+    // "State Machine" onto this operator's canvas), not from the tree.
     group("Outputs", (n.outputs || []).map(p => p.name + " : " + typeName(p.type)));
     return det;
   };
+  const fillPackage = (host, pkg, editable) => {
+    const h = document.createElement("h3");
+    h.textContent = "Operators";
+    host.appendChild(h);
+    for (const n of pkg.nodes) host.appendChild(mkOperatorNode(n, editable));
+    if (pkg.contracts && pkg.contracts.length) {
+      const h2 = document.createElement("h3");
+      h2.textContent = "Contracts";
+      host.appendChild(h2);
+      for (const c of pkg.contracts) {
+        const d = document.createElement("div");
+        d.className = "node";
+        d.textContent = c.name + "  modes: " + c.mode_count + " · g: " + c.guarantee_count;
+        host.appendChild(d);
+      }
+    }
+  };
   const mkPackage = (pkg, host) => {
-    const det = mkDetails("pkg:" + pkg.name, pkg.name !== "stdlib");
-    const editable = pkg.name !== "stdlib";
+    const det = mkDetails("pkg:" + pkg.name, true);
     const sum = document.createElement("summary");
     sum.textContent = pkg.name + " ";
     const b = document.createElement("span");
@@ -1149,41 +1165,31 @@ async function refresh() {
     b.textContent = pkg.nodes.length + " operators";
     sum.appendChild(b);
     det.appendChild(sum);
-    const h = document.createElement("h3");
-    h.textContent = "Operators";
-    det.appendChild(h);
-    for (const n of pkg.nodes) det.appendChild(mkOperatorNode(n, editable));
-    if (pkg.contracts && pkg.contracts.length) {
-      const h2 = document.createElement("h3");
-      h2.textContent = "Contracts";
-      det.appendChild(h2);
-      for (const c of pkg.contracts) {
-        const d = document.createElement("div");
-        d.className = "node";
-        d.textContent = c.name + "  modes: " + c.mode_count + " · g: " + c.guarantee_count;
-        det.appendChild(d);
-      }
-    }
+    fillPackage(det, pkg, true);
     host.appendChild(det);
   };
-  for (const pkg of ins.project.packages.filter(p => p.name !== "stdlib")) {
-    mkPackage(pkg, pkgs);
-  }
-  // SCADE-style project-wide Types and Constants, between the operators and the
-  // libraries. State machines are NOT a separate group — each lives under its
-  // owning operator (above). Aggregated across the user packages.
+  // SCADE-style workspace: a single named root (the workspace the user provides
+  // — analogous to a .vsw; double-click to rename) holding the model(s). The
+  // default single model is shown directly with no redundant "user" node;
+  // multiple user packages keep their grouping underneath.
   const userPkgs = ins.project.packages.filter(p => p.name !== "stdlib");
+  const ws = mkDetails("__workspace__", true);
+  const wsSum = document.createElement("summary");
+  wsSum.innerHTML = '<span class="kind">W</span> ' + escapeHTML(ins.project.name || "workspace");
+  wsSum.title = "Workspace — double-click to rename";
+  wsSum.ondblclick = e => { e.preventDefault(); e.stopPropagation(); renameWorkspace(); };
+  ws.appendChild(wsSum);
+  if (userPkgs.length === 1) {
+    fillPackage(ws, userPkgs[0], true);
+  } else {
+    for (const pkg of userPkgs) mkPackage(pkg, ws);
+  }
+  pkgs.appendChild(ws);
+  // Project-wide Types and Constants. State machines are NOT a separate group —
+  // each lives under its owning operator (above). Libraries live only in the
+  // right Operations palette now.
   buildTypesNode(pkgs, userPkgs.flatMap(p => p.types || []).filter(t => !smEnumTypes.has(t.name)));
   buildConstantsNode(pkgs, userPkgs.flatMap(p => p.constants || []));
-  const libPkgs = ins.project.packages.filter(p => p.name === "stdlib");
-  if (libPkgs.length) {
-    const lib = mkDetails("__libraries__", false);
-    const sum = document.createElement("summary");
-    sum.textContent = "Libraries";
-    lib.appendChild(sum);
-    for (const pkg of libPkgs) mkPackage(pkg, lib);
-    pkgs.appendChild(lib);
-  }
   const diag = document.getElementById("diagnostics");
   diag.innerHTML = "";
   if (!ins.diagnostics.length) {
@@ -2214,21 +2220,38 @@ async function loadToolbox() {
 function renderToolbox() {
   const host = document.getElementById("toolbox-body");
   host.innerHTML = "";
-  // Project operators and library blocks first — drag to instantiate a call.
+  // A State Machine is inserted into the *current* operator from here (SCADE
+  // style): it becomes that operator's body. Selecting it (or dropping it on
+  // the canvas) opens the textual editor bound to this operator.
   if (state.inspect) {
-    const groups = [
-      ["Operators (project)", state.inspect.project.packages.filter(p => p.name !== "stdlib")],
-      ["Library Blocks", state.inspect.project.packages.filter(p => p.name === "stdlib")],
-    ];
-    for (const [title, pkgs] of groups) {
-      const nodes = pkgs.flatMap(p => p.nodes).filter(n => n.name !== state.diagramData?.node);
-      if (!nodes.length) continue;
+    const smDet = document.createElement("details");
+    smDet.open = true;
+    const smSum = document.createElement("summary");
+    smSum.textContent = "State";
+    smDet.appendChild(smSum);
+    const smItem = document.createElement("div");
+    smItem.className = "op-item";
+    smItem.textContent = "State Machine";
+    smItem.title = "Insert a state machine into the current operator (opens the textual editor)";
+    smItem.draggable = true;
+    smItem.ondragstart = ev => ev.dataTransfer.setData("text/plain", "sm:new");
+    smItem.onclick = () => openStateMachineForCurrent();
+    smDet.appendChild(smItem);
+    host.appendChild(smDet);
+
+    // The standard library blocks — drag onto the canvas to instantiate a call.
+    // (Project operators are NOT listed here; they live in the left workspace
+    // tree and are draggable from there.)
+    const libNodes = state.inspect.project.packages
+      .filter(p => p.name === "stdlib")
+      .flatMap(p => p.nodes)
+      .filter(n => n.name !== state.diagramData?.node);
+    if (libNodes.length) {
       const det = document.createElement("details");
-      if (title.startsWith("Operators")) det.open = true;
       const sum = document.createElement("summary");
-      sum.textContent = title;
+      sum.textContent = "Libraries";
       det.appendChild(sum);
-      for (const n of nodes) {
+      for (const n of libNodes) {
         const item = document.createElement("div");
         item.className = "op-item";
         item.textContent = n.name;
@@ -2267,12 +2290,42 @@ function renderToolbox() {
   }
 }
 
+// Insert or edit the state machine of the operator whose canvas is open. If it
+// already owns one, open it for editing; otherwise start a new machine bound to
+// that operator (its I/O is inherited from the operator).
+function openStateMachineForCurrent() {
+  const op = state.diagramData?.node;
+  if (!op) { openFsmEditor(null); return; }
+  const existing = (state.inspect?.project?.state_machines || []).find(m => m.owner === op);
+  openFsmEditor(existing ? existing.name : null, op);
+}
+
+// Rename the workspace (the named root of the model tree, like a SCADE .vsw).
+async function renameWorkspace() {
+  const cur = state.inspect?.project?.name || "";
+  const name = prompt("Workspace name:", cur);
+  if (name === null) return;
+  const t = name.trim();
+  if (!t || t === cur) return;
+  const resp = await fetch("/api/edit/set_project_name", { method: "POST", body: JSON.stringify({ name: t }) });
+  if (!resp.ok) {
+    let msg = await resp.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    document.getElementById("diagram-status").textContent = "rename failed: " + msg;
+    return;
+  }
+  await refresh();
+}
+
 const diagramHostEl = document.getElementById("diagram-host");
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
   ev.preventDefault();
   const data = ev.dataTransfer.getData("text/plain");
   if (!data || !state.diagramData) return;
+  // A state machine isn't a placed block — it opens the textual editor bound
+  // to the operator whose canvas this is.
+  if (data === "sm:new") { openStateMachineForCurrent(); return; }
   const svgEl = document.getElementById("diagram-svg");
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
   const x = snap(Math.max(0, ev.clientX - r.left));
@@ -2471,9 +2524,6 @@ function operatorTreeMenu(ev, name) {
   item("Add Input…", () => openPortDialog("input"));
   item("Add Output…", () => openPortDialog("output"));
   item("Add Local…", () => openPortDialog("local"));
-  // Only one machine per operator; offer to add when there isn't one yet.
-  const ownsSM = (state.inspect?.project?.state_machines || []).some(m => m.owner === name);
-  if (!ownsSM) item("Add State Machine…", () => openFsmEditor(null, name));
   sep();
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";

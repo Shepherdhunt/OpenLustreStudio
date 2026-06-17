@@ -357,6 +357,52 @@ fn state_machine_owned_by_operator_create_edit_build_remove() {
     assert!(gone, "Toggle removed");
 }
 
+/// A state machine that would not translate cleanly (a per-state output
+/// assigned a value of the wrong type) is REJECTED at create time — before it
+/// is ever saved — so the model never holds a machine that fails to lower to
+/// Lustre / autogenerate C. The corrected machine is then accepted and its
+/// operator builds.
+#[test]
+fn state_machine_create_is_rejected_unless_it_translates_cleanly() {
+    let g = start_server_on_workspace("ws_sm_validate");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Gate","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Gate","side":"input","name":"flip","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Gate","side":"output","name":"lit","type":"bool"}"#);
+
+    // `lit` is bool; both states must assign it (SCADE cover). The On state's
+    // body is the variable — `true` is valid, `5` is an int (a type error that
+    // only surfaces once the machine is merged into Gate and type-checked).
+    let machine = |on_body: &str| -> String {
+        let off = r#"{"name":"Off","equations":[{"lhs":"lit","body":"false"}],"transitions":[{"guard":"flip","target":"On"}]}"#;
+        let on = format!(
+            r#"{{"name":"On","equations":[{{"lhs":"lit","body":"{on_body}"}}],"transitions":[{{"guard":"flip","target":"Off"}}]}}"#
+        );
+        format!(
+            r#"{{"name":"M","operator":"Gate","initial_state":"Off",
+                 "inputs":[{{"name":"flip","type":"bool"}}],
+                 "outputs":[{{"name":"lit","type":"bool"}}],
+                 "states":[{off},{on}]}}"#
+        )
+    };
+
+    let (bad, body) = request(port, "POST", "/api/edit/add_state_machine", &machine("5")).expect("bad sm");
+    assert_eq!(bad, 400, "a machine that would not type-check must be rejected: {body}");
+    let ins = get_json(port, "/api/inspect");
+    assert!(
+        !ins["project"]["state_machines"].as_array().unwrap().iter().any(|m| m["name"] == "M"),
+        "the rejected machine must not be persisted"
+    );
+
+    // The corrected machine is accepted, and its operator builds + generates.
+    post_ok(port, "/api/edit/add_state_machine", &machine("true"));
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Gate"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "the valid machine's operator builds: {bd}");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]
