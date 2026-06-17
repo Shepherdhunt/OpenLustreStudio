@@ -23,21 +23,56 @@ const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
 /// Server configuration captured at startup; the project is re-loaded on every
 /// request so external edits to the model are reflected by a page refresh.
-pub struct ServerCtx {
+/// The currently-open workspace: which model file is served, where its test
+/// scenarios live, and its sibling types file. Held behind a `Mutex` so the
+/// File menu can switch workspaces at runtime (New / Open).
+#[derive(Clone)]
+pub struct Workspace {
     pub model: PathBuf,
+    /// Directory of test scenarios (*.csv + *.golden.csv).
+    pub scenarios: PathBuf,
+    /// The workspace's types file (`types.json` next to the model), when one
+    /// exists — named types created in the GUI save here and reach the model
+    /// via its `includes`.
+    pub types_file: Option<PathBuf>,
+}
+
+pub struct ServerCtx {
+    /// The active workspace; swapped by the File menu's New / Open.
+    pub workspace: std::sync::Mutex<Workspace>,
     pub with_stdlib: Option<PathBuf>,
     /// Merge the library embedded in this binary when no on-disk
     /// `--with-stdlib` directory was given (the deployed-app default).
     pub use_embedded: bool,
-    /// Directory of test scenarios (*.csv + *.golden.csv). Defaults to a
-    /// `scenarios` directory next to the model file.
-    pub scenarios: PathBuf,
-    /// The workspace's types file (`types.json` next to the model), when one
-    /// exists. Named type definitions created in the GUI are saved here —
-    /// the SCADE "types file" — and reach the model via its `includes`.
-    pub types_file: Option<PathBuf>,
     /// Undo/redo journal: file snapshots taken before each successful edit.
     pub history: std::sync::Mutex<History>,
+}
+
+impl ServerCtx {
+    pub fn model(&self) -> PathBuf {
+        self.workspace.lock().unwrap().model.clone()
+    }
+    pub fn scenarios(&self) -> PathBuf {
+        self.workspace.lock().unwrap().scenarios.clone()
+    }
+    pub fn types_file(&self) -> Option<PathBuf> {
+        self.workspace.lock().unwrap().types_file.clone()
+    }
+    /// Switch to `model`: derive its sibling `types.json` (if present) and
+    /// `scenarios/` directory, and clear the undo journal (a new document).
+    pub fn switch_workspace(&self, model: PathBuf) {
+        let parent = model
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        let types = parent.join("types.json");
+        let types_file = (types.exists() && types != model).then_some(types);
+        let scenarios = parent.join("scenarios");
+        *self.workspace.lock().unwrap() = Workspace { model, scenarios, types_file };
+        let mut h = self.history.lock().unwrap();
+        h.undo.clear();
+        h.redo.clear();
+    }
 }
 
 /// A snapshot is the full text of every editable file (model + types).
@@ -52,9 +87,9 @@ pub struct History {
 const HISTORY_CAP: usize = 100;
 
 fn take_snapshot(ctx: &ServerCtx) -> Snapshot {
-    let mut files = vec![ctx.model.clone()];
-    if let Some(t) = &ctx.types_file {
-        files.push(t.clone());
+    let mut files = vec![ctx.model()];
+    if let Some(t) = ctx.types_file() {
+        files.push(t);
     }
     files
         .into_iter()
@@ -309,6 +344,13 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
         ("POST", "/api/edit/add_type_op") => add_type_op_response(ctx, body),
         ("POST", "/api/edit/add_expression") => add_expression_response(ctx, body),
+        ("GET", "/api/workspace/list") => match workspace_list(ctx, &parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/workspace/open") => workspace_open_response(ctx, body),
+        ("POST", "/api/workspace/new") => workspace_new_response(ctx, body),
+        ("POST", "/api/workspace/save") => workspace_save_response(ctx),
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
@@ -429,7 +471,7 @@ fn json_error(msg: &str) -> String {
 // --- emit / inspect / simulate paths.
 
 fn load(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
-    crate::load_for_studio(&ctx.model, ctx.with_stdlib.as_deref(), ctx.use_embedded)
+    crate::load_for_studio(&ctx.model(), ctx.with_stdlib.as_deref(), ctx.use_embedded)
         .map_err(|e| format!("{e:#}"))
 }
 
@@ -510,7 +552,8 @@ fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
 /// JSON stays the single source of truth and these files are projections of
 /// it — blank on create, filled on a clean build.
 fn operator_lus_path(ctx: &ServerCtx, name: &str) -> std::path::PathBuf {
-    let dir = ctx.model.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let model = ctx.model();
+    let dir = model.parent().unwrap_or_else(|| std::path::Path::new("."));
     dir.join(format!("{name}.lus"))
 }
 
@@ -1041,17 +1084,17 @@ fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(),
 }
 
 fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
-    load_raw_path(&ctx.model)
+    load_raw_path(&ctx.model())
 }
 
 fn save_raw(ctx: &ServerCtx, project: &ol_ir::Project) -> Result<(), String> {
-    save_raw_path(&ctx.model, project)
+    save_raw_path(&ctx.model(), project)
 }
 
 type EditFn = fn(&mut ol_ir::Project, &serde_json::Value) -> Result<(), String>;
 
 fn apply_edit_response(ctx: &ServerCtx, body: &[u8], f: EditFn) -> (u16, &'static str, Vec<u8>) {
-    apply_edit_response_to(ctx, &ctx.model.clone(), body, f)
+    apply_edit_response_to(ctx, &ctx.model(), body, f)
 }
 
 /// Apply an edit to a specific file in the workspace (the model file or the
@@ -1289,10 +1332,11 @@ fn main_node(project: &ol_ir::Project) -> Result<String, String> {
 }
 
 fn tests_list(ctx: &ServerCtx) -> Result<String, String> {
-    let scenarios = crate::scenario::list_scenarios(&ctx.scenarios);
+    let scen_dir = ctx.scenarios();
+    let scenarios = crate::scenario::list_scenarios(&scen_dir);
     let value = serde_json::json!({
         "schema_version": 1,
-        "scenarios_dir": ctx.scenarios.display().to_string(),
+        "scenarios_dir": scen_dir.display().to_string(),
         "scenarios": scenarios.iter().map(|s| serde_json::json!({
             "name": s.name,
             "has_golden": s.has_golden,
@@ -1307,7 +1351,7 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
     let node = main_node(&project)?;
     let outcome = crate::scenario::run_scenarios(
         &project,
-        &ctx.scenarios,
+        &ctx.scenarios(),
         &node,
         &[crate::scenario::Backend::Ir, crate::scenario::Backend::C],
     );
@@ -1324,7 +1368,7 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
 fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
     let project = load(ctx)?;
     let node = main_node(&project)?;
-    let recorded = crate::scenario::record_goldens(&project, &ctx.scenarios, &node)?;
+    let recorded = crate::scenario::record_goldens(&project, &ctx.scenarios(), &node)?;
     let value = serde_json::json!({
         "schema_version": 1,
         "recorded": recorded.iter().map(|(name, path)| serde_json::json!({
@@ -1839,7 +1883,7 @@ fn types_list(ctx: &ServerCtx) -> Result<String, String> {
         "schema_version": 1,
         "primitives": PRIMITIVE_TYPES,
         "types": types,
-        "types_file": ctx.types_file.as_ref().map(|p| p.display().to_string()),
+        "types_file": ctx.types_file().as_ref().map(|p| p.display().to_string()),
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
@@ -1929,7 +1973,7 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
         other => return bad(&format!("kind must be enum|record|alias, got {other:?}")),
     };
 
-    let target_path = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let target_path = ctx.types_file().unwrap_or_else(|| ctx.model());
     let before = take_snapshot(ctx);
     let mut doc = match load_raw_path(&target_path) {
         Ok(p) => p,
@@ -1962,10 +2006,10 @@ fn remove_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
         None => return (400, "application/json", json_error("missing string field `name`").into_bytes()),
     };
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(t) = &ctx.types_file {
-        candidates.push(t.clone());
+    if let Some(t) = ctx.types_file() {
+        candidates.push(t);
     }
-    candidates.push(ctx.model.clone());
+    candidates.push(ctx.model());
     for path in candidates {
         let mut doc = match load_raw_path(&path) {
             Ok(p) => p,
@@ -2047,7 +2091,7 @@ fn add_constant_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Ve
         return bad(&format!("`{name}` already names an operator"));
     }
 
-    let target_path = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
+    let target_path = ctx.types_file().unwrap_or_else(|| ctx.model());
     let before = take_snapshot(ctx);
     let mut doc = match load_raw_path(&target_path) {
         Ok(p) => p,
@@ -2080,10 +2124,10 @@ fn remove_constant_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str,
         None => return (400, "application/json", json_error("missing string field `name`").into_bytes()),
     };
     let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Some(t) = &ctx.types_file {
-        candidates.push(t.clone());
+    if let Some(t) = ctx.types_file() {
+        candidates.push(t);
     }
-    candidates.push(ctx.model.clone());
+    candidates.push(ctx.model());
     for path in candidates {
         let mut doc = match load_raw_path(&path) {
             Ok(p) => p,
@@ -2164,8 +2208,8 @@ fn import_lustre_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     // Types and constants are project-global (types file when present); nodes go
     // in the model file. When there is no separate types file the two coincide,
     // so do it all in one write.
-    let types_target = ctx.types_file.clone().unwrap_or_else(|| ctx.model.clone());
-    let same = types_target == ctx.model;
+    let types_target = ctx.types_file().unwrap_or_else(|| ctx.model());
+    let same = types_target == ctx.model();
     {
         let mut m = match load_raw(ctx) {
             Ok(p) => p,
@@ -3326,6 +3370,134 @@ fn add_expression_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
     }
 }
 
+// --- Workspace: New / Open / Save (File menu) -------------------------------
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// List `.wksc` workspaces discoverable under a base directory (the base and
+/// its immediate subdirectories) for the in-app Open dialog. Default base:
+/// `~/OpenLustre`.
+fn workspace_list(ctx: &ServerCtx, query: &std::collections::HashMap<String, String>) -> Result<String, String> {
+    let base = query
+        .get("base")
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join("OpenLustre"));
+    let mut found: Vec<serde_json::Value> = Vec::new();
+    let mut scan = |dir: &std::path::Path| {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_file()
+                    && p.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("wksc")).unwrap_or(false)
+                {
+                    found.push(serde_json::json!({
+                        "name": p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                        "path": p.display().to_string(),
+                    }));
+                }
+            }
+        }
+    };
+    scan(&base);
+    if let Ok(rd) = std::fs::read_dir(&base) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                scan(&p);
+            }
+        }
+    }
+    found.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    Ok(serde_json::json!({
+        "base": base.display().to_string(),
+        "current": ctx.model().display().to_string(),
+        "workspaces": found,
+    })
+    .to_string())
+}
+
+/// Open an existing workspace (a `.wksc` file or a workspace folder) and make
+/// it the active one. Verifies it loads before switching, so a bad path leaves
+/// the current workspace untouched.
+fn workspace_open_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let path = match req.get("path").and_then(|v| v.as_str()) {
+        Some(s) => PathBuf::from(s),
+        None => return bad("missing string field `path`"),
+    };
+    if !path.exists() {
+        return bad(&format!("{} does not exist", path.display()));
+    }
+    let resolved = match crate::resolve_workspace(&path, false) {
+        Ok(p) => p,
+        Err(e) => return bad(&format!("{e:#}")),
+    };
+    if let Err(e) = crate::load_for_studio(&resolved, ctx.with_stdlib.as_deref(), ctx.use_embedded) {
+        return bad(&format!("cannot open workspace: {e:#}"));
+    }
+    ctx.switch_workspace(resolved);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Create a new workspace in `path` (a folder, created if missing): seeds
+/// `<name>.wksc` + types.json + scenarios/ and switches to it.
+fn workspace_new_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let dir = match req.get("path").and_then(|v| v.as_str()) {
+        Some(s) => PathBuf::from(s),
+        None => return bad("missing string field `path`"),
+    };
+    let empty = req.get("empty").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return bad(&format!("creating {}: {e}", dir.display()));
+    }
+    let resolved = match crate::resolve_workspace(&dir, empty) {
+        Ok(p) => p,
+        Err(e) => return bad(&format!("{e:#}")),
+    };
+    ctx.switch_workspace(resolved);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Explicit Save: re-persist the current model (edits already autosave, so this
+/// confirms and flushes). Returns the saved path.
+fn workspace_save_response(ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
+    let project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    (
+        200,
+        "application/json",
+        serde_json::json!({ "ok": true, "path": ctx.model().display().to_string() })
+            .to_string()
+            .into_bytes(),
+    )
+}
+
 /// Change the input-pin count of a variadic operation block in place
 /// (`{node, index, inputs}`): growing appends fresh red ghost pins so the
 /// engineer sees exactly what still needs wiring, shrinking drops the
@@ -3440,10 +3612,10 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Err(e) => return bad(&format!("bad JSON: {e}")),
     };
     let compiler = req.get("compiler").and_then(|v| v.as_str()).unwrap_or("auto");
+    let model = ctx.model();
     let out_dir = match req.get("out_dir").and_then(|v| v.as_str()) {
         Some(d) if !d.trim().is_empty() => PathBuf::from(d),
-        _ => ctx
-            .model
+        _ => model
             .parent()
             .unwrap_or(std::path::Path::new("."))
             .join("build"),
@@ -3521,8 +3693,8 @@ fn clite_run_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
     let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
     let req: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::Value::Null);
     let compiler = req.get("compiler").and_then(|v| v.as_str()).unwrap_or("auto");
-    let out_dir = ctx
-        .model
+    let model = ctx.model();
+    let out_dir = model
         .parent()
         .unwrap_or_else(|| std::path::Path::new("."))
         .join("build");

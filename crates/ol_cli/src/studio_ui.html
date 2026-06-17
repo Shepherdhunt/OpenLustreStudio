@@ -258,6 +258,10 @@
   <div class="menu" data-menu="file">
     <span class="menu-title">File</span>
     <div class="dropdown">
+      <div class="mi" onclick="newWorkspace()">New Workspace…</div>
+      <div class="mi" onclick="openWorkspaceDialog()">Open Workspace…</div>
+      <div class="mi" onclick="saveWorkspace()">Save Workspace</div>
+      <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-operator')">New Operator…</div>
       <div class="mi" onclick="openDialog('dlg-main')">Set Main Operator…</div>
       <div class="menu-sep"></div>
@@ -577,6 +581,17 @@
       <p class="build-note">A simple named scalar (<code class="inline">int8</code>), a fixed array (<code class="inline">float32[3]</code>), or a character array / string (<code class="inline">char[16]</code>).</p>
     </div>
     <div class="build-note" id="types-status"></div>
+  </div>
+
+  <div class="dlg" id="dlg-open-workspace">
+    <p>Open a workspace — the <code class="inline">.wksc</code> workspaces found in this folder (and its immediate subfolders):</p>
+    <div class="row">
+      <label>folder</label>
+      <input id="ws-base" style="flex:1" placeholder="(default: ~/OpenLustre)">
+      <button onclick="loadWorkspaceList()">Rescan</button>
+    </div>
+    <div id="ws-list"></div>
+    <div class="build-note" id="ws-open-status"></div>
   </div>
 
   <div class="dlg" id="dlg-constant">
@@ -1463,6 +1478,9 @@ async function pipeBuild() {
     // The build made the chosen operator the root — reflect that everywhere
     // (header, selectors, watch table) without waiting for the 5 s poll.
     await refresh();
+    // Autosave the workspace on every successful build (edits already persist;
+    // this flushes and confirms). Fire-and-forget so the build status stands.
+    fetch("/api/workspace/save", { method: "POST" });
   } else {
     state.pipeline.built = false;
     state.pipeline.generated = false;
@@ -2459,6 +2477,83 @@ async function placePort(node, name, x, y) {
   await refresh();
   loadDiagram(node, false);
   document.getElementById("diagram-status").textContent = "placed: " + name;
+}
+
+// --- Workspace: New / Open / Save (File menu) --------------------------------
+
+async function openWorkspaceDialog() {
+  openDialog("dlg-open-workspace");
+  document.getElementById("ws-base").value = "";
+  document.getElementById("ws-open-status").textContent = "";
+  await loadWorkspaceList();
+}
+
+async function loadWorkspaceList() {
+  const base = document.getElementById("ws-base").value.trim();
+  const q = base ? "?base=" + encodeURIComponent(base) : "";
+  let data;
+  try { data = await fetchJSON("/api/workspace/list" + q); }
+  catch (e) { document.getElementById("ws-open-status").textContent = "list failed: " + e; return; }
+  if (!document.getElementById("ws-base").value) document.getElementById("ws-base").value = data.base;
+  const host = document.getElementById("ws-list");
+  host.innerHTML = "";
+  if (!data.workspaces.length) {
+    host.innerHTML = '<p class="build-note">No .wksc workspaces here — change the folder, or use File ▸ New Workspace.</p>';
+    return;
+  }
+  for (const w of data.workspaces) {
+    const cur = w.path === data.current;
+    const d = document.createElement("div");
+    d.className = "node";
+    d.style.cursor = cur ? "default" : "pointer";
+    d.innerHTML = '<span class="kind">W</span> ' + escapeHTML(w.name) +
+      (cur ? ' <span class="tree-meta">(current)</span>' : '') +
+      '<div class="tree-meta" style="margin-left:18px">' + escapeHTML(w.path) + '</div>';
+    if (!cur) d.onclick = () => openWorkspace(w.path);
+    host.appendChild(d);
+  }
+}
+
+async function openWorkspace(path) {
+  const resp = await fetch("/api/workspace/open", { method: "POST", body: JSON.stringify({ path }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    document.getElementById("ws-open-status").textContent = "open failed: " + m;
+    return;
+  }
+  closeDialog();
+  await switchedWorkspace("opened " + path);
+}
+
+async function newWorkspace() {
+  const dir = prompt("New workspace — destination folder (a <name>.wksc, types.json and scenarios/ are created inside):", "");
+  if (dir === null || !dir.trim()) return;
+  const resp = await fetch("/api/workspace/new", { method: "POST", body: JSON.stringify({ path: dir.trim() }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    document.getElementById("diagram-status").textContent = "new workspace failed: " + m;
+    return;
+  }
+  await switchedWorkspace("created workspace in " + dir.trim());
+}
+
+async function saveWorkspace() {
+  const resp = await fetch("/api/workspace/save", { method: "POST" });
+  let msg = "workspace saved";
+  if (!resp.ok) { let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {} msg = "save failed: " + m; }
+  document.getElementById("diagram-status").textContent = msg;
+}
+
+// After switching the active workspace, reset the canvas and open the new
+// project's main operator (if any).
+async function switchedWorkspace(note) {
+  state.diagramStack = [];
+  state.diagramData = null;
+  await refresh();
+  const main = state.inspect && state.inspect.project && state.inspect.project.main;
+  const n = main && findNode(main);
+  if (n) { selectNode(n); loadDiagram(main); }
+  document.getElementById("diagram-status").textContent = note;
 }
 
 const diagramHostEl = document.getElementById("diagram-host");

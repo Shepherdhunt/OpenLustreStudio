@@ -252,6 +252,46 @@ fn literal_expression_block_infers_type_and_rejects_unknown() {
     assert_eq!(expr_local["type"]["kind"], "Bool", "`8 > x` infers bool: {expr_local}");
 }
 
+/// File ▸ New / Open Workspace switch the server's active workspace at runtime:
+/// New seeds and switches to a fresh `.wksc`, edits land there (not the old
+/// one), and Open switches back.
+#[test]
+fn workspace_new_open_save_switches_the_active_workspace() {
+    let g = start_server_on_workspace("ws_switch");
+    let port = g.port;
+    // The helper opened tmp/ws (named "ws").
+    assert_eq!(get_json(port, "/api/inspect")["project"]["name"], "ws");
+
+    // New Workspace in tmp/wsB → switch to a fresh starter project named wsB.
+    let wsb = g.tmp.join("wsB");
+    let (s, b) = request(port, "POST", "/api/workspace/new",
+        &serde_json::json!({ "path": wsb.to_str().unwrap() }).to_string()).expect("new");
+    assert_eq!(s, 200, "new workspace: {b}");
+    assert!(wsb.join("wsB.wksc").exists(), "wsB.wksc created");
+    assert_eq!(get_json(port, "/api/inspect")["project"]["name"], "wsB", "switched to wsB");
+
+    // An edit now lands in wsB's file.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"OnlyInB","kind":"operator"}"#);
+    assert!(std::fs::read_to_string(wsb.join("wsB.wksc")).unwrap().contains("OnlyInB"));
+
+    // Open the original workspace back; OnlyInB must not be there.
+    let (s2, _) = request(port, "POST", "/api/workspace/open",
+        &serde_json::json!({ "path": g.tmp.join("ws").to_str().unwrap() }).to_string()).expect("open");
+    assert_eq!(s2, 200);
+    let ins = get_json(port, "/api/inspect");
+    assert_eq!(ins["project"]["name"], "ws", "switched back to ws");
+    let leaked = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .any(|n| n["name"] == "OnlyInB");
+    assert!(!leaked, "OnlyInB must not leak into ws");
+
+    // Save succeeds; opening a non-existent path is rejected.
+    assert_eq!(request(port, "POST", "/api/workspace/save", "").expect("save").0, 200);
+    let (s3, _) = request(port, "POST", "/api/workspace/open",
+        r#"{"path":"/no/such/workspace.wksc"}"#).expect("bad open");
+    assert_eq!(s3, 400, "opening a missing path is rejected");
+}
+
 /// `openlustre new --empty` seeds a project with no operators; the Studio
 /// serves it without trouble and it stays editable (you can add operators in).
 #[test]

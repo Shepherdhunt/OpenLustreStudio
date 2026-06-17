@@ -909,11 +909,13 @@ fn serve_studio(
         .filter(|p| p.exists() && Some(p.as_path()) != Some(model));
 
     let ctx = studio_server::ServerCtx {
-        model: model.to_path_buf(),
+        workspace: std::sync::Mutex::new(studio_server::Workspace {
+            model: model.to_path_buf(),
+            scenarios,
+            types_file,
+        }),
         with_stdlib,
         use_embedded,
-        scenarios,
-        types_file,
         history: Default::default(),
     };
     studio_server::serve(listener, ctx)?;
@@ -924,7 +926,7 @@ fn serve_studio(
 /// directory creates the project skeleton on first open — `project.json`
 /// (with a starter operator, including `types.json`), the types file, and a
 /// `scenarios/` directory — and resolves to the project file.
-fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
+pub(crate) fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
     if !path.is_dir() {
         return Ok(path.to_path_buf());
     }
@@ -965,7 +967,9 @@ fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
     project.includes = vec!["types.json".into()];
     std::fs::write(&wksc, serde_json::to_string_pretty(&project)?)
         .with_context(|| format!("writing {}", wksc.display()))?;
-    println!("studio: created workspace {}", wksc.display());
+    // NB: no stdout print here — this runs inside the studio server too (File ▸
+    // New/Open Workspace), where stdout may be a closed pipe and a `println!`
+    // would panic. The CLI `new` command prints its own confirmation.
     Ok(wksc)
 }
 
