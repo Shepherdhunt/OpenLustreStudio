@@ -131,9 +131,9 @@ fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
 fn launch_creates_welcome_project_and_serves_the_embedded_palette() {
     let g = start_launch();
 
-    // First-run experience: the welcome project was created under HOME.
-    let welcome = g.home.join("OpenLustre/welcome.json");
-    assert!(welcome.exists(), "welcome project not created");
+    // First-run experience: the welcome workspace was created under HOME.
+    let welcome = g.home.join("OpenLustre/welcome.wksc");
+    assert!(welcome.exists(), "welcome workspace not created");
 
     // The served project is the starter model, with the embedded 41-block
     // palette merged — no --with-stdlib flag, no libraries/ checkout needed.

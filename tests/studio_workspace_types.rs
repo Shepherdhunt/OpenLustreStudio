@@ -121,8 +121,9 @@ fn opening_a_workspace_directory_creates_the_project_skeleton() {
     let g = start_server_on_workspace("ws_skel");
     let ws = g.tmp.join("ws");
 
-    // The skeleton exists on disk: project file, types file, scenarios dir.
-    assert!(ws.join("project.json").exists(), "project.json missing");
+    // The skeleton exists on disk: the `.wksc` workspace file (named after the
+    // folder), the types file, and the scenarios dir.
+    assert!(ws.join("ws.wksc").exists(), "ws.wksc workspace file missing");
     assert!(ws.join("types.json").exists(), "types.json missing");
     assert!(ws.join("scenarios").is_dir(), "scenarios/ missing");
 
@@ -131,8 +132,40 @@ fn opening_a_workspace_directory_creates_the_project_skeleton() {
     let ins = get_json(g.port, "/api/inspect");
     assert_eq!(ins["project"]["name"], "ws");
     assert_eq!(ins["project"]["main"], "Heartbeat");
-    let on_disk = std::fs::read_to_string(ws.join("project.json")).unwrap();
-    assert!(on_disk.contains("types.json"), "project must include types.json");
+    let on_disk = std::fs::read_to_string(ws.join("ws.wksc")).unwrap();
+    assert!(on_disk.contains("types.json"), "workspace must include types.json");
+}
+
+/// The `.wksc` workspace file ties every operator together: operators created
+/// in the workspace are persisted into that single file, and the workspace
+/// lists them all on re-inspect.
+#[test]
+fn workspace_wksc_ties_operators_together() {
+    let g = start_server_on_workspace("ws_wksc");
+    let ws = g.tmp.join("ws");
+    let port = g.port;
+
+    let wksc = ws.join("ws.wksc");
+    assert!(wksc.exists(), "workspace .wksc created");
+
+    // Operators added in the workspace land in the same `.wksc`.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Alpha","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Beta","kind":"operator"}"#);
+    let on_disk = std::fs::read_to_string(&wksc).unwrap();
+    assert!(
+        on_disk.contains("Alpha") && on_disk.contains("Beta"),
+        "both operators are tied together in the one workspace file: {on_disk}"
+    );
+
+    // The workspace lists every operator (the starter plus the two new ones).
+    let ins = get_json(port, "/api/inspect");
+    let ops: Vec<String> = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .map(|n| n["name"].as_str().unwrap_or("").to_string())
+        .collect();
+    for want in ["Heartbeat", "Alpha", "Beta"] {
+        assert!(ops.iter().any(|n| n == want), "{want} in the workspace: {ops:?}");
+    }
 }
 
 /// `openlustre new --empty` seeds a project with no operators; the Studio
@@ -431,12 +464,12 @@ fn named_types_save_into_the_types_file_and_serve_back() {
     assert!(names.contains(&"Mode") && names.contains(&"Sample") && names.contains(&"Vec3"),
         "served types: {names:?}");
 
-    // The definitions live in the TYPES file, not the project file.
+    // The definitions live in the TYPES file, not the workspace file.
     let types_disk = std::fs::read_to_string(ws.join("types.json")).unwrap();
-    let project_disk = std::fs::read_to_string(ws.join("project.json")).unwrap();
+    let project_disk = std::fs::read_to_string(ws.join("ws.wksc")).unwrap();
     for n in ["Mode", "Sample", "Vec3"] {
         assert!(types_disk.contains(n), "{n} not in types.json");
-        assert!(!project_disk.contains(n), "{n} leaked into project.json");
+        assert!(!project_disk.contains(n), "{n} leaked into the workspace file");
     }
 
     // Duplicates are rejected; removal works and is durable.

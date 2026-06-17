@@ -928,7 +928,6 @@ fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
     if !path.is_dir() {
         return Ok(path.to_path_buf());
     }
-    let project_path = path.join("project.json");
     let types_path = path.join("types.json");
     if !types_path.exists() {
         let types_doc = ol_ir::Project {
@@ -942,21 +941,50 @@ fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
         std::fs::write(&types_path, serde_json::to_string_pretty(&types_doc)?)
             .with_context(|| format!("writing {}", types_path.display()))?;
     }
-    if !project_path.exists() {
-        let mut project = if empty { empty_project() } else { starter_project() };
-        project.name = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("project")
-            .to_string();
-        project.includes = vec!["types.json".into()];
-        std::fs::write(&project_path, serde_json::to_string_pretty(&project)?)
-            .with_context(|| format!("writing {}", project_path.display()))?;
-        println!("studio: created workspace project at {}", project_path.display());
-    }
     std::fs::create_dir_all(path.join("scenarios"))
         .with_context(|| format!("creating {}", path.join("scenarios").display()))?;
-    Ok(project_path)
+
+    // The workspace file ties together every operator/function in the project.
+    // Prefer an existing `.wksc`; fall back to a legacy `project.json`;
+    // otherwise create a new `<dirname>.wksc`.
+    if let Some(wksc) = first_wksc(path) {
+        return Ok(wksc);
+    }
+    let legacy = path.join("project.json");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    let dirname = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("workspace")
+        .to_string();
+    let wksc = path.join(format!("{dirname}.wksc"));
+    let mut project = if empty { empty_project() } else { starter_project() };
+    project.name = dirname;
+    project.includes = vec!["types.json".into()];
+    std::fs::write(&wksc, serde_json::to_string_pretty(&project)?)
+        .with_context(|| format!("writing {}", wksc.display()))?;
+    println!("studio: created workspace {}", wksc.display());
+    Ok(wksc)
+}
+
+/// The first `*.wksc` workspace file directly inside `dir` (lexicographic), if
+/// any — so opening a workspace folder finds its `.wksc`.
+fn first_wksc(dir: &Path) -> Option<PathBuf> {
+    let mut hits: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s.eq_ignore_ascii_case("wksc"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    hits.sort();
+    hits.into_iter().next()
 }
 
 fn cmd_studio_launch(
@@ -983,12 +1011,18 @@ fn welcome_project_path() -> Result<PathBuf> {
     let dir = home.join("OpenLustre");
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating {}", dir.display()))?;
-    let path = dir.join("welcome.json");
+    // Back-compat: keep using an existing welcome.json; otherwise the default
+    // workspace is a `welcome.wksc` file.
+    let legacy = dir.join("welcome.json");
+    if legacy.exists() {
+        return Ok(legacy);
+    }
+    let path = dir.join("welcome.wksc");
     if !path.exists() {
         let project = starter_project();
         std::fs::write(&path, serde_json::to_string_pretty(&project)?)
             .with_context(|| format!("writing {}", path.display()))?;
-        println!("studio: created starter project at {}", path.display());
+        println!("studio: created starter workspace at {}", path.display());
     }
     Ok(path)
 }

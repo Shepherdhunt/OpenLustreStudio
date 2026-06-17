@@ -1016,7 +1016,8 @@ fn load_raw_path(path: &std::path::Path) -> Result<ol_ir::Project, String> {
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("json") => serde_json::from_str(&data).map_err(|e| format!("JSON: {e}")),
+        // `.wksc` is the workspace file: JSON content, same `Project` schema.
+        Some("json") | Some("wksc") => serde_json::from_str(&data).map_err(|e| format!("JSON: {e}")),
         Some("ols") | Some("yaml") | Some("yml") => {
             serde_yaml::from_str(&data).map_err(|e| format!("YAML: {e}"))
         }
@@ -1031,7 +1032,7 @@ fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(),
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("json") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
+        Some("json") | Some("wksc") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
         _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
     };
     std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))

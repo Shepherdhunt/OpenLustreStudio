@@ -78,7 +78,7 @@ fn load_directory(dir: &Path, visited: &mut HashSet<PathBuf>) -> Result<Project,
                     .and_then(|s| s.to_str())
                     .map(|s| s.to_ascii_lowercase())
                     .as_deref(),
-                Some("ols") | Some("yaml") | Some("yml") | Some("json")
+                Some("ols") | Some("yaml") | Some("yml") | Some("json") | Some("wksc")
             )
         {
             files.push(p);
@@ -136,7 +136,8 @@ fn parse_single_file(path: &Path) -> Result<Project, LoadError> {
                 source: e,
             })
         }
-        Some("json") => serde_json::from_str(&data).map_err(|e| LoadError::Json {
+        // `.wksc` is the workspace file — JSON content, same `Project` schema.
+        Some("json") | Some("wksc") => serde_json::from_str(&data).map_err(|e| LoadError::Json {
             path: path.display().to_string(),
             source: e,
         }),
