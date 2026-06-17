@@ -20,6 +20,26 @@ The model is not just equations.
 The model is equations + contracts + modes + evidence.
 ```
 
+## A look at the Studio
+
+`openlustre studio launch` opens a SCADE-style docked workbench in your
+browser: a Project Explorer, a dataflow canvas with a block palette, the
+generated Lustre / C side panes, stepped simulation, a gated build pipeline,
+and the tests/verify docks.
+
+**Dataflow modeling.** Operators are drawn as wired blocks; the model's native
+storage and semantics are Lustre, generated and shown live beside the diagram.
+
+![The OpenLustre Studio workbench — project tree, the Doubler operator on the dataflow canvas, the Mathematics block palette, and the generated Lustre for the selected operator, with the gated Build pipeline below.](docs/screenshots/01-workbench.png)
+
+**State machines, owned by an operator.** SCADE-style automata are authored
+nested under the operator they drive — the project tree expands into
+Inputs / Locals / StateMachine / Outputs — and every output is checked for
+exhaustive per-state coverage. The same machine is shown as a state chart:
+its initial state (ringed), guarded transitions, and per-state outputs.
+
+![An operator-owned state machine in OpenLustre Studio — the nested project-tree shape on the left and the Lights state chart (Red/Green/Yellow with tick and emergency transitions) on the canvas.](docs/screenshots/02-state-machine.png)
+
 ## Installing
 
 **Windows** — download `OpenLustreStudio-<version>-Setup.exe` from the
