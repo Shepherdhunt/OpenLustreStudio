@@ -308,6 +308,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
         ("POST", "/api/edit/add_type_op") => add_type_op_response(ctx, body),
+        ("POST", "/api/edit/add_expression") => add_expression_response(ctx, body),
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
@@ -3201,6 +3202,119 @@ fn add_type_op_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
                 .positions
                 .insert(lhs, ol_ir::NodePos { x: x + 320.0, y: ey, ..Default::default() });
         }
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    record_edit(ctx, before);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// A free-text literal / expression block. The user types any surface
+/// expression (`8_i32`, `8 > x`, `MAX_SPEED`, `a and b`); it becomes an
+/// equation `expr = <body>` on a freshly-named local whose type is INFERRED in
+/// the operator's context. The expression must type-check against signals that
+/// already exist (an unknown name is rejected) — matching "works if x is
+/// visible". Dragging a constant onto the canvas posts here with body = the
+/// constant's name.
+fn add_expression_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let host = match req.get("node").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return bad("missing string field `node`"),
+    };
+    let expr_text = match req.get("body").and_then(|v| v.as_str()) {
+        Some(s) => s.trim().to_string(),
+        None => return bad("missing string field `body`"),
+    };
+    if expr_text.is_empty() {
+        return bad("the expression is empty");
+    }
+    let x = req.get("x").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let y = req.get("y").and_then(|v| v.as_f64()).unwrap_or(40.0);
+
+    let expr = match ol_stdlib::parse_expr(&expr_text) {
+        Ok(e) => e,
+        Err(e) => return bad(&format!("`{expr_text}`: {e}")),
+    };
+
+    // Infer the result type in the operator's context (types/constants come
+    // from the FULL project).
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let node = match full.find_node(&host) {
+        Some(n) => n,
+        None => return bad(&format!("node `{host}` not found")),
+    };
+    let tctx = ol_typecheck::TypeContext::from_project(&full);
+    let mut sigs: std::collections::HashMap<String, (Vec<ol_ir::Port>, Vec<ol_ir::Port>, ol_ir::NodeKind)> =
+        std::collections::HashMap::new();
+    for n in full.all_nodes() {
+        sigs.insert(n.name.clone(), (n.inputs.clone(), n.outputs.clone(), n.kind));
+    }
+    let mut env: std::collections::BTreeMap<String, ol_ir::Type> = std::collections::BTreeMap::new();
+    for p in node.inputs.iter().chain(node.outputs.iter()) {
+        env.insert(p.name.clone(), p.ty.clone());
+    }
+    for l in &node.locals {
+        env.insert(l.name.clone(), l.ty.clone());
+    }
+    let mut diags = Vec::new();
+    let out_ty = match ol_typecheck::infer_expr_type(
+        &expr, &env, &sigs, node, &mut diags, "expression", &tctx, None,
+    ) {
+        Some(t) => t,
+        None => {
+            let why = diags
+                .iter()
+                .find(|d| d.severity == ol_ir::Severity::Error)
+                .map(|d| format!("{}: {}", d.code, d.message))
+                .unwrap_or_else(|| "could not infer a type".into());
+            return bad(&format!("expression `{expr_text}` does not type-check — {why}"));
+        }
+    };
+
+    let before = take_snapshot(ctx);
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
+        };
+        let eq_index = node.equations.len();
+        let known: std::collections::HashSet<String> = node
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(node.outputs.iter().map(|p| p.name.clone()))
+            .chain(node.locals.iter().map(|l| l.name.clone()))
+            .collect();
+        let mut lhs = "expr".to_string();
+        let mut nn = 2;
+        while known.contains(&lhs) {
+            lhs = format!("expr_{nn}");
+            nn += 1;
+        }
+        node.locals.push(ol_ir::Local { name: lhs.clone(), ty: out_ty });
+        node.equations.push(ol_ir::Equation { lhs: vec![lhs.clone()], rhs: expr });
+        node.diagram
+            .positions
+            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y, ..Default::default() });
+        node.diagram
+            .positions
+            .insert(lhs, ol_ir::NodePos { x: x + 320.0, y, ..Default::default() });
     }
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());

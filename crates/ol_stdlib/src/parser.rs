@@ -71,6 +71,8 @@ enum Tok {
     Dot,
     CharLit(u8), // 'a'
     Str(String), // "ab"
+    TypedInt(i64, Type),   // 8_i32
+    TypedFloat(f64, Type), // 2.5_f32
 }
 
 impl Tok {
@@ -108,8 +110,29 @@ impl Tok {
             Tok::Dot => ".".into(),
             Tok::CharLit(b) => format!("'{}'", *b as char),
             Tok::Str(s) => format!("\"{s}\""),
+            Tok::TypedInt(n, ty) => format!("{n}_{}", ty.lustre_name()),
+            Tok::TypedFloat(f, ty) => format!("{f}_{}", ty.lustre_name()),
         }
     }
+}
+
+/// A numeric type suffix on a literal — `8_i32`, `2.5_f32`. Returns `None` for
+/// anything that isn't a recognized suffix, so a stray `_x` is left to tokenize
+/// as its own identifier.
+fn numeric_suffix_type(s: &str) -> Option<Type> {
+    Some(match s {
+        "i8" => Type::Int8,
+        "i16" => Type::Int16,
+        "i32" => Type::Int32,
+        "i64" => Type::Int64,
+        "u8" => Type::Uint8,
+        "u16" => Type::Uint16,
+        "u32" => Type::Uint32,
+        "u64" => Type::Uint64,
+        "f32" => Type::Float32,
+        "f64" => Type::Float64,
+        _ => return None,
+    })
 }
 
 fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
@@ -222,10 +245,36 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
                     }
                 }
                 let text = &src[start..i];
-                if is_float {
-                    out.push(Tok::Float(text.parse().map_err(|_| ParseError::BadChar(c, start))?));
-                } else {
-                    out.push(Tok::Int(text.parse().map_err(|_| ParseError::BadChar(c, start))?));
+                // Optional numeric type suffix: `8_i32`, `2.5_f32`. Only a
+                // recognized suffix is consumed; otherwise `_…` tokenizes on its
+                // own (and the bare number stands).
+                let mut suffix_ty = None;
+                if bytes.get(i) == Some(&b'_') {
+                    let s = i + 1;
+                    let mut j = s;
+                    while j < bytes.len() && (bytes[j] as char).is_alphanumeric() {
+                        j += 1;
+                    }
+                    if let Some(ty) = numeric_suffix_type(&src[s..j]) {
+                        suffix_ty = Some(ty);
+                        i = j;
+                    }
+                }
+                match (is_float, suffix_ty) {
+                    (true, Some(ty)) => out.push(Tok::TypedFloat(
+                        text.parse().map_err(|_| ParseError::BadChar(c, start))?,
+                        ty,
+                    )),
+                    (false, Some(ty)) => out.push(Tok::TypedInt(
+                        text.parse().map_err(|_| ParseError::BadChar(c, start))?,
+                        ty,
+                    )),
+                    (true, None) => out.push(Tok::Float(
+                        text.parse().map_err(|_| ParseError::BadChar(c, start))?,
+                    )),
+                    (false, None) => out.push(Tok::Int(
+                        text.parse().map_err(|_| ParseError::BadChar(c, start))?,
+                    )),
                 }
             }
             _ if c.is_alphabetic() || c == '_' => {
@@ -558,6 +607,15 @@ impl Parser {
             Some(Tok::Float(f)) => {
                 self.bump();
                 Ok(Expr::Const { lit: Literal::float(f) })
+            }
+            // A typed literal `8_i32` / `2.5_f32` is the value cast to that type.
+            Some(Tok::TypedInt(n, ty)) => {
+                self.bump();
+                Ok(Expr::Cast { to: ty, arg: Box::new(Expr::Const { lit: Literal::int(n) }) })
+            }
+            Some(Tok::TypedFloat(f, ty)) => {
+                self.bump();
+                Ok(Expr::Cast { to: ty, arg: Box::new(Expr::Const { lit: Literal::float(f) }) })
             }
             Some(Tok::CharLit(b)) => {
                 self.bump();
@@ -994,5 +1052,28 @@ mod tests {
                 ]
             )
         );
+    }
+
+    #[test]
+    fn typed_literal_suffix() {
+        assert_eq!(
+            p("8_i32"),
+            Expr::Cast { to: Type::Int32, arg: Box::new(Expr::Const { lit: Literal::int(8) }) }
+        );
+        assert_eq!(
+            p("2.5_f32"),
+            Expr::Cast { to: Type::Float32, arg: Box::new(Expr::Const { lit: Literal::float(2.5) }) }
+        );
+        // A typed literal composes in a larger expression: `x > 8_i32`.
+        assert_eq!(
+            p("x > 8_i32"),
+            Expr::bin(
+                BinOp::Gt,
+                Expr::var("x"),
+                Expr::Cast { to: Type::Int32, arg: Box::new(Expr::Const { lit: Literal::int(8) }) }
+            )
+        );
+        // An unrecognized suffix is not consumed (so `8_foo` is a parse error).
+        assert!(parse_expr("8_foo").is_err());
     }
 }

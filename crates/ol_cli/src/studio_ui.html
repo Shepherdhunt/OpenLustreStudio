@@ -549,7 +549,7 @@
   </div>
 
   <div class="dlg" id="dlg-types">
-    <p>Named types — enums, structures, and array aliases — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
+    <p>Named types — simple aliases (<code class="inline">Celsius : int8</code>), structures, arrays, character arrays / strings (<code class="inline">char[16]</code>), and enums — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
     <div id="types-list"></div>
     <div class="edit-form">
       <h4>New enum</h4>
@@ -568,12 +568,13 @@
       </div>
     </div>
     <div class="edit-form">
-      <h4>New alias / array type</h4>
+      <h4>New simple type, array, or string</h4>
       <div class="row">
-        <label>name</label><input id="type-alias-name" placeholder="Vec3">
-        <label>target</label><input id="type-alias-target" style="flex:1" placeholder="float32[3]">
+        <label>name</label><input id="type-alias-name" placeholder="Celsius">
+        <label>= type</label><input id="type-alias-target" style="flex:1" placeholder="int8   ·   float32[3]   ·   char[16]">
         <button class="primary" onclick="typesAddAlias()">Create</button>
       </div>
+      <p class="build-note">A simple named scalar (<code class="inline">int8</code>), a fixed array (<code class="inline">float32[3]</code>), or a character array / string (<code class="inline">char[16]</code>).</p>
     </div>
     <div class="build-note" id="types-status"></div>
   </div>
@@ -912,6 +913,9 @@ function buildConstantsNode(host, consts) {
       ' <span class="tree-meta">: ' + escapeHTML(typeName(c.type)) +
       (c.value != null ? " = " + escapeHTML(String(c.value)) : "") + '</span>';
     d.oncontextmenu = ev => constantTreeMenu(ev, c.name);
+    // Drag a constant onto an operator's canvas to use it as a source.
+    d.draggable = true;
+    d.ondragstart = ev => { ev.stopPropagation(); ev.dataTransfer.setData("text/plain", "const:" + c.name); };
     det.appendChild(d);
   }
   const add = document.createElement("div");
@@ -1108,20 +1112,25 @@ async function refresh() {
     sum.draggable = true;
     sum.ondragstart = ev => { ev.stopPropagation(); ev.dataTransfer.setData("text/plain", "call:" + n.name); };
     det.appendChild(sum);
-    const group = (label, rows) => {
+    const group = (label, items) => {
       const h = document.createElement("div");
       h.className = "tree-sub";
       h.textContent = label;
       det.appendChild(h);
-      for (const r of rows) {
+      for (const it of items) {
         const d = document.createElement("div");
         d.className = "node port";
-        d.textContent = r;
+        d.textContent = it.text;
+        // Drag a signal onto its operator's canvas to place/move its box.
+        if (it.name) {
+          d.draggable = true;
+          d.ondragstart = ev => { ev.stopPropagation(); ev.dataTransfer.setData("text/plain", "port:" + n.name + ":" + it.name); };
+        }
         det.appendChild(d);
       }
     };
-    group("Inputs", (n.inputs || []).map(p => p.name + " : " + typeName(p.type)));
-    group("Locals", (n.locals || []).filter(l => !l.name.startsWith("__sm")).map(l => l.name + " : " + typeName(l.type)));
+    group("Inputs", (n.inputs || []).map(p => ({ text: p.name + " : " + typeName(p.type), name: p.name })));
+    group("Locals", (n.locals || []).filter(l => !l.name.startsWith("__sm")).map(l => ({ text: l.name + " : " + typeName(l.type), name: l.name })));
     const sm = machines.find(m => m.owner === n.name);
     if (sm) {
       const smDet = mkDetails("sm:" + sm.name, false);
@@ -1140,7 +1149,7 @@ async function refresh() {
     }
     // A state machine is added from the right Operations palette (drag/select
     // "State Machine" onto this operator's canvas), not from the tree.
-    group("Outputs", (n.outputs || []).map(p => p.name + " : " + typeName(p.type)));
+    group("Outputs", (n.outputs || []).map(p => ({ text: p.name + " : " + typeName(p.type), name: p.name })));
     return det;
   };
   const fillPackage = (host, pkg, editable) => {
@@ -2243,6 +2252,26 @@ function renderToolbox() {
     smDet.appendChild(smItem);
     host.appendChild(smDet);
 
+    // A free-text literal / expression block: drop it and type the logic.
+    const exprDet = document.createElement("details");
+    exprDet.open = true;
+    const exprSum = document.createElement("summary");
+    exprSum.textContent = "Literal";
+    exprDet.appendChild(exprSum);
+    const exprItem = document.createElement("div");
+    exprItem.className = "op-item";
+    exprItem.textContent = "Expression / literal";
+    exprItem.title = "Drop a box and type any expression: a typed value (8_i32), a condition (8 > x), or a formula over signals in scope";
+    exprItem.draggable = true;
+    exprItem.ondragstart = ev => ev.dataTransfer.setData("text/plain", "expr:new");
+    exprItem.onclick = () => {
+      if (!state.diagramData) return;
+      const b = prompt("Expression — a typed value (8_i32), a condition (8 > x), or a formula:", "");
+      if (b && b.trim()) addExpression(state.diagramData.node, b.trim(), 60, 60);
+    };
+    exprDet.appendChild(exprItem);
+    host.appendChild(exprDet);
+
     // The standard library blocks — drag onto the canvas to instantiate a call.
     // (Project operators are NOT listed here; they live in the left workspace
     // tree and are draggable from there.)
@@ -2405,6 +2434,33 @@ async function addTypeOp(node, typeName, action, x, y, param) {
   loadDiagram(node, false);
 }
 
+// A free-text literal / expression block, or a constant dragged from the
+// Constants section: both become an equation on a fresh, type-inferred local.
+async function addExpression(node, body, x, y) {
+  const resp = await fetch("/api/edit/add_expression",
+    { method: "POST", body: JSON.stringify({ node, body, x, y }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    document.getElementById("diagram-status").textContent = "drop failed: " + m;
+    return;
+  }
+  document.getElementById("diagram-status").textContent = "placed: " + body;
+  await refresh();
+  loadDiagram(node, false);
+}
+
+// Drag an input/local/output from the workspace tree onto the canvas: place
+// (or move) that signal's box at the drop point by persisting its position.
+async function placePort(node, name, x, y) {
+  if (node !== (state.diagramData && state.diagramData.node)) return;
+  state.diagPos = state.diagPos || {};
+  state.diagPos[name] = Object.assign({}, state.diagPos[name] || {}, { x, y });
+  await saveLayout();
+  await refresh();
+  loadDiagram(node, false);
+  document.getElementById("diagram-status").textContent = "placed: " + name;
+}
+
 const diagramHostEl = document.getElementById("diagram-host");
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
@@ -2424,6 +2480,28 @@ diagramHostEl.addEventListener("drop", async ev => {
   // match for enums) rather than placing a fixed block.
   if (data.startsWith("type:")) {
     openTypeDropMenu(data.slice(5), x, y, ev.clientX, ev.clientY);
+    return;
+  }
+  // A free-text literal / expression block.
+  if (data === "expr:new") {
+    const body = prompt("Expression — a typed value (8_i32), a condition (8 > x), or any formula over signals in scope:", "");
+    if (body === null || !body.trim()) return;
+    addExpression(state.diagramData.node, body.trim(), x, y);
+    return;
+  }
+  // A constant dragged from the Constants section → a source for that global.
+  if (data.startsWith("const:")) {
+    addExpression(state.diagramData.node, data.slice(6), x, y);
+    return;
+  }
+  // An input/local/output dragged from the tree → place its box here. The data
+  // is "port:<operator>:<signal>"; only the operator whose canvas is open.
+  if (data.startsWith("port:")) {
+    const rest = data.slice(5);
+    const sep = rest.indexOf(":");
+    const op = rest.slice(0, sep), name = rest.slice(sep + 1);
+    if (op === state.diagramData.node) placePort(op, name, x, y);
+    else document.getElementById("diagram-status").textContent = "drag a signal onto its own operator's canvas";
     return;
   }
 

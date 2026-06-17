@@ -218,6 +218,40 @@ fn drag_a_type_inserts_make_flatten_slice_and_enum_ops() {
     assert_eq!(s, 400, "out-of-bounds slice must be rejected");
 }
 
+/// The literal / expression block (and a dragged constant, which posts the same
+/// way) infers its result type from the operator's context, and rejects an
+/// expression over a name that isn't in scope.
+#[test]
+fn literal_expression_block_infers_type_and_rejects_unknown() {
+    let g = start_server_on_workspace("ws_expr");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Calc","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Calc","side":"input","name":"x","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_constant", r#"{"name":"limit","type":"int32","value":"100"}"#);
+
+    let expr = |body: &str| -> u16 {
+        let p = serde_json::json!({ "node": "Calc", "body": body, "x": 40, "y": 40 });
+        request(port, "POST", "/api/edit/add_expression", &p.to_string()).expect("expr").0
+    };
+
+    // A condition over an in-scope input, a typed literal, and a constant
+    // reference (the constant is upper-cased to LIMIT on create) all succeed.
+    assert_eq!(expr("8 > x"), 200, "condition over an input");
+    assert_eq!(expr("8_i32"), 200, "typed literal");
+    assert_eq!(expr("LIMIT"), 200, "constant reference");
+    // An expression over an unknown name is rejected (works only "if x is visible").
+    assert_eq!(expr("y + 1"), 400, "unknown identifier must be rejected");
+
+    // The first block (`8 > x`) produced a bool-typed `expr` local.
+    let ins = get_json(port, "/api/inspect");
+    let calc = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .find(|n| n["name"] == "Calc").expect("Calc present");
+    let expr_local = calc["locals"].as_array().unwrap().iter()
+        .find(|l| l["name"] == "expr").cloned().expect("expr local created");
+    assert_eq!(expr_local["type"]["kind"], "Bool", "`8 > x` infers bool: {expr_local}");
+}
+
 /// `openlustre new --empty` seeds a project with no operators; the Studio
 /// serves it without trouble and it stays editable (you can add operators in).
 #[test]
