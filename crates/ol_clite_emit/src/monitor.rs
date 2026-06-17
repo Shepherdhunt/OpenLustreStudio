@@ -169,6 +169,7 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         Expr::Const { lit: Literal::Bool { value } } => if *value { "true" } else { "false" }.into(),
         Expr::Const { lit: Literal::Int { value } } => format!("({value})"),
         Expr::Const { lit: Literal::Float { value } } => format!("({value})"),
+        Expr::Const { lit: Literal::Char { value } } => format!("({value})"),
         Expr::Var { name } => scope.ref_name(name),
         Expr::Cast { to, arg } => {
             format!("(({}){})", to.c_name(), emit_mon_expr(arg, scope))
@@ -239,6 +240,8 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
             emit_mon_expr(base, scope),
             emit_mon_expr(index, scope)
         ),
-        Expr::Tuple { .. } => "/* tuple */ 0".into(),
+        Expr::Tuple { .. } | Expr::Array { .. } | Expr::Struct { .. } => {
+            "/* composite literal */ 0".into()
+        }
     }
 }

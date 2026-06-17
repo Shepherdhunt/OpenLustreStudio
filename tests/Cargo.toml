@@ -147,3 +147,7 @@ path = "iterators.rs"
 [[test]]
 name = "mcdc"
 path = "mcdc.rs"
+
+[[test]]
+name = "composite_constants"
+path = "composite_constants.rs"

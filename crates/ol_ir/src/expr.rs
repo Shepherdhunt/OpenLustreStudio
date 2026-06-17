@@ -43,6 +43,10 @@ pub enum Literal {
     Bool { value: bool },
     Int { value: i64 },
     Float { value: f64 },
+    /// A character literal `'a'`, stored as its byte value. Typed as
+    /// [`crate::types::Type::Char`]; a string `"ab"` lowers to an
+    /// [`Expr::Array`] of these.
+    Char { value: u8 },
 }
 
 impl Literal {
@@ -55,6 +59,16 @@ impl Literal {
     pub fn float(v: f64) -> Self {
         Literal::Float { value: v }
     }
+    pub fn char(v: u8) -> Self {
+        Literal::Char { value: v }
+    }
+}
+
+/// One `field: value` initializer in an [`Expr::Struct`] record literal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FieldInit {
+    pub field: String,
+    pub value: Expr,
 }
 
 /// Strict expression IR.
@@ -113,6 +127,20 @@ pub enum Expr {
     /// Tuple — used only as the rhs of multi-output equations.
     Tuple {
         items: Vec<Expr>,
+    },
+    /// Array literal `[e0; e1; …]`. All items share one element type; the
+    /// array's length is the item count. A string literal `"ab"` is an
+    /// `Array` of [`Literal::Char`] constants.
+    Array {
+        items: Vec<Expr>,
+    },
+    /// Record (struct) literal `Name { field: value, … }`, constructing a
+    /// value of the named record type. Field order is normalized to the
+    /// type's declared order by the type checker / emitters.
+    Struct {
+        /// The record type being constructed.
+        ty: String,
+        fields: Vec<FieldInit>,
     },
     /// Explicit numeric conversion — SCADE's `numeric_cast`. Surface syntax
     /// is function-style: `int16(x)`, `float64(x)`. Both the operand and the
@@ -245,6 +273,21 @@ impl Expr {
             arrays: vec![array],
         }
     }
+    pub fn array(items: Vec<Expr>) -> Self {
+        Expr::Array { items }
+    }
+    pub fn structure<S: Into<String>>(ty: S, fields: Vec<FieldInit>) -> Self {
+        Expr::Struct { ty: ty.into(), fields }
+    }
+    /// A string literal: an array of `char` constants, one per byte.
+    pub fn string(s: &str) -> Self {
+        Expr::Array {
+            items: s
+                .bytes()
+                .map(|b| Expr::Const { lit: Literal::Char { value: b } })
+                .collect(),
+        }
+    }
 
     /// `false -> pre e` — the canonical "edge buffer" pattern.
     pub fn pre_with_init(init: Expr, body: Expr) -> Self {
@@ -292,6 +335,16 @@ impl Expr {
                 Expr::Tuple { items } => {
                     for item in items {
                         walk(item, f);
+                    }
+                }
+                Expr::Array { items } => {
+                    for item in items {
+                        walk(item, f);
+                    }
+                }
+                Expr::Struct { fields, .. } => {
+                    for fi in fields {
+                        walk(&fi.value, f);
                     }
                 }
                 Expr::Cast { arg, .. } => walk(arg, f),
@@ -367,6 +420,17 @@ impl Expr {
             Expr::Tuple { items } => {
                 for item in items {
                     item.rename_var(from, to);
+                }
+            }
+            Expr::Array { items } => {
+                for item in items {
+                    item.rename_var(from, to);
+                }
+            }
+            // Field names are part of the record type, not variables.
+            Expr::Struct { fields, .. } => {
+                for fi in fields {
+                    fi.value.rename_var(from, to);
                 }
             }
             Expr::When { arg, clock, .. } => {

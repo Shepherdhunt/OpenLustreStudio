@@ -21,7 +21,7 @@
 //! primary    literal | ident | ident(args) | (expr) | if/then/else
 //! ```
 
-use ol_ir::{BinOp, Expr, Literal, Type};
+use ol_ir::{BinOp, Expr, FieldInit, Literal, Type};
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum ParseError {
@@ -63,8 +63,14 @@ enum Tok {
     RParen,
     LBracket,
     RBracket,
+    LBrace,   // {
+    RBrace,   // }
     Comma,
+    Semi,     // ;
+    Colon,    // :
     Dot,
+    CharLit(u8), // 'a'
+    Str(String), // "ab"
 }
 
 impl Tok {
@@ -94,8 +100,14 @@ impl Tok {
             Tok::RParen => ")".into(),
             Tok::LBracket => "[".into(),
             Tok::RBracket => "]".into(),
+            Tok::LBrace => "{".into(),
+            Tok::RBrace => "}".into(),
             Tok::Comma => ",".into(),
+            Tok::Semi => ";".into(),
+            Tok::Colon => ":".into(),
             Tok::Dot => ".".into(),
+            Tok::CharLit(b) => format!("'{}'", *b as char),
+            Tok::Str(s) => format!("\"{s}\""),
         }
     }
 }
@@ -115,8 +127,38 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             ')' => { out.push(Tok::RParen); i += 1; }
             '[' => { out.push(Tok::LBracket); i += 1; }
             ']' => { out.push(Tok::RBracket); i += 1; }
+            '{' => { out.push(Tok::LBrace); i += 1; }
+            '}' => { out.push(Tok::RBrace); i += 1; }
+            ';' => { out.push(Tok::Semi); i += 1; }
+            ':' => { out.push(Tok::Colon); i += 1; }
             ',' => { out.push(Tok::Comma); i += 1; }
             '.' => { out.push(Tok::Dot); i += 1; }
+            // Character literal `'a'` (with the usual escapes).
+            '\'' => {
+                i += 1;
+                let val = read_escaped(bytes, &mut i, b'\'')?;
+                if bytes.get(i) != Some(&b'\'') {
+                    return Err(ParseError::Expected {
+                        expected: "closing ' for a character literal".into(),
+                        found: bytes.get(i).map(|b| (*b as char).to_string()).unwrap_or_else(|| "<eof>".into()),
+                    });
+                }
+                i += 1;
+                out.push(Tok::CharLit(val));
+            }
+            // String literal `"abc"` — lowers to an array of char.
+            '"' => {
+                i += 1;
+                let mut s: Vec<u8> = Vec::new();
+                loop {
+                    match bytes.get(i) {
+                        None => return Err(ParseError::UnexpectedEof),
+                        Some(&b'"') => { i += 1; break; }
+                        Some(_) => s.push(read_escaped(bytes, &mut i, b'"')?),
+                    }
+                }
+                out.push(Tok::Str(String::from_utf8_lossy(&s).into_owned()));
+            }
             '+' => { out.push(Tok::Plus); i += 1; }
             '*' => { out.push(Tok::Star); i += 1; }
             '/' => { out.push(Tok::Slash); i += 1; }
@@ -199,6 +241,30 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
         }
     }
     Ok(out)
+}
+
+/// Read one (possibly backslash-escaped) byte from inside a `'…'` / `"…"`
+/// literal, advancing `i` past it. The opening quote has already been consumed
+/// and the closing quote is detected by the caller, so this only ever sees
+/// payload bytes or an escape sequence.
+fn read_escaped(bytes: &[u8], i: &mut usize, _delim: u8) -> Result<u8, ParseError> {
+    let b = *bytes.get(*i).ok_or(ParseError::UnexpectedEof)?;
+    if b == b'\\' {
+        *i += 1;
+        let e = *bytes.get(*i).ok_or(ParseError::UnexpectedEof)?;
+        *i += 1;
+        Ok(match e {
+            b'n' => b'\n',
+            b't' => b'\t',
+            b'r' => b'\r',
+            b'0' => 0,
+            // `\\`, `\'`, `\"`, and any other escaped byte are taken literally.
+            other => other,
+        })
+    } else {
+        *i += 1;
+        Ok(b)
+    }
 }
 
 struct Parser {
@@ -493,6 +559,34 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Const { lit: Literal::float(f) })
             }
+            Some(Tok::CharLit(b)) => {
+                self.bump();
+                Ok(Expr::Const { lit: Literal::char(b) })
+            }
+            // A string literal is sugar for an array of `char` constants.
+            Some(Tok::Str(s)) => {
+                self.bump();
+                Ok(Expr::string(&s))
+            }
+            // Array literal `[e0; e1; …]` (semicolon-separated, Lustre style).
+            // A leading `[` can only start an array; an index `[…]` is parsed in
+            // `parse_postfix` after a primary.
+            Some(Tok::LBracket) => {
+                self.bump();
+                let mut items = Vec::new();
+                if !matches!(self.peek(), Some(Tok::RBracket)) {
+                    loop {
+                        items.push(self.parse_expr()?);
+                        if matches!(self.peek(), Some(Tok::Semi)) {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Tok::RBracket)?;
+                Ok(Expr::array(items))
+            }
             Some(Tok::Ident(name)) => {
                 if name == "true" {
                     self.bump();
@@ -604,6 +698,35 @@ impl Parser {
                         });
                     }
                     Ok(Expr::call(name, args))
+                } else if matches!(self.peek(), Some(Tok::LBrace)) {
+                    // Record literal `Name { field: value, … }`.
+                    self.bump();
+                    let mut fields = Vec::new();
+                    if !matches!(self.peek(), Some(Tok::RBrace)) {
+                        loop {
+                            let field = match self.bump() {
+                                Some(Tok::Ident(f)) => f,
+                                other => {
+                                    return Err(ParseError::Expected {
+                                        expected: "field name in record literal".into(),
+                                        found: other
+                                            .map(|t| t.describe())
+                                            .unwrap_or_else(|| "<eof>".into()),
+                                    })
+                                }
+                            };
+                            self.expect(&Tok::Colon)?;
+                            let value = self.parse_expr()?;
+                            fields.push(FieldInit { field, value });
+                            if matches!(self.peek(), Some(Tok::Comma)) {
+                                self.bump();
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&Tok::RBrace)?;
+                    Ok(Expr::structure(name, fields))
                 } else {
                     Ok(Expr::var(name))
                 }
@@ -688,6 +811,7 @@ pub fn parse_type(src: &str) -> Result<Type, ParseError> {
         "uint64" => Type::Uint64,
         "float32" => Type::Float32,
         "real" | "float64" => Type::Float64,
+        "char" => Type::Char,
         "" => return Err(ParseError::UnknownType(src.to_string())),
         // Anything else is treated as a reference to a named record/enum type;
         // a leading lowercase letter is a strong hint of a typo, but the type
@@ -813,5 +937,62 @@ mod tests {
             Type::Array { elem: Box::new(Type::Uint8), len: 32 }
         );
         assert_eq!(parse_type("MyRecord").unwrap(), Type::named("MyRecord"));
+        assert_eq!(parse_type("char").unwrap(), Type::Char);
+        assert_eq!(
+            parse_type("char[4]").unwrap(),
+            Type::Array { elem: Box::new(Type::Char), len: 4 }
+        );
+    }
+
+    #[test]
+    fn char_and_string_literals() {
+        assert_eq!(p("'a'"), Expr::Const { lit: Literal::char(b'a') });
+        assert_eq!(p("'\\n'"), Expr::Const { lit: Literal::char(b'\n') });
+        // A string is an array of char constants.
+        assert_eq!(p("\"hi\""), Expr::string("hi"));
+        if let Expr::Array { items } = p("\"hi\"") {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("string should parse to an array");
+        }
+    }
+
+    #[test]
+    fn array_literal() {
+        assert_eq!(
+            p("[1; 2; 3]"),
+            Expr::array(vec![
+                Expr::Const { lit: Literal::int(1) },
+                Expr::Const { lit: Literal::int(2) },
+                Expr::Const { lit: Literal::int(3) },
+            ])
+        );
+        assert_eq!(p("[]"), Expr::array(vec![]));
+    }
+
+    #[test]
+    fn array_index_still_parses_after_a_primary() {
+        // A `[` following a primary is indexing, not an array literal.
+        assert_eq!(
+            p("xs[2]"),
+            Expr::Index {
+                base: Box::new(Expr::var("xs")),
+                index: Box::new(Expr::Const { lit: Literal::int(2) }),
+            }
+        );
+    }
+
+    #[test]
+    fn record_literal() {
+        assert_eq!(
+            p("Point { x: 1, y: 2 }"),
+            Expr::structure(
+                "Point",
+                vec![
+                    FieldInit { field: "x".into(), value: Expr::Const { lit: Literal::int(1) } },
+                    FieldInit { field: "y".into(), value: Expr::Const { lit: Literal::int(2) } },
+                ]
+            )
+        );
     }
 }

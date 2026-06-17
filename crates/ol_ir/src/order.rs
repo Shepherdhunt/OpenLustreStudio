@@ -49,9 +49,14 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
             same_cycle_reads(base, out);
             same_cycle_reads(index, out);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 same_cycle_reads(i, out);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                same_cycle_reads(&fi.value, out);
             }
         }
         // Clock conditions are same-cycle reads: an equation must not run

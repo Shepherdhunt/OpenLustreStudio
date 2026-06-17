@@ -18,6 +18,9 @@ pub enum Type {
     Uint64,
     Float32,
     Float64,
+    /// A character (SCADE `char`). Stored as a byte; a string constant is an
+    /// `Array { elem: Char, len }`. Lustre has no char, so it views as `int`.
+    Char,
     /// Fixed-size array of `elem` with `len` elements.
     Array { elem: Box<Type>, len: u32 },
     /// Reference to a user-declared record or enum type. A struct variant —
@@ -78,6 +81,8 @@ impl Type {
             Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64 => "int".into(),
             Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64 => "int".into(),
             Type::Float32 | Type::Float64 => "real".into(),
+            // Lustre has no char; a char is viewed as a (small) integer.
+            Type::Char => "int".into(),
             Type::Array { elem, len } => format!("{}^{}", elem.lustre_name(), len),
             Type::Named { name } => name.clone(),
         }
@@ -96,6 +101,7 @@ impl Type {
             Type::Uint64 => "uint64_t".into(),
             Type::Float32 => "float".into(),
             Type::Float64 => "double".into(),
+            Type::Char => "char".into(),
             Type::Array { elem, .. } => elem.c_name(),
             Type::Named { name } => name.clone(),
         }

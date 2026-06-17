@@ -213,6 +213,44 @@ fn project_constants_add_use_and_remove() {
     assert!(!still, "constant removed");
 }
 
+/// Composite constant VALUES authored through the same dialog/endpoint: an
+/// `int32[3]` array and a `char`. Both land in the project (names upper-cased),
+/// the char round-trips its quoted value, and an operator that indexes the
+/// array constant builds clean.
+#[test]
+fn project_composite_constants_array_and_char() {
+    let g = start_server_on_workspace("ws_composite_const");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_constant",
+        r#"{"name":"palette","type":"int32[3]","value":"[10; 20; 30]"}"#);
+    post_ok(port, "/api/edit/add_constant",
+        r#"{"name":"letter","type":"char","value":"'A'"}"#);
+
+    let ins = get_json(port, "/api/inspect");
+    let consts: Vec<serde_json::Value> = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["constants"].as_array().cloned().unwrap_or_default())
+        .collect();
+    assert!(consts.iter().any(|c| c["name"] == "PALETTE"), "PALETTE present: {consts:?}");
+    let letter = consts.iter().find(|c| c["name"] == "LETTER").expect("LETTER present");
+    assert_eq!(letter["value"], "'A'", "char constant round-trips its quoted value: {letter}");
+
+    // Index the array constant from a fresh operator — it builds clean and the
+    // constant is referenced by name in the generated Lustre.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"UsesArray","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"UsesArray","side":"input","name":"i","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port",
+        r#"{"node":"UsesArray","side":"output","name":"out","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation",
+        r#"{"node":"UsesArray","lhs":"out","body":"PALETTE[i]"}"#);
+    let (s, body) = request(port, "POST", "/api/build", r#"{"node":"UsesArray"}"#).expect("build");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], true, "operator indexing an array constant should build: {d}");
+    assert!(d["lustre"].as_str().unwrap().contains("PALETTE"), "array const used in lustre: {d}");
+}
+
 /// Import existing Lustre: a node, a type, and a const are parsed and added to
 /// the project; the imported operator builds and carries the imported const;
 /// re-importing the same name collides and is rejected (all-or-nothing).

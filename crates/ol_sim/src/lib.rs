@@ -446,6 +446,8 @@ fn default_value(ty: &Type, project: &Project) -> Value {
         | Type::Uint16
         | Type::Uint32
         | Type::Uint64 => Value::Int(0),
+        // A char carries as an integer byte; its zero value is the NUL byte.
+        Type::Char => Value::Int(0),
         Type::Array { elem, len } => {
             Value::Array((0..*len).map(|_| default_value(elem, project)).collect())
         }
@@ -753,6 +755,9 @@ fn eval(
             Literal::Bool { value } => Value::Bool(*value),
             Literal::Int { value } => Value::Int(*value),
             Literal::Float { value } => Value::Float(*value),
+            // A char is a byte; the evaluator carries it as an integer (Lustre
+            // views `char` as a small int).
+            Literal::Char { value } => Value::Int(*value as i64),
         }),
         Expr::Var { name } => match env.get(name).cloned() {
             Some(v) => Ok(v),
@@ -899,6 +904,23 @@ fn eval(
                 vs.push(eval(it, env, state, call_states, project, site_clocks, cov)?);
             }
             Ok(Value::Tuple(vs))
+        }
+        Expr::Array { items } => {
+            let mut vs = Vec::with_capacity(items.len());
+            for it in items {
+                vs.push(eval(it, env, state, call_states, project, site_clocks, cov)?);
+            }
+            Ok(Value::Array(vs))
+        }
+        Expr::Struct { fields, .. } => {
+            let mut m = BTreeMap::new();
+            for fi in fields {
+                m.insert(
+                    fi.field.clone(),
+                    eval(&fi.value, env, state, call_states, project, site_clocks, cov)?,
+                );
+            }
+            Ok(Value::Record(m))
         }
         Expr::Iterate { kind, node: f_name, init, arrays } => {
             let callee = project.find_node(f_name).ok_or_else(|| {

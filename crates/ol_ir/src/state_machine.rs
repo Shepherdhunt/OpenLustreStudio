@@ -539,6 +539,7 @@ fn default_expr_for_type(ty: &Type) -> Expr {
         | Type::Uint16
         | Type::Uint32
         | Type::Uint64 => Expr::int_lit(0),
+        Type::Char => Expr::Const { lit: Literal::Char { value: 0 } },
         // Compound / named types fall back to the integer-zero literal; if
         // every state assigns the output (which we require above) this branch
         // is unreachable at runtime, but lowering still has to produce

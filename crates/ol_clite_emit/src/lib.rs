@@ -95,7 +95,23 @@ pub fn emit_project(project: &Project) -> EmittedClite {
 }
 
 fn emit_const(c: &ol_ir::ConstDef, out: &mut String) {
-    let _ = writeln!(out, "#define {} ({})", c.name, format_const_expr(&c.value));
+    match &c.value {
+        // Composite constants need real storage so they can be indexed or
+        // field-accessed: a `#define` of a braced initializer is not a usable
+        // lvalue. Scalars (and enum/expression constants) stay as `#define`,
+        // keeping every existing constant byte-identical.
+        Expr::Array { .. } | Expr::Struct { .. } => {
+            let _ = writeln!(
+                out,
+                "static const {} = {};",
+                type_decl(&c.ty, &c.name),
+                format_const_expr(&c.value)
+            );
+        }
+        _ => {
+            let _ = writeln!(out, "#define {} ({})", c.name, format_const_expr(&c.value));
+        }
+    }
 }
 
 /// Render a constant's Expr in C syntax. Handles the subset of Expr that can
@@ -107,7 +123,23 @@ fn format_const_expr(expr: &Expr) -> String {
             Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
             Literal::Int { value } => format!("({value})"),
             Literal::Float { value } => format!("({value})"),
+            // A char is an int byte in C.
+            Literal::Char { value } => format!("({value})"),
         },
+        // Array / record initializer lists (`{1, 2, 3}`, `{.x = 1, .y = 2}`),
+        // used as the RHS of a `static const` definition by `emit_const`.
+        Expr::Array { items } => {
+            let parts = items.iter().map(format_const_expr).collect::<Vec<_>>().join(", ");
+            format!("{{{parts}}}")
+        }
+        Expr::Struct { fields, .. } => {
+            let parts = fields
+                .iter()
+                .map(|fi| format!(".{} = {}", fi.field, format_const_expr(&fi.value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{parts}}}")
+        }
         Expr::Var { name } => name.clone(),
         Expr::Unary { op, arg } => {
             let a = format_const_expr(arg);
@@ -238,9 +270,14 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
             walk_call_targets(base, f);
             walk_call_targets(index, f);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 walk_call_targets(i, f);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                walk_call_targets(&fi.value, f);
             }
         }
         Expr::When { arg, .. } => walk_call_targets(arg, f),
@@ -313,9 +350,14 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
             walk_calls_assign(base, map, idx);
             walk_calls_assign(index, map, idx);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 walk_calls_assign(i, map, idx);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                walk_calls_assign(&fi.value, map, idx);
             }
         }
         Expr::When { arg, .. } => walk_calls_assign(arg, map, idx),
@@ -597,9 +639,14 @@ fn collect_stateful(
             collect_stateful(base, call_sites, project, out);
             collect_stateful(index, call_sites, project, out);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 collect_stateful(i, call_sites, project, out);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                collect_stateful(&fi.value, call_sites, project, out);
             }
         }
         Expr::When { arg, .. } => collect_stateful(arg, call_sites, project, out),
@@ -956,6 +1003,7 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
                 Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
                 Literal::Int { value } => format!("({value})"),
                 Literal::Float { value } => format!("({value})"),
+                Literal::Char { value } => format!("({value})"),
             };
             (vec![], s)
         }
@@ -1078,6 +1126,11 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             (s, format!("{b}[{i}]"))
         }
         Expr::Tuple { .. } => (vec![], "/* tuple */ 0".into()),
+        // Composite literals in expression position are not directly C-assignable
+        // (C has no whole-array assignment); the supported path is a named
+        // `static const` referenced as an lvalue, then indexed / field-accessed.
+        Expr::Array { .. } => (vec![], "/* array literal */ 0".into()),
+        Expr::Struct { .. } => (vec![], "/* record literal */ 0".into()),
         // Iterators are emitted at the equation level (a `for` loop), never
         // as a sub-expression — typecheck guarantees they are the whole RHS.
         Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),
@@ -1211,9 +1264,14 @@ fn collect_pre_vars(
             collect_pre_vars(base, env, out, seen);
             collect_pre_vars(index, env, out, seen);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 collect_pre_vars(i, env, out, seen);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                collect_pre_vars(&fi.value, env, out, seen);
             }
         }
         Expr::When { arg, .. } => collect_pre_vars(arg, env, out, seen),

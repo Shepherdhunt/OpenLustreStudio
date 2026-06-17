@@ -545,9 +545,14 @@ fn check_pre_initialization(
             check_pre_initialization(base, under_arrow_body, diags, ctx);
             check_pre_initialization(index, under_arrow_body, diags, ctx);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 check_pre_initialization(i, under_arrow_body, diags, ctx);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                check_pre_initialization(&fi.value, under_arrow_body, diags, ctx);
             }
         }
         // Sampling does not initialize anything: a `pre` under a `when` or a
@@ -605,6 +610,7 @@ pub fn infer_expr_type(
                 Some(t) if t.is_float() => t,
                 _ => Type::Float64,
             },
+            Literal::Char { .. } => Type::Char,
         }),
         Expr::Cast { to, arg } => {
             let a = infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, None)?;
@@ -959,6 +965,114 @@ pub fn infer_expr_type(
                         Diagnostic::error(
                             "E0110",
                             format!("indexing a non-array of type {other:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    None
+                }
+            }
+        }
+        Expr::Array { items } => {
+            // If the array is hinted `T[n]`, each element is hinted `T`.
+            let elem_hint = match hint.map(|h| tctx.resolve(h)) {
+                Some(Type::Array { elem, .. }) => Some((*elem).clone()),
+                _ => None,
+            };
+            if items.is_empty() {
+                return match elem_hint {
+                    Some(e) => Some(Type::Array { elem: Box::new(e), len: 0 }),
+                    None => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0123",
+                                "empty array literal needs a type annotation to fix its element type",
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        None
+                    }
+                };
+            }
+            let mut elem_ty: Option<Type> = None;
+            for it in items {
+                let t = infer_expr_type(it, env, sigs, node, diags, ctx, tctx, elem_hint.as_ref())?;
+                match &elem_ty {
+                    None => elem_ty = Some(t),
+                    Some(prev) if !types_compatible(tctx, prev, &t) => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0124",
+                                format!("array elements must share one type: {prev:?} vs {t:?}"),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                    Some(_) => {}
+                }
+            }
+            Some(Type::Array {
+                elem: Box::new(elem_ty.unwrap()),
+                len: items.len() as u32,
+            })
+        }
+        Expr::Struct { ty, fields } => {
+            let rec_name = match tctx.resolve(&Type::named(ty.clone())) {
+                Type::Named { name } => name,
+                _ => ty.clone(),
+            };
+            match tctx.record_fields(&rec_name).cloned() {
+                Some(schema) => {
+                    for fi in fields {
+                        match schema.iter().find(|rf| rf.name == fi.field) {
+                            Some(rf) => {
+                                if let Some(vt) = infer_expr_type(
+                                    &fi.value, env, sigs, node, diags, ctx, tctx, Some(&rf.ty),
+                                ) {
+                                    if !types_compatible(tctx, &rf.ty, &vt) {
+                                        diags.push(
+                                            Diagnostic::error(
+                                                "E0127",
+                                                format!(
+                                                    "record `{rec_name}` field `{}` expects {:?}, got {vt:?}",
+                                                    fi.field, rf.ty
+                                                ),
+                                            )
+                                            .with_context(ctx.to_string()),
+                                        );
+                                    }
+                                }
+                            }
+                            None => {
+                                diags.push(
+                                    Diagnostic::error(
+                                        "E0126",
+                                        format!("record `{rec_name}` has no field `{}`", fi.field),
+                                    )
+                                    .with_context(ctx.to_string()),
+                                );
+                            }
+                        }
+                    }
+                    // A record literal must initialize every field.
+                    for rf in &schema {
+                        if !fields.iter().any(|fi| fi.field == rf.name) {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0128",
+                                    format!("record `{rec_name}` literal is missing field `{}`", rf.name),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                        }
+                    }
+                    Some(Type::named(rec_name))
+                }
+                None => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0125",
+                            format!("`{rec_name}` is not a record type, so `{rec_name} {{ … }}` is not a value"),
                         )
                         .with_context(ctx.to_string()),
                     );
@@ -1334,9 +1448,14 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
             collect_immediate_deps(base, out);
             collect_immediate_deps(index, out);
         }
-        Expr::Tuple { items } => {
+        Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
                 collect_immediate_deps(i, out);
+            }
+        }
+        Expr::Struct { fields, .. } => {
+            for fi in fields {
+                collect_immediate_deps(&fi.value, out);
             }
         }
         Expr::When { arg, clock, .. } => {

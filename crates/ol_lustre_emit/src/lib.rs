@@ -135,6 +135,9 @@ pub fn format_expr_lustre(expr: &Expr) -> String {
 
 fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
     let (text, prec) = match expr {
+        // A char prints as `'a'` in our surface syntax (and round-trips through
+        // the parser), but as its integer byte in Lustre, which has no char.
+        Expr::Const { lit: Literal::Char { value } } if lustre => (value.to_string(), 100),
         Expr::Const { lit } => (format_literal(lit), 100),
         Expr::Var { name } => (name.clone(), 100),
         Expr::Unary { op, arg } => {
@@ -202,6 +205,34 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             (format!("({parts})"), 100)
+        }
+        // Array literal: `[a, b]` for Lustre, `[a; b]` for our surface (which
+        // is what the parser reads back).
+        Expr::Array { items } => {
+            let sep = if lustre { ", " } else { "; " };
+            let parts = items
+                .iter()
+                .map(|i| format_expr_prec(i, 0, lustre))
+                .collect::<Vec<_>>()
+                .join(sep);
+            (format!("[{parts}]"), 100)
+        }
+        // Record literal: `T { f = v; … }` for Lustre, `T { f: v, … }` for our
+        // surface syntax.
+        Expr::Struct { ty, fields } => {
+            let parts = fields
+                .iter()
+                .map(|fi| {
+                    let v = format_expr_prec(&fi.value, 0, lustre);
+                    if lustre {
+                        format!("{} = {v}", fi.field)
+                    } else {
+                        format!("{}: {v}", fi.field)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(if lustre { "; " } else { ", " });
+            (format!("{ty} {{ {parts} }}"), 100)
         }
         Expr::Cast { to, arg } => {
             let a = format_expr_prec(arg, 0, lustre);
@@ -324,5 +355,20 @@ fn format_literal(lit: &Literal) -> String {
                 format!("{s}.0")
             }
         }
+        Literal::Char { value } => format_char_literal(*value),
+    }
+}
+
+/// Render a char byte as a quoted surface literal (`'a'`, `'\n'`, …) that the
+/// parser reads back to the same byte.
+fn format_char_literal(b: u8) -> String {
+    match b {
+        b'\n' => "'\\n'".into(),
+        b'\t' => "'\\t'".into(),
+        b'\r' => "'\\r'".into(),
+        0 => "'\\0'".into(),
+        b'\'' => "'\\''".into(),
+        b'\\' => "'\\\\'".into(),
+        _ => format!("'{}'", b as char),
     }
 }

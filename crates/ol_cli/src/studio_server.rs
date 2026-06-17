@@ -1724,6 +1724,7 @@ fn type_str(t: &ol_ir::Type) -> String {
         Uint64 => "uint64".into(),
         Float32 => "float32".into(),
         Float64 => "float64".into(),
+        Char => "char".into(),
         Array { elem, len } => format!("{}[{}]", type_str(elem), len),
         Named { name } => name.clone(),
     }
@@ -1732,7 +1733,7 @@ fn type_str(t: &ol_ir::Type) -> String {
 /// The SCADE-style primitive palette every port/local type selector offers.
 const PRIMITIVE_TYPES: &[&str] = &[
     "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
-    "float32", "float64",
+    "float32", "float64", "char",
 ];
 
 fn types_list(ctx: &ServerCtx) -> Result<String, String> {
@@ -2692,6 +2693,7 @@ fn operation_body(
                 ol_ir::Literal::Bool { .. } => "bool",
                 ol_ir::Literal::Int { .. } => "int32",
                 ol_ir::Literal::Float { .. } => "float64",
+                ol_ir::Literal::Char { .. } => "char",
             };
             return Ok((v, ty.to_string()));
         }
