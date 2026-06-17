@@ -178,6 +178,11 @@
   .ctx-menu .ctx-item { padding: 4px 16px; cursor: pointer; color: #1e1e1e; }
   .ctx-menu .ctx-item:hover { background: #2b579a; color: #fff; }
   .ctx-menu .ctx-sep { border-top: 1px solid #e6e6e6; margin: 3px 0; }
+  /* Bottom-right resize grip on a canvas box: invisible until you hover the
+     box, always grabbable (pointer-events:all so opacity:0 still hit-tests). */
+  .resize-h { fill: #6b7785; opacity: 0; cursor: nwse-resize; pointer-events: all; }
+  g.diag-item:hover .resize-h { opacity: 0.6; }
+  .resize-h:hover { opacity: 0.95; }
   .build-note { color: #666; font-size: 11px; margin-top: 4px; }
   code.inline { background: #eef2f7; padding: 1px 6px; border-radius: 3px;
                 font-family: Consolas, monospace; }
@@ -684,7 +689,7 @@
 
 const state = {
   inspect: null, selectedNode: null, stepHistory: "",
-  diagramStack: [], diagramData: null, diagPos: {}, drag: null,
+  diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
   sim: { built: false, running: false, values: {} },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
@@ -1676,6 +1681,36 @@ function eqWidth(e) {
   return Math.max(46, t.length * 9 + 22);
 }
 
+// Per-line height used when a box wraps its label across multiple lines.
+const WRAP_LINEH = 13;
+
+// Greedily wrap `text` into lines of at most `maxChars`, breaking on spaces and
+// hard-splitting any single word longer than the limit.
+function wrapText(text, maxChars) {
+  const lim = Math.max(1, maxChars | 0);
+  const lines = [];
+  let cur = "";
+  for (let word of String(text).split(/\s+/).filter(Boolean)) {
+    while (word.length > lim) {
+      if (cur) { lines.push(cur); cur = ""; }
+      lines.push(word.slice(0, lim));
+      word = word.slice(lim);
+    }
+    if (!cur) cur = word;
+    else if ((cur + " " + word).length <= lim) cur += " " + word;
+    else { lines.push(cur); cur = word; }
+  }
+  if (cur) lines.push(cur);
+  return lines.length ? lines : [""];
+}
+
+// The label of item `it` split into lines that fit box `p`'s width (using
+// approximate per-character widths for the symbol vs. plain-text fonts).
+function boxLabelLines(it, p) {
+  const charW = it.sym ? 8.2 : 6.6, pad = it.sym ? 12 : 16;
+  return wrapText(it.label, Math.floor(((p.w || DIAG.INW) - pad) / charW));
+}
+
 // A gate's height grows to seat its input pins on the left edge (SCADE
 // style): the pins are stacked PIN_PITCH apart and vertically centered.
 function eqHeight(e) {
@@ -1739,7 +1774,13 @@ function computePositions(d) {
     .concat(d.locals.map(l => l.name).filter(n => !collapsed.has(n)));
   right.forEach((id, i) => pos[id] = { x: DIAG.X_OUT, y: 16 + i * DIAG.ROW, w: DIAG.OUTW, h: DIAG.BOXH });
   for (const [id, p] of Object.entries(d.positions || {})) {
-    if (pos[id]) { pos[id].x = p.x; pos[id].y = p.y; }
+    if (!pos[id]) continue;
+    pos[id].x = p.x; pos[id].y = p.y;
+    // w/h/wrap are user overrides: apply them and remember they were set, so
+    // saveLayout writes them back (and never persists a derived size).
+    if (p.w != null) { pos[id].w = p.w; pos[id].userW = true; }
+    if (p.h != null) { pos[id].h = p.h; pos[id].userH = true; }
+    if (p.wrap) pos[id].wrap = true;
   }
   return pos;
 }
@@ -1759,21 +1800,14 @@ function renderDiagram() {
   const d = state.diagramData;
   if (!d) return;
   const pos = state.diagPos;
-  let maxY = 0, maxX = 0;
-  for (const p of Object.values(pos)) {
-    maxY = Math.max(maxY, p.y + (p.h || DIAG.BOXH));
-    maxX = Math.max(maxX, p.x + p.w);
-  }
-  const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 240);
-
   const pinGhosts = operandGhostSet(d);
   const collapsed = collapsedLocals(d);
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH }));
   (d.ghosts || []).forEach(g => {
     if (pinGhosts.has(g.name)) return; // shown as a red pin on its gate
-    items.push({ id: g.name, label: g.name + " : ?", cls: "box ghost", reason: g.reason });
+    items.push({ id: g.name, label: g.name + " : ?", cls: "box ghost", reason: g.reason, h0: DIAG.BOXH });
   });
   d.equations.forEach(e => items.push({
     id: e.id,
@@ -1788,14 +1822,32 @@ function renderDiagram() {
     // The collapsed result local this gate produces (if any), so its right pin
     // can render as the result — red until consumed.
     outName: (e.output && e.output.collapsible) ? e.output.name : null,
+    h0: eqHeight(e),
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH }));
   d.locals.forEach(l => {
     if (collapsed.has(l.name)) return; // lives on its gate, not its own box
     items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
-      cls: boxCls("box", l), reason: l.reason });
+      cls: boxCls("box", l), reason: l.reason, h0: DIAG.BOXH });
   });
+
+  // Text-wrap auto-grow: a wrapped box with no user-set height grows to fit its
+  // lines; otherwise the height resets to automatic each render (so it never
+  // ratchets up). User-resized boxes keep the height the engineer chose.
+  for (const it of items) {
+    const p = pos[it.id];
+    if (!p || p.userH) continue;
+    p.h = p.wrap ? Math.max(it.h0, boxLabelLines(it, p).length * WRAP_LINEH + 10) : it.h0;
+  }
+
+  // Diagram extent (computed after any wrap-driven height growth).
+  let maxY = 0, maxX = 0;
+  for (const p of Object.values(pos)) {
+    maxY = Math.max(maxY, p.y + (p.h || DIAG.BOXH));
+    maxX = Math.max(maxX, p.x + p.w);
+  }
+  const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 240);
 
   // name -> type text, for SCADE-style wire labels.
   const typeOf = {};
@@ -1846,7 +1898,6 @@ function renderDiagram() {
     const p = pos[it.id];
     if (!p) continue;
     const h = p.h || DIAG.BOXH;
-    const label = it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label;
     const divable = it.calls && it.calls.length;
     const selected = state.selected.includes(it.id);
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
@@ -1854,14 +1905,24 @@ function renderDiagram() {
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
     svg += '<rect class="' + it.cls + (selected ? ' selected' : '') + '" x="' + p.x + '" y="' + p.y +
       '" width="' + p.w + '" height="' + h + '" rx="2"/>';
-    if (it.sym) {
-      svg += '<text class="sym" text-anchor="middle" x="' + (p.x + p.w / 2) + '" y="' + (p.y + h / 2 + 5) + '">' +
-        escapeHTML(label) + '</text>';
-    } else {
-      svg += '<text x="' + (p.x + 8) + '" y="' + (p.y + h / 2 + 4) + '">' + escapeHTML(label) + '</text>';
-    }
+    // Label: a single (truncated) line, or — when text-wrap is on for this box —
+    // several lines via <tspan>, centered for symbol gates, left for text boxes.
+    const lines = p.wrap ? boxLabelLines(it, p)
+      : [it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label];
+    const tx = it.sym ? (p.x + p.w / 2) : (p.x + 8);
+    const firstY = p.y + h / 2 + (it.sym ? 5 : 4) - (lines.length - 1) * WRAP_LINEH / 2;
+    svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
+    lines.forEach((ln, li) => {
+      svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
+    });
+    svg += '</text>';
     if (divable) {
       svg += '<text class="label" x="' + (p.x + p.w - 12) + '" y="' + (p.y + 10) + '">▸</text>';
+    }
+    // Bottom-right resize grip (skipped on transient ghost boxes).
+    if (it.cls.indexOf("ghost") < 0) {
+      svg += '<rect class="resize-h" data-id="' + escapeAttr(it.id) + '" x="' + (p.x + p.w - 8) +
+        '" y="' + (p.y + h - 8) + '" width="8" height="8"/>';
     }
     if (it.reason) {
       svg += '<title>' + escapeHTML(it.reason) + '</title>';
@@ -1931,6 +1992,17 @@ function diagPointerDown(ev) {
     ev.preventDefault();
     return;
   }
+  // Grabbing the corner grip resizes the box instead of moving it.
+  if (ev.target.classList && ev.target.classList.contains("resize-h")) {
+    const rp = state.diagPos[ev.target.dataset.id];
+    if (rp) {
+      const pt = svgPoint(ev);
+      state.resize = { id: ev.target.dataset.id, ox: pt.x, oy: pt.y, w0: rp.w, h0: rp.h || DIAG.BOXH };
+      if (ev.target.setPointerCapture) ev.target.setPointerCapture(ev.pointerId);
+      ev.preventDefault();
+    }
+    return;
+  }
   const g = ev.target.closest("g.diag-item");
   if (!g) {
     // Clicking empty canvas clears the selection.
@@ -1955,6 +2027,17 @@ function diagPointerMove(ev) {
     renderDiagram();
     return;
   }
+  if (state.resize) {
+    const pt = svgPoint(ev);
+    const rp = state.diagPos[state.resize.id];
+    if (rp) {
+      rp.w = Math.max(40, snap(state.resize.w0 + (pt.x - state.resize.ox)));
+      rp.h = Math.max(20, snap(state.resize.h0 + (pt.y - state.resize.oy)));
+      rp.userW = true; rp.userH = true;
+      renderDiagram();
+    }
+    return;
+  }
   if (!state.drag) return;
   const pt = svgPoint(ev);
   const p = state.diagPos[state.drag.id];
@@ -1968,6 +2051,7 @@ function diagPointerMove(ev) {
 }
 
 async function diagPointerUp(ev) {
+  if (state.resize) { state.resize = null; saveLayout(); return; }
   if (state.wireDrag) {
     const wd = state.wireDrag;
     state.wireDrag = null;
@@ -2100,7 +2184,11 @@ async function saveLayout() {
   if (!state.diagramData) return;
   const positions = {};
   for (const [id, p] of Object.entries(state.diagPos)) {
-    positions[id] = { x: p.x, y: p.y };
+    const e = { x: p.x, y: p.y };
+    if (p.userW) e.w = p.w;       // only user-set sizes are persisted —
+    if (p.userH) e.h = p.h;       // automatic widths/heights stay derived
+    if (p.wrap) e.wrap = true;
+    positions[id] = e;
   }
   const r = await fetch("/api/edit/set_layout", {
     method: "POST",
@@ -2312,14 +2400,47 @@ function setSelection(id, additive) {
 function showCtxMenu(x, y) {
   const m = document.getElementById("ctx-menu");
   const n = state.selected.length;
-  m.innerHTML =
-    '<div class="ctx-item" onclick="hideCtxMenu()">Properties</div>' +
-    '<div class="ctx-sep"></div>' +
+  let html = '<div class="ctx-item" onclick="hideCtxMenu()">Properties</div>';
+  // Per-box ergonomics on a single selection: text-wrap toggle and a size reset.
+  if (n === 1) {
+    const p = state.diagPos[state.selected[0]];
+    html += '<div class="ctx-sep"></div>' +
+      '<div class="ctx-item" onclick="toggleWrap()">' +
+      (p && p.wrap ? "Don't wrap text" : "Wrap text") + "</div>";
+    if (p && (p.userW || p.userH)) {
+      html += '<div class="ctx-item" onclick="resetBoxSize()">Reset size</div>';
+    }
+  }
+  html += '<div class="ctx-sep"></div>' +
     '<div class="ctx-item" onclick="deleteSelected()">Delete' +
     (n > 1 ? " (" + n + " items)" : "") + "</div>";
+  m.innerHTML = html;
   m.style.left = x + "px";
   m.style.top = y + "px";
   m.style.display = "block";
+}
+
+// Per-box text-wrap toggle (right-click ▸ Wrap text). A wrapped box renders its
+// label across lines and auto-grows to fit; the choice is persisted.
+function toggleWrap() {
+  hideCtxMenu();
+  const id = state.selected[0];
+  const p = id && state.diagPos[id];
+  if (!p) return;
+  p.wrap = !p.wrap;
+  renderDiagram();
+  saveLayout();
+}
+
+// Drop a box's manual width/height back to the automatic SCADE layout.
+async function resetBoxSize() {
+  hideCtxMenu();
+  const id = state.selected[0];
+  const p = id && state.diagPos[id];
+  if (!p) return;
+  delete p.userW; delete p.userH;
+  await saveLayout();                       // now omits this box's w/h…
+  loadDiagram(state.diagramData.node, false); // …so it reloads at auto size
 }
 
 function hideCtxMenu() {

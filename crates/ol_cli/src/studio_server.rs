@@ -1397,7 +1397,8 @@ fn prove_run(
 
 /// Persist free-form canvas positions (and optionally the grid pitch) for a
 /// node: `{ "node": "...", "positions": { "id": {"x": .., "y": ..}, ... },
-/// "grid": 8 }`.
+/// "grid": 8 }`. Each position may also carry optional `w`/`h` (a user-set box
+/// size) and `wrap` (a per-box text-wrap flag); absent means automatic sizing.
 fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
     let node_name = req
         .get("node")
@@ -1420,7 +1421,12 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
     for (id, pos) in positions {
         let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
         let y = pos.get("y").and_then(|v| v.as_f64()).ok_or("position missing y")?;
-        map.insert(id.clone(), ol_ir::NodePos { x, y });
+        // Optional, user-set size overrides (clamped to a sane range) and the
+        // per-box text-wrap flag; absent means automatic sizing / no wrap.
+        let w = pos.get("w").and_then(|v| v.as_f64()).map(|w| w.clamp(40.0, 2000.0));
+        let h = pos.get("h").and_then(|v| v.as_f64()).map(|h| h.clamp(20.0, 2000.0));
+        let wrap = pos.get("wrap").and_then(|v| v.as_bool()).unwrap_or(false);
+        map.insert(id.clone(), ol_ir::NodePos { x, y, w, h, wrap });
     }
     for pkg in &mut project.packages {
         if let Some(n) = pkg.nodes.iter_mut().find(|n| n.name == node_name) {
@@ -2422,11 +2428,11 @@ fn add_block_call_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
         });
         node.diagram
             .positions
-            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y });
+            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y, ..Default::default() });
         for (i, l) in fresh.iter().enumerate() {
             node.diagram.positions.insert(
                 l.clone(),
-                ol_ir::NodePos { x: x + 320.0, y: y + 44.0 * i as f64 },
+                ol_ir::NodePos { x: x + 320.0, y: y + 44.0 * i as f64, ..Default::default() },
             );
         }
     }
@@ -2904,10 +2910,10 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         node.equations.push(ol_ir::Equation { lhs: vec![lhs_name.clone()], rhs });
         node.diagram
             .positions
-            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y });
+            .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y, ..Default::default() });
         node.diagram
             .positions
-            .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y });
+            .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y, ..Default::default() });
     }
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());

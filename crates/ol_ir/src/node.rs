@@ -49,13 +49,33 @@ pub struct Probe {
     pub var: String,
 }
 
-/// Position of one diagram element. Keys in [`DiagramLayout::positions`] use
-/// the same ids the Studio diagram API serves: port and local names, and
-/// `eqN` for the N-th equation box.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// Position (and optional size / text-wrap) of one diagram element. Keys in
+/// [`DiagramLayout::positions`] use the same ids the Studio diagram API serves:
+/// port and local names, and `eqN` for the N-th equation box.
+///
+/// `w`/`h`/`wrap` are *user overrides*: absent (the common case) means the GUI
+/// computes the element's size automatically — a width from its label and, for
+/// gates, a height that grows with the input-pin count. They are only written
+/// when the engineer resizes a box or turns on text-wrap, so derived sizes are
+/// never baked into the model file (a gate that later grows a pin still resizes
+/// itself).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 pub struct NodePos {
     pub x: f64,
     pub y: f64,
+    /// User-set box width in canvas units. `None` = automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    /// User-set box height in canvas units. `None` = automatic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
+    /// Wrap the element's label across lines instead of truncating it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub wrap: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]

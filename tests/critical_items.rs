@@ -123,6 +123,37 @@ fn layout_positions_persist_to_the_model_file_and_round_trip() {
     assert!(on_disk.contains("eq0"));
 }
 
+// Canvas item ergonomics: a box's user-set size (w/h) and per-box text-wrap
+// flag persist as overrides, while boxes left at the automatic size stay clean.
+#[test]
+fn layout_size_and_wrap_overrides_round_trip() {
+    let g = start_server_on_copy("layout_size");
+    let port = g.port;
+
+    // master_arm is given a custom size and wrap; eq0 carries only x/y.
+    let payload = r#"{"node":"ReleaseLogic","positions":{
+        "master_arm":{"x":12.0,"y":34.0,"w":220.0,"h":72.0,"wrap":true},
+        "eq0":{"x":300.0,"y":80.0}
+    }}"#;
+    let (s, body) = request(port, "POST", "/api/edit/set_layout", payload).expect("set_layout");
+    assert_eq!(s, 200, "set_layout failed: {body}");
+
+    // The size + wrap survive the diagram round-trip...
+    let (s, body) = request(port, "GET", "/api/diagram?node=ReleaseLogic", "").expect("diagram");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["positions"]["master_arm"]["w"], 220.0);
+    assert_eq!(d["positions"]["master_arm"]["h"], 72.0);
+    assert_eq!(d["positions"]["master_arm"]["wrap"], true);
+    // ...while a box with no overrides stays clean (no w/h/wrap keys serialized).
+    assert!(d["positions"]["eq0"].get("w").is_none(), "plain box should not carry a width");
+    assert!(d["positions"]["eq0"].get("wrap").is_none(), "plain box should not carry wrap");
+
+    // Durable on disk, including the wrap flag.
+    let on_disk = std::fs::read_to_string(g.tmp.join("model.json")).unwrap();
+    assert!(on_disk.contains("\"wrap\""), "wrap not saved to disk: {on_disk}");
+}
+
 // --- 2. Hierarchical navigation: dive data in the diagram ------------------
 
 #[test]
