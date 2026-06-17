@@ -168,6 +168,56 @@ fn workspace_wksc_ties_operators_together() {
     }
 }
 
+/// Dragging a TYPE onto an operator's canvas inserts the kind-specific action:
+/// record MAKE/FLATTEN, array MAKE/FLATTEN/SLICE, and enum variant/compare/
+/// match. Each call succeeds (its IR template parses + saves) and leaves the
+/// expected locals on the operator.
+#[test]
+fn drag_a_type_inserts_make_flatten_slice_and_enum_ops() {
+    let g = start_server_on_workspace("ws_typeops");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_type",
+        r#"{"kind":"record","name":"Pt","fields":[{"name":"x","type":"int32"},{"name":"y","type":"int32"}]}"#);
+    post_ok(port, "/api/edit/add_type", r#"{"kind":"alias","name":"Vec3","target":"int32[3]"}"#);
+    post_ok(port, "/api/edit/add_type", r#"{"kind":"enum","name":"Mode","variants":["OFF","ON"]}"#);
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Builder","kind":"operator"}"#);
+
+    let op = |ty: &str, action: &str, param: Option<&str>| {
+        let mut p = serde_json::json!({ "node": "Builder", "type": ty, "action": action, "x": 40, "y": 40 });
+        if let Some(pm) = param { p["param"] = serde_json::json!(pm); }
+        let (s, b) = request(port, "POST", "/api/edit/add_type_op", &p.to_string()).expect("type op");
+        assert_eq!(s, 200, "{ty}/{action} should succeed: {b}");
+    };
+
+    op("Pt", "make", None);
+    op("Pt", "flatten", None);
+    op("Vec3", "make", None);
+    op("Vec3", "flatten", None);
+    op("Vec3", "slice", Some("0,2"));
+    op("Mode", "variant", Some("ON"));
+    op("Mode", "compare", Some("OFF"));
+    op("Mode", "match", Some("int32"));
+
+    let ins = get_json(port, "/api/inspect");
+    let builder = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .find(|n| n["name"] == "Builder").expect("Builder present");
+    let locals: Vec<String> = builder["locals"].as_array().unwrap().iter()
+        .map(|l| l["name"].as_str().unwrap_or("").to_string()).collect();
+    // Struct/array FLATTEN exposed the field/element locals; SLICE, variant,
+    // compare (named "is"), and match each left their result local.
+    for want in ["Pt_in", "x", "y", "Vec3_in", "elem0", "elem1", "elem2", "slice", "variant", "is", "match"] {
+        assert!(locals.iter().any(|n| n == want), "local `{want}` from a type op: {locals:?}");
+    }
+
+    // A bad slice range is rejected.
+    let (s, _) = request(port, "POST", "/api/edit/add_type_op",
+        &serde_json::json!({"node":"Builder","type":"Vec3","action":"slice","x":40,"y":40,"param":"2,5"}).to_string())
+        .expect("bad slice");
+    assert_eq!(s, 400, "out-of-bounds slice must be rejected");
+}
+
 /// `openlustre new --empty` seeds a project with no operators; the Studio
 /// serves it without trouble and it stays editable (you can add operators in).
 #[test]

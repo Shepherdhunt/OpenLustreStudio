@@ -307,6 +307,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             operations_catalog().to_string().into_bytes(),
         ),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
+        ("POST", "/api/edit/add_type_op") => add_type_op_response(ctx, body),
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
@@ -2988,6 +2989,218 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         node.diagram
             .positions
             .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y, ..Default::default() });
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    record_edit(ctx, before);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+fn type_kind_label(body: &ol_ir::TypeBody) -> &'static str {
+    match body {
+        ol_ir::TypeBody::Record { .. } => "record",
+        ol_ir::TypeBody::Enum(_) => "enum",
+        ol_ir::TypeBody::Alias { .. } => "alias",
+    }
+}
+
+/// `"start,len"` → (start, len), defaulting to (0, 1).
+fn parse_slice_param(param: Option<&str>) -> (u32, u32) {
+    let mut it = param.unwrap_or("").split(',');
+    let start = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
+    let len = it.next().and_then(|s| s.trim().parse().ok()).unwrap_or(1);
+    (start, len)
+}
+
+/// The chosen enum variant: the param if it names a real variant, else the
+/// first variant when no param was given, else `None` (an invalid request).
+fn pick_variant(param: &Option<String>, variants: &[String]) -> Option<String> {
+    match param {
+        Some(v) => variants.iter().find(|x| *x == v).cloned(),
+        None => variants.first().cloned(),
+    }
+}
+
+/// Drag a TYPE from the Types section onto an operator's canvas. The action
+/// (chosen by the client from a kind-specific menu) becomes one or more
+/// equations with red ghost input pins — exactly like a dropped operation, so
+/// the user wires the inputs afterward:
+///   record → `make` (build from field inputs) | `flatten` (split into fields)
+///   array  → `make` | `flatten` | `slice` (param "start,len")
+///   enum   → `variant` (param) | `compare` (param) | `match` (param result type)
+fn add_type_op_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let host = match req.get("node").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return bad("missing string field `node`"),
+    };
+    let type_name = match req.get("type").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return bad("missing string field `type`"),
+    };
+    let action = match req.get("action").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return bad("missing string field `action`"),
+    };
+    let x = req.get("x").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let y = req.get("y").and_then(|v| v.as_f64()).unwrap_or(40.0);
+    let param = req.get("param").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Types live in the included types file, so resolve from the FULL project.
+    let full = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    let tdef = match full.packages.iter().flat_map(|p| &p.types).find(|t| t.name() == type_name) {
+        Some(t) => t.clone(),
+        None => return bad(&format!("type `{type_name}` not found")),
+    };
+
+    // Each spec: (lhs base name, out-type string, body template). The template
+    // uses `p_PIN_<k>` for ghost input pins and `p_SRC` for the shared flatten
+    // source local (resolved during insertion).
+    type Spec = (String, String, String);
+    let specs: Vec<Spec> = match (&tdef.body, action.as_str()) {
+        (ol_ir::TypeBody::Record { fields, .. }, "make") => {
+            let asg: Vec<String> = fields
+                .iter()
+                .enumerate()
+                .map(|(i, f)| format!("{}: p_PIN_{}", f.name, i + 1))
+                .collect();
+            vec![("make".into(), type_name.clone(), format!("{type_name} {{ {} }}", asg.join(", ")))]
+        }
+        (ol_ir::TypeBody::Record { fields, .. }, "flatten") => {
+            let mut v: Vec<Spec> = vec![(format!("{type_name}_in"), type_name.clone(), "p_PIN_1".into())];
+            for f in fields {
+                v.push((f.name.clone(), type_str(&f.ty), format!("p_SRC.{}", f.name)));
+            }
+            v
+        }
+        (ol_ir::TypeBody::Alias { target, .. }, act)
+            if matches!(target, ol_ir::Type::Array { .. }) =>
+        {
+            let (elem, len) = match target {
+                ol_ir::Type::Array { elem, len } => (type_str(elem), *len),
+                _ => unreachable!(),
+            };
+            match act {
+                "make" => {
+                    let pins: Vec<String> = (1..=len).map(|k| format!("p_PIN_{k}")).collect();
+                    vec![("make".into(), format!("{elem}[{len}]"), format!("[{}]", pins.join("; ")))]
+                }
+                "flatten" => {
+                    let mut v: Vec<Spec> =
+                        vec![(format!("{type_name}_in"), format!("{elem}[{len}]"), "p_PIN_1".into())];
+                    for i in 0..len {
+                        v.push((format!("elem{i}"), elem.clone(), format!("p_SRC[{i}]")));
+                    }
+                    v
+                }
+                "slice" => {
+                    let (start, slen) = parse_slice_param(param.as_deref());
+                    if slen == 0 || start.saturating_add(slen) > len {
+                        return bad(&format!(
+                            "slice start {start} len {slen} is out of bounds for {type_name} (length {len})"
+                        ));
+                    }
+                    let elems: Vec<String> =
+                        (start..start + slen).map(|i| format!("p_PIN_1[{i}]")).collect();
+                    vec![("slice".into(), format!("{elem}[{slen}]"), format!("[{}]", elems.join("; ")))]
+                }
+                other => return bad(&format!("an array type supports make/flatten/slice, not `{other}`")),
+            }
+        }
+        (ol_ir::TypeBody::Enum(e), "variant") => match pick_variant(&param, &e.variants) {
+            Some(v) => vec![("variant".into(), type_name.clone(), v)],
+            None => return bad(&format!("`{}` is not a variant of {type_name}", param.unwrap_or_default())),
+        },
+        (ol_ir::TypeBody::Enum(e), "compare") => match pick_variant(&param, &e.variants) {
+            Some(v) => vec![("is".into(), "bool".into(), format!("p_PIN_1 = {v}"))],
+            None => return bad(&format!("`{}` is not a variant of {type_name}", param.unwrap_or_default())),
+        },
+        (ol_ir::TypeBody::Enum(e), "match") => {
+            if e.variants.is_empty() {
+                return bad(&format!("enum {type_name} has no variants"));
+            }
+            let result_ty = param.clone().unwrap_or_else(|| "int32".into());
+            if ol_stdlib::parse_type(&result_ty).is_err() {
+                return bad(&format!("match result type `{result_ty}` is not a valid type"));
+            }
+            // selector p_PIN_1, then one value pin per variant (p_PIN_2..).
+            let n = e.variants.len();
+            let mut expr = format!("p_PIN_{}", n + 1);
+            for i in (0..n.saturating_sub(1)).rev() {
+                expr = format!("if p_PIN_1 = {} then p_PIN_{} else {expr}", e.variants[i], i + 2);
+            }
+            vec![("match".into(), result_ty, expr)]
+        }
+        _ => {
+            return bad(&format!(
+                "type `{type_name}` ({}) does not support action `{action}`",
+                type_kind_label(&tdef.body)
+            ))
+        }
+    };
+
+    let before = take_snapshot(ctx);
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
+        };
+        let mut known: std::collections::HashSet<String> = node
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(node.outputs.iter().map(|p| p.name.clone()))
+            .chain(node.locals.iter().map(|l| l.name.clone()))
+            .collect();
+        let mut src_name = String::new();
+        for (k, (base, out_ty_str, tmpl)) in specs.iter().enumerate() {
+            let eq_index = node.equations.len();
+            let out_ty = match ol_stdlib::parse_type(out_ty_str) {
+                Ok(t) => t,
+                Err(e) => return bad(&format!("internal out-type `{out_ty_str}`: {e}")),
+            };
+            let mut lhs = base.clone();
+            let mut nn = 2;
+            while known.contains(&lhs) {
+                lhs = format!("{base}_{nn}");
+                nn += 1;
+            }
+            known.insert(lhs.clone());
+            if k == 0 {
+                src_name = lhs.clone();
+            }
+            let body_text = tmpl
+                .replace("p_PIN_", &format!("p{eq_index}_"))
+                .replace("p_SRC", &src_name);
+            let rhs = match ol_stdlib::parse_expr(&body_text) {
+                Ok(e) => e,
+                Err(e) => return bad(&format!("internal template `{body_text}`: {e}")),
+            };
+            node.locals.push(ol_ir::Local { name: lhs.clone(), ty: out_ty });
+            node.equations.push(ol_ir::Equation { lhs: vec![lhs.clone()], rhs });
+            let ey = y + (k as f64) * 90.0;
+            node.diagram
+                .positions
+                .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y: ey, ..Default::default() });
+            node.diagram
+                .positions
+                .insert(lhs, ol_ir::NodePos { x: x + 320.0, y: ey, ..Default::default() });
+        }
     }
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());

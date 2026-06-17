@@ -226,6 +226,82 @@ fn array_constant_lookup_agrees_across_backends() {
     }
 }
 
+/// An array/record MAKE (an `Expr::Array` / `Expr::Struct` as an equation RHS,
+/// as the drag-a-type MAKE blocks produce) must emit real C — element-wise
+/// array assignment and a struct compound literal — not the `/* … */ 0` stub.
+#[test]
+fn make_array_and_record_emit_real_c() {
+    let pt = ol_ir::TypeDef {
+        body: ol_ir::TypeBody::Record {
+            name: "Pt".into(),
+            fields: vec![
+                ol_ir::RecordField { name: "x".into(), ty: Type::Int32 },
+                ol_ir::RecordField { name: "y".into(), ty: Type::Int32 },
+            ],
+        },
+    };
+    let node = NodeDef {
+        name: "Build".into(),
+        kind: NodeKind::Operator,
+        inputs: vec![
+            Port { name: "a".into(), ty: Type::Int32 },
+            Port { name: "b".into(), ty: Type::Int32 },
+            Port { name: "c".into(), ty: Type::Int32 },
+        ],
+        outputs: vec![
+            Port { name: "arr".into(), ty: Type::Array { elem: Box::new(Type::Int32), len: 3 } },
+            Port { name: "pt".into(), ty: Type::named("Pt") },
+        ],
+        locals: vec![],
+        equations: vec![
+            Equation {
+                lhs: vec!["arr".into()],
+                rhs: Expr::array(vec![Expr::var("a"), Expr::var("b"), Expr::var("c")]),
+            },
+            Equation {
+                lhs: vec!["pt".into()],
+                rhs: Expr::structure(
+                    "Pt",
+                    vec![
+                        ol_ir::FieldInit { field: "x".into(), value: Expr::var("a") },
+                        ol_ir::FieldInit { field: "y".into(), value: Expr::var("b") },
+                    ],
+                ),
+            },
+        ],
+        contract: None,
+        diagram: Default::default(),
+        probes: vec![],
+    };
+    let project = Project {
+        name: "make".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            types: vec![pt],
+            nodes: vec![node],
+            ..Default::default()
+        }],
+        main: Some("Build".into()),
+        ..Default::default()
+    };
+
+    let report = ol_typecheck::check_project(&project);
+    assert!(
+        !report.has_errors(),
+        "MAKE operator should typecheck: {:?}",
+        report.errors().collect::<Vec<_>>()
+    );
+    // It also simulates (building the array and record values).
+    let mut sim = ol_sim::Sim::new(&project, "Build").unwrap();
+    sim.run_csv("a,b,c\n1,2,3\n").unwrap();
+
+    let bundle = ol_clite_emit::emit_project(&project);
+    assert!(bundle.source.contains("[0] ="), "array MAKE → element assignment:\n{}", bundle.source);
+    assert!(bundle.source.contains("(Pt){"), "record MAKE → compound literal:\n{}", bundle.source);
+    assert!(!bundle.source.contains("/* array literal */"), "no array stub:\n{}", bundle.source);
+    assert!(!bundle.source.contains("/* record literal */"), "no record stub:\n{}", bundle.source);
+}
+
 fn tempdir_in(parent: &std::path::Path) -> std::io::Result<PathBuf> {
     use std::time::{SystemTime, UNIX_EPOCH};
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();

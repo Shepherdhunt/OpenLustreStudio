@@ -791,6 +791,22 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
         return;
     }
 
+    // C has no whole-array assignment, so an array-literal RHS (an array MAKE or
+    // SLICE block, or an inline `[…]`) is written element by element.
+    if eq.lhs.len() == 1 {
+        if let Expr::Array { items } = &eq.rhs {
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            for (i, item) in items.iter().enumerate() {
+                let (stmts, e) = lower_anf(item, ctx);
+                for s in stmts {
+                    out.push_str(&s);
+                }
+                let _ = writeln!(out, "  {lhs}[{i}] = {e};");
+            }
+            return;
+        }
+    }
+
     // Multi-output: only direct top-level Call binding is supported.
     if eq.lhs.len() > 1 {
         if let Expr::Call { args, .. } = &eq.rhs {
@@ -1130,7 +1146,20 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
         // (C has no whole-array assignment); the supported path is a named
         // `static const` referenced as an lvalue, then indexed / field-accessed.
         Expr::Array { .. } => (vec![], "/* array literal */ 0".into()),
-        Expr::Struct { .. } => (vec![], "/* record literal */ 0".into()),
+        // A record literal is a C compound literal — assignable to a struct
+        // lvalue, so a struct MAKE block emits `out = (T){ .f = v, … };`.
+        Expr::Struct { ty, fields } => {
+            let mut stmts = Vec::new();
+            let parts: Vec<String> = fields
+                .iter()
+                .map(|fi| {
+                    let (s, v) = lower_anf(&fi.value, ctx);
+                    stmts.extend(s);
+                    format!(".{} = {}", fi.field, v)
+                })
+                .collect();
+            (stmts, format!("({}){{ {} }}", ty, parts.join(", ")))
+        }
         // Iterators are emitted at the equation level (a `for` loop), never
         // as a sub-expression — typecheck guarantees they are the whole RHS.
         Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),

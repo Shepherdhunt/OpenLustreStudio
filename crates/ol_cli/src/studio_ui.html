@@ -884,6 +884,10 @@ function buildTypesNode(host, types) {
       ' <span class="tree-meta">' + escapeHTML(kind) + '</span>';
     d.onclick = () => { openDialog("dlg-types"); loadTypes(); };
     d.oncontextmenu = ev => typeTreeMenu(ev, t.name);
+    // Drag a type onto an operator's canvas → a kind-specific MAKE/FLATTEN/…
+    // menu (handled by the canvas drop listener).
+    d.draggable = true;
+    d.ondragstart = ev => { ev.stopPropagation(); ev.dataTransfer.setData("text/plain", "type:" + t.name); };
     det.appendChild(d);
   }
   const add = document.createElement("div");
@@ -2317,6 +2321,90 @@ async function renameWorkspace() {
   await refresh();
 }
 
+// --- Drag a type onto the canvas (MAKE / FLATTEN / SLICE / enum actions) ------
+
+function findType(name) {
+  for (const p of (state.inspect?.project?.packages || [])) {
+    for (const t of (p.types || [])) if (t.name === name) return t;
+  }
+  return null;
+}
+
+// On dropping a type, offer the actions that fit its kind. The chosen action
+// (plus any parameter) is sent to /api/edit/add_type_op, which inserts the
+// matching equation(s) with red ghost input pins for the user to wire.
+function openTypeDropMenu(typeName, x, y, clientX, clientY) {
+  const status = document.getElementById("diagram-status");
+  const t = findType(typeName);
+  if (!t || !t.body) { status.textContent = "unknown type: " + typeName; return; }
+  const kind = t.body.kind;
+  let actions;
+  if (kind === "Record") {
+    actions = [["MAKE — build from fields", "make"], ["FLATTEN — split into fields", "flatten"]];
+  } else if (kind === "Enum") {
+    actions = [["Variant constant", "variant"], ["Compare to variant", "compare"], ["Match / case selector", "match"]];
+  } else if (kind === "Alias" && t.body.target && t.body.target.kind === "Array") {
+    actions = [["MAKE — build from elements", "make"], ["FLATTEN — split into elements", "flatten"], ["SLICE — sub-array", "slice"]];
+  } else {
+    status.textContent = typeName + " is a scalar type — nothing to MAKE or FLATTEN";
+    return;
+  }
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "ctx-item";
+  head.style.cssText = "font-weight:600;color:#555;cursor:default";
+  head.textContent = typeName + " (" + kind.toLowerCase() + ")";
+  m.appendChild(head);
+  for (const [label, action] of actions) {
+    const d = document.createElement("div");
+    d.className = "ctx-item";
+    d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); runTypeOp(typeName, t, action, x, y); };
+    m.appendChild(d);
+  }
+  m.style.left = clientX + "px";
+  m.style.top = clientY + "px";
+  m.style.display = "block";
+}
+
+// Collect any parameter the chosen action needs, then POST it.
+function runTypeOp(typeName, t, action, x, y) {
+  let param = null;
+  if (t.body.kind === "Enum" && (action === "variant" || action === "compare")) {
+    const vs = t.body.variants || [];
+    const ans = prompt("Which variant of " + typeName + "?\n(" + vs.join(", ") + ")", vs[0] || "");
+    if (ans === null) return;
+    param = ans.trim();
+  } else if (t.body.kind === "Enum" && action === "match") {
+    const ans = prompt("Result type of the match (e.g. int32, bool, float64):", "int32");
+    if (ans === null) return;
+    param = ans.trim();
+  } else if (action === "slice") {
+    const len = (t.body.target && t.body.target.len) || 0;
+    const ans = prompt('Slice as "start,length" — array length is ' + len + ":", "0," + Math.min(len, 1));
+    if (ans === null) return;
+    param = ans.trim();
+  }
+  addTypeOp(state.diagramData.node, typeName, action, x, y, param);
+}
+
+async function addTypeOp(node, typeName, action, x, y, param) {
+  const payload = { node, type: typeName, action, x, y };
+  if (param != null && param !== "") payload.param = param;
+  const resp = await fetch("/api/edit/add_type_op", { method: "POST", body: JSON.stringify(payload) });
+  if (!resp.ok) {
+    let msg = await resp.text();
+    try { msg = JSON.parse(msg).error || msg; } catch (_) {}
+    document.getElementById("diagram-status").textContent = "drop failed: " + msg;
+    return;
+  }
+  document.getElementById("diagram-status").textContent =
+    typeName + " · " + action + " placed — wire its red pins in Properties";
+  await refresh();
+  loadDiagram(node, false);
+}
+
 const diagramHostEl = document.getElementById("diagram-host");
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
@@ -2330,6 +2418,14 @@ diagramHostEl.addEventListener("drop", async ev => {
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
   const x = snap(Math.max(0, ev.clientX - r.left));
   const y = snap(Math.max(0, ev.clientY - r.top));
+
+  // A type dropped from the Types section opens a kind-specific action menu
+  // (MAKE/FLATTEN/SLICE for arrays, MAKE/FLATTEN for records, variant/compare/
+  // match for enums) rather than placing a fixed block.
+  if (data.startsWith("type:")) {
+    openTypeDropMenu(data.slice(5), x, y, ev.clientX, ev.clientY);
+    return;
+  }
 
   let url, payload;
   if (data.startsWith("call:")) {
