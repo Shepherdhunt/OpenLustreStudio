@@ -349,7 +349,7 @@
       <div class="mi" onclick="setSidePane('c')">View Generated C</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="downloadBuild()">Generate C-Lite (save files)</div>
-      <div class="mi" id="mi-code-compile" onclick="openDialog('dlg-compile')">Compile C-Lite…</div>
+      <div class="mi" id="mi-code-compile" onclick="openDialog('dlg-compile'); loadTargets()">Compile C-Lite…</div>
     </div>
   </div>
   <div class="menu" data-menu="project">
@@ -639,7 +639,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry.</p>
+    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry. Or nest a region inline with a <code class="inline">{ … }</code> block: <code class="inline">Active: drive=1 { initial Lo; history; Lo: level=0; Hi: level=1; Lo -&gt; Hi when up; Hi -&gt; Lo when down }</code>. The sub-automaton runs while the state is active; add <code class="inline">history</code> to resume the held sub-state on re-entry instead of restarting.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -689,10 +689,10 @@
     <div class="edit-form">
       <h4>Compile C-Lite</h4>
       <div class="row">
-        <label>target OS</label>
-        <select id="compile-os"><option>host (this machine)</option><option disabled>cross-compile — roadmap</option></select>
+        <label>target</label>
+        <select id="compile-os" onchange="targetChanged()" title="the OS / board the generated C is built for"></select>
         <label>compiler</label>
-        <select id="compile-cc">
+        <select id="compile-cc" title="used for the host target; cross targets build with their own toolchain">
           <option value="auto">auto-detect</option>
           <option value="msvc">MSVC (cl)</option>
           <option value="gcc">gcc</option>
@@ -700,6 +700,7 @@
           <option value="cc">cc</option>
         </select>
       </div>
+      <div class="row"><span class="build-note" id="compile-target-note" style="flex:1"></span></div>
       <div class="row">
         <label>output dir</label><input id="compile-dir" style="flex:1" placeholder="(default: <workspace>\build)">
       </div>
@@ -1635,13 +1636,47 @@ async function removeProbe(i) {
 
 // --- Compile C-Lite ------------------------------------------------------------
 
+// Populate the target selector from /api/targets (host + the cross profiles).
+let targetCache = null;
+async function loadTargets() {
+  const sel = document.getElementById("compile-os");
+  if (targetCache) { targetChanged(); return; }
+  try {
+    const v = await fetchJSON("/api/targets");
+    targetCache = v.targets || [];
+  } catch (e) {
+    targetCache = [{ id: "host", label: "Host — this machine", os: "(host)", arch: "", cross: false, note: "" }];
+  }
+  sel.innerHTML = "";
+  for (const t of targetCache) {
+    const o = document.createElement("option");
+    o.value = t.id;
+    o.textContent = t.label + (t.arch && t.arch !== "(host)" ? " · " + t.arch : "");
+    sel.appendChild(o);
+  }
+  targetChanged();
+}
+
+// Reflect the selected target: a cross target builds on the target toolchain,
+// so the compiler box is ignored and we explain the directional workflow.
+function targetChanged() {
+  const sel = document.getElementById("compile-os");
+  const note = document.getElementById("compile-target-note");
+  const t = (targetCache || []).find(x => x.id === sel.value);
+  if (!t) { note.textContent = ""; return; }
+  note.textContent = t.cross
+    ? "⤳ cross target (" + t.cc + ") — emits build files to compile on the target; the compiler box is ignored. " + t.note
+    : t.note;
+}
+
 async function cliteCompile() {
   const st = document.getElementById("compile-status");
-  st.textContent = "compiling…";
+  st.textContent = "working…";
   const r = await fetch("/api/clite/compile", {
     method: "POST",
     body: JSON.stringify({
       compiler: document.getElementById("compile-cc").value,
+      target: document.getElementById("compile-os").value || "host",
       out_dir: document.getElementById("compile-dir").value.trim(),
     }),
   });
@@ -1654,6 +1689,9 @@ async function cliteCompile() {
   if (v.error) {
     st.textContent = "failed";
     logText = v.error;
+  } else if (v.cross) {
+    st.textContent = "✓ generated for " + v.target + " — build on the target (see INTEGRATION.md)";
+    logText = "wrote: " + (v.wrote || []).join(", ") + "\n\n" + (v.log || "");
   } else {
     st.textContent = v.compiled
       ? "✓ compiled — " + v.exe
@@ -1870,6 +1908,97 @@ function inputPinY(eqId, port) {
   return first + port * DIAG.PIN_PITCH;
 }
 
+// ---- Orthogonal (Manhattan) wire routing -----------------------------------
+// A point `dist` along the segment from `from` toward `to`.
+function ptAlong(from, to, dist) {
+  const dx = to.x - from.x, dy = to.y - from.y, len = Math.hypot(dx, dy) || 1;
+  return { x: from.x + dx / len * dist, y: from.y + dy / len * dist };
+}
+// Route from a source's right edge (x1,y1) to a target's left edge/pin (x2,y2).
+// Forward wires (target to the right) turn through a vertical channel at the
+// midpoint; backward wires (feedback) stand off both edges and share a channel
+// between them so they never run straight through a box.
+function orthoPoints(x1, y1, x2, y2) {
+  const GAP = 18;
+  if (x2 >= x1 + 2 * GAP) {
+    // A near-aligned forward run draws as one clean line (no pointless mid-jog);
+    // only a real vertical offset turns through the mid-x channel.
+    if (Math.abs(y1 - y2) < 6) return [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+    const mx = Math.round((x1 + x2) / 2);
+    return [{ x: x1, y: y1 }, { x: mx, y: y1 }, { x: mx, y: y2 }, { x: x2, y: y2 }];
+  }
+  const my = Math.round((y1 + y2) / 2);
+  return [{ x: x1, y: y1 }, { x: x1 + GAP, y: y1 }, { x: x1 + GAP, y: my },
+          { x: x2 - GAP, y: my }, { x: x2 - GAP, y: y2 }, { x: x2, y: y2 }];
+}
+// Render a polyline with rounded elbows (radius r) as an SVG path string.
+// Collinear points collapse cleanly (the quadratic degenerates to the line).
+function roundedPath(pts, r) {
+  if (pts.length < 2) return "";
+  if (pts.length === 2) return "M " + pts[0].x + " " + pts[0].y + " L " + pts[1].x + " " + pts[1].y;
+  let d = "M " + pts[0].x + " " + pts[0].y;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const a = pts[i - 1], b = pts[i], c = pts[i + 1];
+    const rr = Math.min(r, Math.hypot(b.x - a.x, b.y - a.y) / 2, Math.hypot(c.x - b.x, c.y - b.y) / 2);
+    const p1 = ptAlong(b, a, rr), p2 = ptAlong(b, c, rr);
+    d += " L " + p1.x.toFixed(1) + " " + p1.y.toFixed(1) +
+         " Q " + b.x + " " + b.y + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1);
+  }
+  const last = pts[pts.length - 1];
+  return d + " L " + last.x + " " + last.y;
+}
+
+// ---- Per-family gate silhouettes -------------------------------------------
+// SCADE draws operator families as distinct shapes. We key off the symbol glyph
+// and keep the LEFT edge straight (so input pins stay seated on it) with the
+// output reaching the right-centre tip (so the output pin stays seated too).
+function gateFamily(it) {
+  if (!it.sym) return null;
+  switch (it.label) {
+    case "AND": return "and";
+    case "OR": case "XOR": case "⇒": return "or";
+    case "ITE": return "mux";
+    case "pre": case "FBY": case "->": return "delay";
+    default: return null;
+  }
+}
+// Body SVG for an item: a family silhouette or the default rounded rect. `cls`
+// carries the box/eq/invalid/selected classes so CSS fill/stroke still apply.
+function gateBody(fam, p, h, cls) {
+  const x = p.x, y = p.y, w = p.w;
+  if (fam === "and") {
+    // D-shape: flat left/top, semicircular right bulging to the tip at (x+w, mid).
+    const bw = w * 0.5;
+    const d = "M " + x + " " + y + " L " + (x + bw) + " " + y +
+      " A " + (w - bw) + " " + (h / 2) + " 0 0 1 " + (x + bw) + " " + (y + h) +
+      " L " + x + " " + (y + h) + " Z";
+    return '<path class="' + cls + '" d="' + d + '"/>';
+  }
+  if (fam === "or") {
+    // Shield: straight left edge, top and bottom curving to a point at the right.
+    const d = "M " + x + " " + y +
+      " Q " + (x + w * 0.72).toFixed(1) + " " + y + " " + (x + w) + " " + (y + h / 2) +
+      " Q " + (x + w * 0.72).toFixed(1) + " " + (y + h) + " " + x + " " + (y + h) + " Z";
+    return '<path class="' + cls + '" d="' + d + '"/>';
+  }
+  if (fam === "mux") {
+    // Trapezoid multiplexer: tall input (left) edge, short output (right) edge.
+    const inset = Math.min(h * 0.22, 14);
+    const pts = [[x, y], [x + w, y + inset], [x + w, y + h - inset], [x, y + h]]
+      .map(q => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" ");
+    return '<polygon class="' + cls + '" points="' + pts + '"/>';
+  }
+  if (fam === "delay") {
+    // Register/delay: the rect body plus a bar on the left edge.
+    return '<rect class="' + cls + '" x="' + x + '" y="' + y + '" width="' + w +
+      '" height="' + h + '" rx="2"/>' +
+      '<rect x="' + (x + 3) + '" y="' + (y + 3) + '" width="3" height="' + (h - 6) +
+      '" fill="#2b579a" opacity="0.55" pointer-events="none"/>';
+  }
+  return '<rect class="' + cls + '" x="' + x + '" y="' + y + '" width="' + w +
+    '" height="' + h + '" rx="2"/>';
+}
+
 function renderDiagram() {
   const d = state.diagramData;
   if (!d) return;
@@ -1965,7 +2094,8 @@ function renderDiagram() {
       : b.y + (b.h || DIAG.BOXH) / 2;
     const mx = (x1 + x2) / 2;
     const cls = w.invalid ? "wire invalid" : "wire";
-    svg += '<path class="' + cls + '" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '">' +
+    // Manhattan-routed wire with rounded elbows (replaces the old cubic Bézier).
+    svg += '<path class="' + cls + '" d="' + roundedPath(orthoPoints(x1, y1, x2, y2), 6) + '">' +
       (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
     if (showLabels) {
       // The SCADE wire annotation: the carried variable and its type.
@@ -1984,8 +2114,7 @@ function renderDiagram() {
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
-    svg += '<rect class="' + it.cls + (selected ? ' selected' : '') + '" x="' + p.x + '" y="' + p.y +
-      '" width="' + p.w + '" height="' + h + '" rx="2"/>';
+    svg += gateBody(gateFamily(it), p, h, it.cls + (selected ? ' selected' : ''));
     // Label: a single (truncated) line, or — when text-wrap is on for this box —
     // several lines via <tspan>, centered for symbol gates, left for text boxes.
     const lines = p.wrap ? boxLabelLines(it, p)
@@ -3531,36 +3660,109 @@ function parsePortsSpec(text) {
 
 // Parse the textual editor into the structured payload, or null on a syntax
 // error (with a status message). Shared by create and update.
+const TRANS_RE = /^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/;
+
+// Split the states textarea into entries. An entry is a flat state line, or a
+// state with a trailing `{ …nested region… }` block (one level of nesting in
+// v1). The `{` may sit on the state line; the block runs to the matching `}`.
+function splitStateEntries(text) {
+  const entries = [];
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    const br = lines[i].indexOf("{");
+    if (br < 0) { entries.push({ head: lines[i].trim(), block: null }); continue; }
+    const head = lines[i].slice(0, br).trim();
+    const blockLines = [];
+    let cur = lines[i].slice(br + 1);
+    let closed = false;
+    while (true) {
+      const c = cur.indexOf("}");
+      if (c >= 0) { if (cur.slice(0, c).trim()) blockLines.push(cur.slice(0, c)); closed = true; break; }
+      blockLines.push(cur);
+      if (++i >= lines.length) break;
+      cur = lines[i];
+    }
+    entries.push({ head, block: blockLines.join("\n"), unterminated: !closed });
+  }
+  return entries;
+}
+
+// Parse `lhs = expr; …; refine Machine` segments into {equations, refines}.
+function parseStateSegs(name, segText) {
+  const eqs = [];
+  let refines = null;
+  for (const seg of segText.split(";").map(x => x.trim()).filter(Boolean)) {
+    const rm = seg.match(/^refine\s+(\w+)$/);
+    if (rm) { refines = rm[1]; continue; }
+    const ei = seg.indexOf("=");
+    if (ei < 0) return { error: "state `" + name + "`: each part is `lhs = expr` or `refine Machine` — got: " + seg };
+    eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
+  }
+  return { equations: eqs, refines };
+}
+
+// Parse a region block body into {initial_state, history, states[]} — the
+// shape the server already accepts (parse_sm_states recurses into regions).
+// Lines: `history`, `initial Sub`, `Sub: lhs = expr; …`, `A -> B when guard`.
+function parseRegionBlock(parentName, blockText) {
+  if (blockText.includes("{")) return { error: "state `" + parentName + "`: only one level of region nesting is supported" };
+  let initial = null, history = false;
+  const subStates = {}, subOrder = [], pendingTrans = [];
+  for (const raw of blockText.split("\n")) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (t === "history") { history = true; continue; }
+    const im = t.match(/^initial\s+(\w+)$/);
+    if (im) { initial = im[1]; continue; }
+    const tm = t.match(TRANS_RE);
+    if (tm) { pendingTrans.push({ from: tm[1], target: tm[2], guard: tm[3].trim() }); continue; }
+    const ci = t.indexOf(":");
+    if (ci < 0) return { error: "region of `" + parentName + "`: line needs `Sub: lhs = expr`, `Sub -> Sub when g`, `initial Sub`, or `history` — got: " + t };
+    const sn = t.slice(0, ci).trim();
+    const parsed = parseStateSegs(sn, t.slice(ci + 1));
+    if (parsed.error) return parsed;
+    const sd = { name: sn, equations: parsed.equations, transitions: [] };
+    if (parsed.refines) sd.refines = parsed.refines;
+    subStates[sn] = sd; subOrder.push(sn);
+  }
+  if (!subOrder.length) return { error: "state `" + parentName + "`: the region has no sub-states" };
+  if (!initial) initial = subOrder[0];
+  if (!subStates[initial]) return { error: "region of `" + parentName + "`: unknown initial sub-state `" + initial + "`" };
+  for (const tr of pendingTrans) {
+    if (!subStates[tr.from]) return { error: "region of `" + parentName + "`: unknown sub-state `" + tr.from + "`" };
+    subStates[tr.from].transitions.push({ guard: tr.guard, target: tr.target });
+  }
+  return { region: { initial_state: initial, history, states: subOrder.map(n => subStates[n]) } };
+}
+
 function fsmBuildPayload() {
   const statesText = document.getElementById("fsm-states").value;
   const transText = document.getElementById("fsm-transitions").value;
   const states = {};
   const order = [];
-  for (const line of statesText.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
+  for (const ent of splitStateEntries(statesText)) {
+    if (ent.unterminated) { setFsmStatus(false, "unterminated `{` — a region block needs a closing `}`"); return null; }
+    const t = ent.head;
     const ci = t.indexOf(":");
-    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr` or `Name: refine Machine` — got: " + t); return null; }
+    if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr`, `Name: refine Machine`, or `Name: … { region }` — got: " + t); return null; }
     const name = t.slice(0, ci).trim();
-    const eqs = [];
-    let refines = null;
-    for (const seg of t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean)) {
-      // `refine Machine` delegates this state to another state machine.
-      const rm = seg.match(/^refine\s+(\w+)$/);
-      if (rm) { refines = rm[1]; continue; }
-      const ei = seg.indexOf("=");
-      if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr` or `refine Machine` — got: " + seg); return null; }
-      eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
+    const parsed = parseStateSegs(name, t.slice(ci + 1));
+    if (parsed.error) { setFsmStatus(false, parsed.error); return null; }
+    const st = { name, equations: parsed.equations, transitions: [] };
+    if (parsed.refines) st.refines = parsed.refines;
+    if (ent.block != null) {
+      const rb = parseRegionBlock(name, ent.block);
+      if (rb.error) { setFsmStatus(false, rb.error); return null; }
+      st.regions = [rb.region];
     }
-    const st = { name, equations: eqs, transitions: [] };
-    if (refines) st.refines = refines;
     states[name] = st;
     order.push(name);
   }
   for (const line of transText.split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
+    const m = t.match(TRANS_RE);
     if (!m) { setFsmStatus(false, "transition line needs `From -> To when guard` — got: " + t); return null; }
     const [, from, to, guard] = m;
     if (!states[from]) { setFsmStatus(false, "unknown source state `" + from + "`"); return null; }
@@ -3672,7 +3874,24 @@ function fsmLoadIntoForm(m) {
       const parts = [];
       if (s.refines) parts.push("refine " + s.refines);
       for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
-      return s.name + ": " + parts.join("; ");
+      let line = s.name + ": " + parts.join("; ");
+      // A nested region round-trips as a `{ … }` block (one level in v1).
+      if (s.regions && s.regions.length) {
+        const r = s.regions[0];
+        const inner = ["  initial " + r.initial_state];
+        if (r.history) inner.push("  history");
+        for (const ss of (r.states || [])) {
+          const sp = [];
+          if (ss.refines) sp.push("refine " + ss.refines);
+          for (const e of (ss.equations || [])) sp.push(e.lhs + " = " + e.body);
+          inner.push("  " + ss.name + ": " + sp.join("; "));
+        }
+        for (const ss of (r.states || [])) {
+          for (const tr of (ss.transitions || [])) inner.push("  " + ss.name + " -> " + tr.target + " when " + tr.guard);
+        }
+        line += " {\n" + inner.join("\n") + "\n}";
+      }
+      return line;
     })
     .join("\n");
   const trans = [];
@@ -3709,36 +3928,63 @@ function fsmTemplate(reset) {
 
 // A keyword-coloured, read-only echo of the states/transitions, so the textual
 // syntax is easy to follow (state names purple, `->` / `when` / initial blue).
+// Colour the `;`-separated body of a state (equations plain, `refine X` keyed).
+function colourSegs(segText) {
+  return segText.split(";").map(seg => {
+    seg = seg.trim();
+    if (!seg) return "";
+    const rm = seg.match(/^refine\s+(\w+)$/);
+    return rm
+      ? '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>'
+      : escapeHTML(seg);
+  }).filter(Boolean).join("; ");
+}
+function colourTransition(s) {
+  const m = s.match(TRANS_RE);
+  if (!m) return null;
+  return '<span class="st">' + escapeHTML(m[1]) + '</span> <span class="kw">-&gt;</span> ' +
+    '<span class="st">' + escapeHTML(m[2]) + '</span> <span class="kw">when</span> ' + escapeHTML(m[3]);
+}
+// Colour one line inside a region block.
+function colourRegionLine(s) {
+  if (s === "history") return '<span class="kw">history</span>';
+  const im = s.match(/^initial\s+(\w+)$/);
+  if (im) return '<span class="kw">initial</span> <span class="st">' + escapeHTML(im[1]) + '</span>';
+  const tr = colourTransition(s);
+  if (tr) return tr;
+  const ci = s.indexOf(":");
+  if (ci < 0) return '<span class="err">' + escapeHTML(s) + '</span>';
+  return '<span class="st">' + escapeHTML(s.slice(0, ci).trim()) + '</span>: ' + colourSegs(s.slice(ci + 1));
+}
+
 function fsmPreview() {
   const initial = document.getElementById("fsm-initial").value.trim();
   const statesText = document.getElementById("fsm-states").value;
   const transText = document.getElementById("fsm-transitions").value;
   let html = "";
-  for (const line of statesText.split("\n")) {
-    const t = line.trim();
-    if (!t) continue;
+  for (const ent of splitStateEntries(statesText)) {
+    const t = ent.head;
     const ci = t.indexOf(":");
     if (ci < 0) { html += '<span class="err">' + escapeHTML(t) + " — needs `Name: …`</span>\n"; continue; }
     const nm = t.slice(0, ci).trim();
     const tag = nm === initial ? ' <span class="kw">(initial)</span>' : "";
-    const rest = t.slice(ci + 1).trim();
-    const body = rest.split(";").map(seg => {
-      seg = seg.trim();
-      if (!seg) return "";
-      const rm = seg.match(/^refine\s+(\w+)$/);
-      return rm
-        ? '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>'
-        : escapeHTML(seg);
-    }).filter(Boolean).join("; ");
-    html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + body + "\n";
+    html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + colourSegs(t.slice(ci + 1));
+    if (ent.block != null) {
+      html += ' <span class="kw">{</span>\n';
+      for (const raw of ent.block.split("\n")) {
+        const s = raw.trim();
+        if (s) html += '  ' + colourRegionLine(s) + "\n";
+      }
+      html += '<span class="kw">}</span>';
+    }
+    html += "\n";
   }
   for (const line of transText.split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    const m = t.match(/^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/);
-    if (!m) { html += '<span class="err">' + escapeHTML(t) + " — needs `From -> To when guard`</span>\n"; continue; }
-    html += '<span class="st">' + escapeHTML(m[1]) + '</span> <span class="kw">-&gt;</span> ' +
-      '<span class="st">' + escapeHTML(m[2]) + '</span> <span class="kw">when</span> ' + escapeHTML(m[3]) + "\n";
+    const tr = colourTransition(t);
+    html += tr ? tr + "\n"
+      : '<span class="err">' + escapeHTML(t) + " — needs `From -> To when guard`</span>\n";
   }
   document.getElementById("fsm-preview").innerHTML = html || '<span style="color:#888">preview…</span>';
 }
