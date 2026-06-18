@@ -631,6 +631,16 @@ pub fn cc_available() -> bool {
     find_compiler().is_some()
 }
 
+/// A human-readable description of the C compiler `openlustre doctor` found
+/// (e.g. `gcc` or `MSVC (cl via vcvars64)`), or `None` if none is available.
+pub(crate) fn compiler_description() -> Option<String> {
+    match find_compiler()? {
+        CompilerKind::Posix(name) => Some(name.to_string()),
+        #[cfg(windows)]
+        CompilerKind::Msvc(_) => Some("MSVC (cl via vcvars64)".to_string()),
+    }
+}
+
 /// Compile C sources that already live in `dir` into `dir/<exe_name>`,
 /// using a POSIX-style compiler from PATH or MSVC via vcvars64 — the same
 /// discovery the scenario harness uses. `which` restricts the choice

@@ -243,6 +243,26 @@ verification burden the qualified tool would otherwise discharge.
 
 ## 6. What closed recently
 
+### 2026-06-18 — dependency detection & documentation (`openlustre doctor`)
+
+The optional tools OpenLustre can use (a C compiler, Kind 2, Docker) are now
+**documented with the functionality each unlocks, and detected at runtime** —
+the installer ships the manifest and a one-click checker rather than bundling
+third-party installers.
+
+* **`openlustre doctor`** reports, for each optional dependency, whether it is
+  present and what it enables: a **C compiler** (Compile C-Lite, debug run,
+  dual-backend equivalence), **Kind 2** (contract proof / Verify tab), and
+  **Docker** (the `clite-emulate` emulated-target backend). It distinguishes
+  *installed* from *ready* — e.g. "Docker CLI present, but the daemon is not
+  reachable" — and prints how to enable each missing one. The core
+  design→check→simulate→generate workflow needs none of them.
+* **`DEPENDENCIES.md`** documents the same as a table (unlocks / needed-for /
+  how-to-get) and is shipped by the installer; the Windows installer adds a
+  **Check Environment** Start-Menu shortcut that runs `openlustre doctor`.
+* Verified live: `doctor` correctly reports MSVC present, Kind 2 absent, and
+  Docker (29.5.3, daemon running) on this machine.
+
 ### 2026-06-18 — full-system arm64 emulation (`clite-emulate --system`)
 
 Extends the emulation backend from qemu-user to a **real booted kernel/board**:
