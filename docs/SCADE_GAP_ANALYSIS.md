@@ -243,6 +243,26 @@ verification burden the qualified tool would otherwise discharge.
 
 ## 6. What closed recently
 
+### 2026-06-18 — cruise-control example + blank-by-default workspaces
+
+* **Empty by default.** The default/welcome workspace and *opening a fresh
+  folder* now open **blank** — no `Heartbeat` starter operator (the user adds
+  their own or opens an example). `New Workspace` was already empty; `studio
+  serve <dir>` keeps a starter only for the test fixtures. (welcome / open
+  seeding flipped to `empty_project`; the welcome test now asserts a blank
+  project with the stdlib palette still merged.)
+* **Worked example: cruise control** (`examples/cruise_control/`). A
+  `CruiseControl(speed, set_cruise_on, brake, turn_cruise_off, increase_by_one)
+  -> (cruise_active, target_speed)` operator driven by an owned **Off ⇄ On**
+  state machine — engage captures the road speed as the set-point, `increase_by_one`
+  raises it, `brake`/`turn_cruise_off` disengage. Driven through the whole loop:
+  it **typechecks clean** (the Lustre is correct), **simulates** with correct
+  cruise behavior, and its **C-Lite, compiled and run on the same input vector,
+  produces the identical trace** — model and compiled code agree cell-for-cell.
+  `tests/cruise_control.rs` generates the shipped `.wksc` + verifies typecheck +
+  sim + emission; the compiled-vs-model match was confirmed with MSVC on the
+  `scenarios/drive.csv` vector.
+
 ### 2026-06-18 — dependency detection & documentation (`openlustre doctor`)
 
 The optional tools OpenLustre can use (a C compiler, Kind 2, Docker) are now

@@ -151,3 +151,7 @@ path = "mcdc.rs"
 [[test]]
 name = "composite_constants"
 path = "composite_constants.rs"
+
+[[test]]
+name = "cruise_control"
+path = "cruise_control.rs"

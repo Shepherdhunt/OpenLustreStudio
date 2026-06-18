@@ -1,0 +1,245 @@
+{
+  "name": "cruise_control",
+  "packages": [
+    {
+      "name": "user",
+      "types": [],
+      "constants": [],
+      "nodes": [
+        {
+          "name": "CruiseControl",
+          "kind": "Operator",
+          "inputs": [
+            {
+              "name": "speed",
+              "ty": {
+                "kind": "Int32"
+              }
+            },
+            {
+              "name": "set_cruise_on",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "brake",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "turn_cruise_off",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "increase_by_one",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "cruise_active",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "target_speed",
+              "ty": {
+                "kind": "Int32"
+              }
+            }
+          ],
+          "locals": [],
+          "equations": [],
+          "contract": null,
+          "diagram": {
+            "notes": null
+          }
+        }
+      ],
+      "contracts": [],
+      "imported_operators": [],
+      "state_machines": [
+        {
+          "name": "Cruise",
+          "inputs": [
+            {
+              "name": "speed",
+              "ty": {
+                "kind": "Int32"
+              }
+            },
+            {
+              "name": "set_cruise_on",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "brake",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "turn_cruise_off",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "increase_by_one",
+              "ty": {
+                "kind": "Bool"
+              }
+            }
+          ],
+          "outputs": [
+            {
+              "name": "cruise_active",
+              "ty": {
+                "kind": "Bool"
+              }
+            },
+            {
+              "name": "target_speed",
+              "ty": {
+                "kind": "Int32"
+              }
+            }
+          ],
+          "locals": [],
+          "initial_state": "Off",
+          "states": [
+            {
+              "name": "Off",
+              "equations": [
+                {
+                  "lhs": [
+                    "cruise_active"
+                  ],
+                  "rhs": {
+                    "expr": "Const",
+                    "lit": {
+                      "lit": "Bool",
+                      "value": false
+                    }
+                  }
+                },
+                {
+                  "lhs": [
+                    "target_speed"
+                  ],
+                  "rhs": {
+                    "expr": "Var",
+                    "name": "speed"
+                  }
+                }
+              ],
+              "transitions": [
+                {
+                  "guard": {
+                    "expr": "Var",
+                    "name": "set_cruise_on"
+                  },
+                  "target": "On"
+                }
+              ],
+              "regions": [],
+              "refines": null
+            },
+            {
+              "name": "On",
+              "equations": [
+                {
+                  "lhs": [
+                    "cruise_active"
+                  ],
+                  "rhs": {
+                    "expr": "Const",
+                    "lit": {
+                      "lit": "Bool",
+                      "value": true
+                    }
+                  }
+                },
+                {
+                  "lhs": [
+                    "target_speed"
+                  ],
+                  "rhs": {
+                    "expr": "Arrow",
+                    "init": {
+                      "expr": "Var",
+                      "name": "speed"
+                    },
+                    "body": {
+                      "expr": "Binary",
+                      "op": "Add",
+                      "lhs": {
+                        "expr": "Pre",
+                        "arg": {
+                          "expr": "Var",
+                          "name": "target_speed"
+                        }
+                      },
+                      "rhs": {
+                        "expr": "IfThenElse",
+                        "cond": {
+                          "expr": "Var",
+                          "name": "increase_by_one"
+                        },
+                        "then_branch": {
+                          "expr": "Const",
+                          "lit": {
+                            "lit": "Int",
+                            "value": 1
+                          }
+                        },
+                        "else_branch": {
+                          "expr": "Const",
+                          "lit": {
+                            "lit": "Int",
+                            "value": 0
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ],
+              "transitions": [
+                {
+                  "guard": {
+                    "expr": "Var",
+                    "name": "brake"
+                  },
+                  "target": "Off"
+                },
+                {
+                  "guard": {
+                    "expr": "Var",
+                    "name": "turn_cruise_off"
+                  },
+                  "target": "Off"
+                }
+              ],
+              "regions": [],
+              "refines": null
+            }
+          ],
+          "contract": null,
+          "owner": "CruiseControl"
+        }
+      ]
+    }
+  ],
+  "main": "CruiseControl",
+  "includes": []
+}
