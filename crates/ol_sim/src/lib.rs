@@ -1555,6 +1555,12 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
             bits,
             frac,
         },
+        // Divide: rescale the numerator by frac before the integer divide so the
+        // quotient stays in Q-format. i64 intermediate, truncates toward zero —
+        // identical to the generated `(intN)(((int64_t)a << frac) / b)`.
+        (BinOp::Div, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) if b != 0 => {
+            Fixed { stored: narrow_fixed(signed, bits, a.wrapping_shl(frac) / b), signed, bits, frac }
+        }
         (BinOp::Lt, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a < b),
         (BinOp::Le, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a <= b),
         (BinOp::Gt, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a > b),
