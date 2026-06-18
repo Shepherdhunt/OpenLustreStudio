@@ -974,11 +974,26 @@ fn array_len_of(expr: &Expr, ctx: &EmitCtx) -> Option<u32> {
     }
 }
 
-/// Best-effort declared type of a simple lvalue expression (var or field),
-/// enough for [`array_len_of`] to resolve record-of-array operands.
+/// Best-effort static type of an expression — enough for [`array_len_of`] to
+/// resolve record-of-array operands and for the fixed-point cast/multiply
+/// emitter to recover an operand's Q-format. Returns `None` when the type
+/// cannot be determined locally (the caller then emits the plain form).
 fn expr_type(expr: &Expr, ctx: &EmitCtx) -> Option<Type> {
     match expr {
-        Expr::Var { name } => ctx.types.get(name).cloned(),
+        Expr::Const { lit } => Some(match lit {
+            Literal::Bool { .. } => Type::Bool,
+            Literal::Int { .. } => Type::Int64,
+            Literal::Float { .. } => Type::Float64,
+            Literal::Char { .. } => Type::Char,
+        }),
+        Expr::Var { name } => ctx.types.get(name).cloned().or_else(|| {
+            ctx.project
+                .packages
+                .iter()
+                .flat_map(|p| p.constants.iter())
+                .find(|c| &c.name == name)
+                .map(|c| c.ty.clone())
+        }),
         Expr::Field { base, field } => {
             if let Some(Type::Named { name }) = expr_type(base, ctx) {
                 let fields = record_fields(&name, ctx.project)?;
@@ -986,7 +1001,67 @@ fn expr_type(expr: &Expr, ctx: &EmitCtx) -> Option<Type> {
             }
             None
         }
+        Expr::Index { base, .. } => match expr_type(base, ctx)? {
+            Type::Array { elem, .. } => Some(*elem),
+            _ => None,
+        },
+        Expr::Cast { to, .. } => Some(to.clone()),
+        Expr::Unary { op, arg } => match op {
+            UnaryOp::Not => Some(Type::Bool),
+            UnaryOp::Neg => expr_type(arg, ctx),
+        },
+        Expr::Binary { op, lhs, .. } => match op {
+            BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies | BinOp::Eq | BinOp::Neq
+            | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => Some(Type::Bool),
+            // Arithmetic / bitwise take the (matching) operand type.
+            _ => expr_type(lhs, ctx),
+        },
+        Expr::Pre { arg } => expr_type(arg, ctx),
+        Expr::Arrow { body, .. } => expr_type(body, ctx),
+        Expr::IfThenElse { then_branch, .. } => expr_type(then_branch, ctx),
+        Expr::When { arg, .. } => expr_type(arg, ctx),
+        Expr::Merge { on_true, .. } => expr_type(on_true, ctx),
+        Expr::Intrinsic { .. } => Some(Type::Float64),
+        Expr::Call { node, .. } => ctx
+            .project
+            .all_nodes()
+            .find(|n| &n.name == node)
+            .filter(|n| n.outputs.len() == 1)
+            .map(|n| n.outputs[0].ty.clone()),
         _ => None,
+    }
+}
+
+/// C expression for a `numeric_cast`, honoring fixed-point scaling so the
+/// generated code matches the IR simulator cell-for-cell. `src` is the operand's
+/// best-effort static type (`None` ⇒ treat an into-fixed source as integer).
+fn emit_cast_expr(to: &Type, src: Option<&Type>, a: &str) -> String {
+    match (to, src) {
+        // Into fixed: rescale the source into the backing integer.
+        (Type::Fixed { frac, .. }, src) => {
+            let store = to.c_name();
+            match src {
+                Some(Type::Fixed { frac: from, .. }) if from > frac => {
+                    format!("(({store})(((int64_t)({a})) >> {}))", from - frac)
+                }
+                Some(Type::Fixed { frac: from, .. }) => {
+                    format!("(({store})(((int64_t)({a})) << {}))", frac - from)
+                }
+                Some(t) if t.is_float() => {
+                    format!("(({store})round((double)({a}) * (double)(1LL << {frac})))")
+                }
+                _ => format!("(({store})(((int64_t)({a})) << {frac}))"),
+            }
+        }
+        // Out of fixed: exact divide to float, truncate-toward-zero to integer.
+        (t, Some(Type::Fixed { frac, .. })) if t.is_float() => {
+            format!("(({})((double)({a}) / (double)(1LL << {frac})))", t.c_name())
+        }
+        (t, Some(Type::Fixed { frac, .. })) if t.is_integer() => {
+            format!("(({})(((int64_t)({a})) / ((int64_t)1 << {frac})))", t.c_name())
+        }
+        // Plain numeric cast.
+        _ => format!("(({}){a})", to.c_name()),
     }
 }
 
@@ -1044,8 +1119,9 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
         }
         Expr::Var { name } => (vec![], ctx.scope.ref_var(name)),
         Expr::Cast { to, arg } => {
+            let src = expr_type(arg, ctx);
             let (s, a) = lower_anf(arg, ctx);
-            (s, format!("(({}){a})", to.c_name()))
+            (s, emit_cast_expr(to, src.as_ref(), &a))
         }
         Expr::Intrinsic { func, args } => {
             // float64-only intrinsics map to the double <math.h> functions.
@@ -1070,6 +1146,18 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let (mut s, l) = lower_anf(lhs, ctx);
             let (sr, r) = lower_anf(rhs, ctx);
             s.extend(sr);
+            // Fixed-point multiply: i64 intermediate then `>> frac`, narrowed by
+            // the storage cast — identical to the simulator's stored-value op.
+            // (Add/sub/compare are plain integer ops on the stored value.)
+            if *op == BinOp::Mul {
+                if let Some(Type::Fixed { signed, bits, frac }) = expr_type(lhs, ctx) {
+                    let store = Type::Fixed { signed, bits, frac }.c_name();
+                    return (
+                        s,
+                        format!("(({store})(((int64_t)({l}) * (int64_t)({r})) >> {frac}))"),
+                    );
+                }
+            }
             let sym = match op {
                 BinOp::And => "&&",
                 BinOp::Or => "||",

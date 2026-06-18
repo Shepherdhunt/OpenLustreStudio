@@ -155,3 +155,7 @@ path = "composite_constants.rs"
 [[test]]
 name = "cruise_control"
 path = "cruise_control.rs"
+
+[[test]]
+name = "fixed_point"
+path = "fixed_point.rs"

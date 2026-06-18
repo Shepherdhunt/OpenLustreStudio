@@ -18,6 +18,14 @@ pub enum Type {
     Uint64,
     Float32,
     Float64,
+    /// Fixed-point (Q-format): the real value `x` is stored as the integer
+    /// `round(x * 2^frac)` in a `bits`-wide integer, signed or unsigned. Surface
+    /// syntax `sfix<bits>_<frac>` / `ufix<bits>_<frac>` (e.g. `sfix32_16`).
+    /// `bits` is 8/16/32/64 so the store maps to a `<stdint.h>` integer;
+    /// add/sub/compare are integer ops on the stored value, multiply is
+    /// `(intN)(((int64_t)a * b) >> frac)`, and casts to/from int/float rescale.
+    /// Lustre / Kind 2 view it as its underlying integer.
+    Fixed { signed: bool, bits: u32, frac: u32 },
     /// A character (SCADE `char`). Stored as a byte; a string constant is an
     /// `Array { elem: Char, len }`. Lustre has no char, so it views as `int`.
     Char,
@@ -70,6 +78,33 @@ impl Type {
         matches!(self, Type::Float32 | Type::Float64)
     }
 
+    pub fn is_fixed(&self) -> bool {
+        matches!(self, Type::Fixed { .. })
+    }
+
+    /// The integer storage type backing a fixed-point type — `Int{N}` when
+    /// signed, `Uint{N}` when unsigned. `None` for non-fixed types or an
+    /// unsupported `bits` (only 8/16/32/64 are storable). The Q-format value
+    /// lives in this integer, so fixed add/sub/compare reduce to integer ops on
+    /// it and the C-Lite emitter declares variables with its `c_name`.
+    pub fn fixed_storage(&self) -> Option<Type> {
+        if let Type::Fixed { signed, bits, .. } = self {
+            Some(match (signed, bits) {
+                (true, 8) => Type::Int8,
+                (true, 16) => Type::Int16,
+                (true, 32) => Type::Int32,
+                (true, 64) => Type::Int64,
+                (false, 8) => Type::Uint8,
+                (false, 16) => Type::Uint16,
+                (false, 32) => Type::Uint32,
+                (false, 64) => Type::Uint64,
+                _ => return None,
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn is_bool(&self) -> bool {
         matches!(self, Type::Bool)
     }
@@ -83,6 +118,8 @@ impl Type {
             Type::Float32 | Type::Float64 => "real".into(),
             // Lustre has no char; a char is viewed as a (small) integer.
             Type::Char => "int".into(),
+            // Fixed-point proves over its stored integer value.
+            Type::Fixed { .. } => "int".into(),
             Type::Array { elem, len } => format!("{}^{}", elem.lustre_name(), len),
             Type::Named { name } => name.clone(),
         }
@@ -102,6 +139,11 @@ impl Type {
             Type::Float32 => "float".into(),
             Type::Float64 => "double".into(),
             Type::Char => "char".into(),
+            // Fixed-point is stored in (and emitted as) its backing integer.
+            Type::Fixed { .. } => self
+                .fixed_storage()
+                .map(|t| t.c_name())
+                .unwrap_or_else(|| "int32_t".to_string()),
             Type::Array { elem, .. } => elem.c_name(),
             Type::Named { name } => name.clone(),
         }

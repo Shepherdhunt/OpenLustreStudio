@@ -21,6 +21,11 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// Fixed-point value: the Q-format stored integer `round(real·2^frac)` plus
+    /// its format. Self-describing so the dynamic evaluator applies fixed
+    /// semantics (notably multiply's `>> frac`) and casts without a separate
+    /// type context. Add/sub/compare reduce to integer ops on `stored`.
+    Fixed { stored: i64, signed: bool, bits: u32, frac: u32 },
     Tuple(Vec<Value>),
     /// Record value, keyed by field name. Field order follows the declared
     /// schema in the producing record type.
@@ -61,6 +66,9 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => f.to_string(),
+            // The stored integer is what the generated C prints for the backing
+            // `intN`, so traces stay byte-identical across the two backends.
+            Value::Fixed { stored, .. } => stored.to_string(),
             Value::Tuple(items) => items
                 .iter()
                 .map(|v| v.to_csv())
@@ -448,6 +456,13 @@ fn default_value(ty: &Type, project: &Project) -> Value {
         | Type::Uint64 => Value::Int(0),
         // A char carries as an integer byte; its zero value is the NUL byte.
         Type::Char => Value::Int(0),
+        // Fixed-point zero: real 0.0 stores as integer 0.
+        Type::Fixed { signed, bits, frac } => Value::Fixed {
+            stored: 0,
+            signed: *signed,
+            bits: *bits,
+            frac: *frac,
+        },
         Type::Array { elem, len } => {
             Value::Array((0..*len).map(|_| default_value(elem, project)).collect())
         }
@@ -527,6 +542,19 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
             }
             Ok(Value::Array(vals))
         }
+        // Fixed-point crosses the CSV boundary as its stored integer (the same
+        // form `to_csv` emits and the generated C `intN` reads), so node I/O of
+        // a fixed type round-trips and matches the compiled driver.
+        Type::Fixed { signed, bits, frac } => raw
+            .trim()
+            .parse::<i64>()
+            .map(|i| Value::Fixed {
+                stored: narrow_fixed(*signed, *bits, i),
+                signed: *signed,
+                bits: *bits,
+                frac: *frac,
+            })
+            .map_err(|_| ()),
         _ => Err(()),
     }
 }
@@ -604,6 +632,45 @@ fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
         (Type::Float64, Value::Float(f)) => Value::Float(f),
         (t, Value::Int(i)) if t.is_integer() => Value::Int(narrow_int(t, i)),
         (t, Value::Float(f)) if t.is_integer() => Value::Int(narrow_int(t, f as i64)),
+        // --- Fixed-point casts (Q-format: stored == round(real·2^frac)) -------
+        // Into fixed: rescale the source into the backing integer, then wrap to
+        // the storage width (two's complement, matching the C `(intN)` cast).
+        (Type::Fixed { signed, bits, frac }, Value::Int(i)) => Value::Fixed {
+            stored: narrow_fixed(*signed, *bits, i.wrapping_shl(*frac)),
+            signed: *signed,
+            bits: *bits,
+            frac: *frac,
+        },
+        (Type::Fixed { signed, bits, frac }, Value::Float(f)) => Value::Fixed {
+            stored: narrow_fixed(*signed, *bits, (f * 2f64.powi(*frac as i32)).round() as i64),
+            signed: *signed,
+            bits: *bits,
+            frac: *frac,
+        },
+        (Type::Fixed { signed, bits, frac }, Value::Fixed { stored, frac: from, .. }) => {
+            let rescaled = if *frac >= from {
+                stored.wrapping_shl(*frac - from)
+            } else {
+                stored >> (from - *frac)
+            };
+            Value::Fixed {
+                stored: narrow_fixed(*signed, *bits, rescaled),
+                signed: *signed,
+                bits: *bits,
+                frac: *frac,
+            }
+        }
+        // Out of fixed: exact divide to float, truncate-toward-zero to int (the
+        // `int64` division both backends share — see the C-Lite emitter).
+        (Type::Float32, Value::Fixed { stored, frac, .. }) => {
+            Value::Float(((stored as f64 / 2f64.powi(frac as i32)) as f32) as f64)
+        }
+        (Type::Float64, Value::Fixed { stored, frac, .. }) => {
+            Value::Float(stored as f64 / 2f64.powi(frac as i32))
+        }
+        (t, Value::Fixed { stored, frac, .. }) if t.is_integer() => {
+            Value::Int(narrow_int(t, (stored as i128 / (1i128 << frac)) as i64))
+        }
         (t, v) => {
             return Err(SimError::EvalError(format!(
                 "cannot cast {v:?} to {t:?}"
@@ -645,6 +712,21 @@ fn narrow_int(t: &Type, i: i64) -> i64 {
         Type::Uint32 => i as u32 as i64,
         // 64-bit targets keep the i64 carrier's bit pattern unchanged.
         _ => i,
+    }
+}
+
+/// Wrap a fixed-point stored value to its backing integer width (two's
+/// complement), mirroring `narrow_int` for the `(signed, bits)` storage type.
+fn narrow_fixed(signed: bool, bits: u32, v: i64) -> i64 {
+    match (signed, bits) {
+        (true, 8) => v as i8 as i64,
+        (true, 16) => v as i16 as i64,
+        (true, 32) => v as i32 as i64,
+        (false, 8) => v as u8 as i64,
+        (false, 16) => v as u16 as i64,
+        (false, 32) => v as u32 as i64,
+        // 64-bit (and any unsupported width) keeps the i64 carrier unchanged.
+        _ => v,
     }
 }
 
@@ -1275,6 +1357,36 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
         (BinOp::Mul, Float(a), Float(b)) => Float(a * b),
         (BinOp::Div, Float(a), Float(b)) if b != 0.0 => Float(a / b),
+        // --- Fixed-point: integer ops on the stored value (same format on both
+        // sides is guaranteed by the type checker). Eq/Neq are handled by the
+        // generic value-equality arms above. ---------------------------------
+        // Add/sub do NOT re-narrow the intermediate: C promotes and narrows only
+        // at assignment (a no-op for in-range values), so the carriers stay wide
+        // on both sides — keeping nested `(a+b)*c` bit-identical to the emitter.
+        (BinOp::Add, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: a.wrapping_add(b),
+            signed,
+            bits,
+            frac,
+        },
+        (BinOp::Sub, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: a.wrapping_sub(b),
+            signed,
+            bits,
+            frac,
+        },
+        // Multiply: i64 intermediate then `>> frac`, wrapped to the storage
+        // width — identical to the generated `(intN)(((int64_t)a*b) >> frac)`.
+        (BinOp::Mul, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: narrow_fixed(signed, bits, a.wrapping_mul(b) >> frac),
+            signed,
+            bits,
+            frac,
+        },
+        (BinOp::Lt, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a < b),
+        (BinOp::Le, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a <= b),
+        (BinOp::Gt, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a > b),
+        (BinOp::Ge, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a >= b),
         (op, l, r) => {
             return Err(SimError::EvalError(format!(
                 "binary {op:?} not supported on {l:?} and {r:?}"

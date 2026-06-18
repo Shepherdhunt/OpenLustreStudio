@@ -239,6 +239,9 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             let t = if lustre {
                 let f = if to.is_float() { "real_cast" } else { "int_cast" };
                 format!("{f}({a})")
+            } else if let ol_ir::Type::Fixed { signed, bits, frac } = to {
+                // Surface syntax round-trips through the parser's fixed names.
+                format!("{}fix{bits}_{frac}({a})", if *signed { "s" } else { "u" })
             } else {
                 format!("{}({a})", cast_type_name(to))
             };

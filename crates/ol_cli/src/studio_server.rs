@@ -1977,6 +1977,9 @@ fn type_str(t: &ol_ir::Type) -> String {
         Float32 => "float32".into(),
         Float64 => "float64".into(),
         Char => "char".into(),
+        Fixed { signed, bits, frac } => {
+            format!("{}fix{}_{}", if *signed { "s" } else { "u" }, bits, frac)
+        }
         Array { elem, len } => format!("{}[{}]", type_str(elem), len),
         Named { name } => name.clone(),
     }

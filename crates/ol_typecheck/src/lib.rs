@@ -619,25 +619,43 @@ pub fn infer_expr_type(
         }),
         Expr::Cast { to, arg } => {
             let a = infer_expr_type(arg, env, sigs, node, diags, ctx, tctx, None)?;
-            if !tctx.resolve(&a).is_numeric() {
+            let ar = tctx.resolve(&a);
+            // Casts bridge numeric and fixed-point types (both directions);
+            // a fixed operand/target rescales by 2^frac on the way through.
+            if !(ar.is_numeric() || ar.is_fixed()) {
                 diags.push(
                     Diagnostic::error(
                         "E0093",
-                        format!("numeric_cast requires a numeric operand, got {a:?}"),
+                        format!("numeric_cast requires a numeric or fixed-point operand, got {a:?}"),
                     )
                     .with_context(ctx.to_string()),
                 );
                 return None;
             }
-            if !to.is_numeric() {
+            if !(to.is_numeric() || to.is_fixed()) {
                 diags.push(
                     Diagnostic::error(
                         "E0094",
-                        format!("numeric_cast target must be numeric, got {to:?}"),
+                        format!("numeric_cast target must be numeric or fixed-point, got {to:?}"),
                     )
                     .with_context(ctx.to_string()),
                 );
                 return None;
+            }
+            if let Type::Fixed { bits, frac, .. } = to {
+                if to.fixed_storage().is_none() || *frac >= *bits {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0095",
+                            format!(
+                                "invalid fixed-point type {to:?}: `bits` must be 8/16/32/64 and \
+                                 `frac` < `bits`"
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
             }
             Some(to.clone())
         }
@@ -782,7 +800,11 @@ pub fn infer_expr_type(
                     Some(Type::Bool)
                 }
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-                    if !(lr.is_numeric() && rr.is_numeric() && types_compatible(tctx, &l, &r)) {
+                    // Fixed-point orders on its stored integer, so it is ordered
+                    // alongside the plain numeric types (operands must match).
+                    let orderable = (lr.is_numeric() || lr.is_fixed())
+                        && (rr.is_numeric() || rr.is_fixed());
+                    if !(orderable && types_compatible(tctx, &l, &r)) {
                         diags.push(
                             Diagnostic::error(
                                 "E0085",
@@ -797,6 +819,38 @@ pub fn infer_expr_type(
                     Some(Type::Bool)
                 }
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => {
+                    if lr.is_fixed() || rr.is_fixed() {
+                        // Fixed-point arithmetic is integer ops on the stored
+                        // value, so both sides must be the SAME fixed type
+                        // (cast to align a literal or a differing Q-format).
+                        if !(lr.is_fixed() && rr.is_fixed() && types_compatible(tctx, &l, &r)) {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0086",
+                                    format!(
+                                        "fixed-point arithmetic requires matching fixed-point \
+                                         operands, got {l:?} and {r:?} (cast to align formats)"
+                                    ),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                            return None;
+                        }
+                        if matches!(op, BinOp::Div | BinOp::Mod) {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0088",
+                                    format!(
+                                        "fixed-point `{op:?}` is not yet supported (divide and \
+                                         saturation are roadmap); cast to float or integer first"
+                                    ),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                            return None;
+                        }
+                        return Some(l);
+                    }
                     if !(lr.is_numeric() && rr.is_numeric() && types_compatible(tctx, &l, &r)) {
                         diags.push(
                             Diagnostic::error(
