@@ -367,6 +367,15 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/workspace/open") => workspace_open_response(ctx, body),
         ("POST", "/api/workspace/new") => workspace_new_response(ctx, body),
         ("POST", "/api/workspace/save") => workspace_save_response(ctx),
+        ("POST", "/api/workspace/save_as") => workspace_save_as_response(ctx, body),
+        // Filesystem navigator for the in-app Open/Save/New browse UI.
+        ("GET", "/api/fs/list") => match fs_list(&parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        // Native OS file dialog (Windows) for the "Browse…" button; falls back
+        // to the in-app navigator when unavailable.
+        ("GET", "/api/dialog/pick") => dialog_pick_response(&parse_query(query)),
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
@@ -4139,6 +4148,133 @@ fn workspace_list(ctx: &ServerCtx, query: &std::collections::HashMap<String, Str
         "workspaces": found,
     })
     .to_string())
+}
+
+/// Filesystem navigator for the in-app Open/Save/New browse UI: the
+/// subdirectories and workspace files (.wksc/.ols/.yaml/.json) under `path`,
+/// plus the parent for "up". `path=drives` (Windows) lists the drive roots.
+fn fs_list(query: &std::collections::HashMap<String, String>) -> Result<String, String> {
+    let raw = query.get("path").map(String::as_str).unwrap_or("");
+    #[cfg(windows)]
+    if raw == "drives" {
+        let mut dirs = Vec::new();
+        for c in b'A'..=b'Z' {
+            let d = format!("{}:\\", c as char);
+            if std::path::Path::new(&d).exists() {
+                dirs.push(serde_json::json!({ "name": d.clone(), "path": d }));
+            }
+        }
+        return Ok(serde_json::json!({ "path": "drives", "parent": serde_json::Value::Null, "dirs": dirs, "files": [] }).to_string());
+    }
+    let path = if raw.is_empty() { home_dir().join("OpenLustre") } else { PathBuf::from(raw) };
+    let path = if path.is_dir() { path } else { home_dir() };
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+    let rd = std::fs::read_dir(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = match p.file_name().and_then(|s| s.to_str()) {
+            Some(n) if !n.starts_with('.') => n.to_string(),
+            _ => continue,
+        };
+        if p.is_dir() {
+            dirs.push(serde_json::json!({ "name": name, "path": p.display().to_string() }));
+        } else if p
+            .extension()
+            .and_then(|s| s.to_str())
+            .map(|x| ["wksc", "ols", "yaml", "yml", "json"].iter().any(|w| x.eq_ignore_ascii_case(w)))
+            .unwrap_or(false)
+        {
+            files.push(serde_json::json!({ "name": name, "path": p.display().to_string() }));
+        }
+    }
+    dirs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    files.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    // Parent for "up"; null at a filesystem root (the client offers drives on Windows).
+    let parent = path
+        .parent()
+        .map(|p| serde_json::Value::String(p.display().to_string()))
+        .unwrap_or(serde_json::Value::Null);
+    Ok(serde_json::json!({ "path": path.display().to_string(), "parent": parent, "dirs": dirs, "files": files }).to_string())
+}
+
+/// Save the current workspace to a new `.wksc` path and switch to it
+/// ("Save As" / browse-to-save). Carries the named-types file alongside.
+fn workspace_save_as_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let mut path = match req.get("path").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => PathBuf::from(s.trim()),
+        _ => return bad("missing string field `path`"),
+    };
+    if path.extension().is_none() {
+        path.set_extension("wksc");
+    }
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return bad(&e),
+    };
+    // Save As renames the workspace to the new file (its display name follows).
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        project.name = stem.to_string();
+    }
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return bad(&format!("creating {}: {e}", parent.display()));
+        }
+        let _ = std::fs::create_dir_all(parent.join("scenarios"));
+        // Carry the named types over so the saved copy still resolves them.
+        let dst_types = parent.join("types.json");
+        let src_types = ctx.model().parent().unwrap_or(std::path::Path::new(".")).join("types.json");
+        if src_types.exists() && src_types != dst_types {
+            let _ = std::fs::copy(&src_types, &dst_types);
+        }
+    }
+    if let Err(e) = save_raw_path(&path, &project) {
+        return bad(&e);
+    }
+    ctx.switch_workspace(path);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Native OS file dialog (Windows) for the "Browse…" button: `mode` =
+/// open|save|folder. Returns the chosen path, `{cancelled}`, or `{unsupported}`
+/// (off Windows / on error) so the client falls back to the in-app navigator.
+fn dialog_pick_response(query: &std::collections::HashMap<String, String>) -> (u16, &'static str, Vec<u8>) {
+    let mode = query.get("mode").map(String::as_str).unwrap_or("open");
+    let body = match native_pick(mode) {
+        Ok(Some(p)) => serde_json::json!({ "path": p }),
+        Ok(None) => serde_json::json!({ "cancelled": true }),
+        Err(e) => serde_json::json!({ "unsupported": true, "error": e }),
+    };
+    (200, "application/json", body.to_string().into_bytes())
+}
+
+#[cfg(windows)]
+fn native_pick(mode: &str) -> Result<Option<String>, String> {
+    let script = match mode {
+        "open" => "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='OpenLustre workspace|*.wksc;*.ols;*.json|All files|*.*'; $d.Title='Open Workspace'; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}",
+        "save" => "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.SaveFileDialog; $d.Filter='OpenLustre workspace|*.wksc'; $d.DefaultExt='wksc'; $d.Title='Save Workspace As'; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.FileName)}",
+        "folder" => "Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description='New Workspace folder'; if($d.ShowDialog() -eq 'OK'){[Console]::Out.Write($d.SelectedPath)}",
+        other => return Err(format!("unknown dialog mode `{other}`")),
+    };
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", script])
+        .output()
+        .map_err(|e| format!("launching the native dialog: {e}"))?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if path.is_empty() { None } else { Some(path) })
+}
+
+#[cfg(not(windows))]
+fn native_pick(_mode: &str) -> Result<Option<String>, String> {
+    Err("native file dialogs are only available on Windows".into())
 }
 
 /// Open an existing workspace (a `.wksc` file or a workspace folder) and make
