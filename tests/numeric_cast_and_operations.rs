@@ -741,6 +741,61 @@ fn map_and_fold_drop_with_a_typed_result() {
     assert!(body.contains("stateless"), "{body}");
 }
 
+// --- Canvas copy/paste (the /api/edit/paste endpoint) -------------------------
+
+#[test]
+fn paste_clones_equations_and_rewires_internal_references() {
+    let g = start_server_on_workspace("paste");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Calc","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Calc","name":"a","side":"input","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Calc","name":"b","side":"input","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_local", r#"{"node":"Calc","name":"s1","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_local", r#"{"node":"Calc","name":"s2","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Calc","lhs":"s1","body":"a + b"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Calc","lhs":"s2","body":"s1 * 2"}"#);
+
+    // Paste both blocks: s1 references only external inputs; s2 references s1
+    // (a copied local), which must be rewired to the new name.
+    post_ok(port, "/api/edit/paste",
+        r#"{"node":"Calc","dx":24,"dy":24,"items":[
+            {"lhs":["s1"],"body":"a + b","x":10,"y":10},
+            {"lhs":["s2"],"body":"s1 * 2","x":10,"y":70}]}"#);
+
+    let d = get_json(port, "/api/diagram?node=Calc");
+    // Fresh result locals, typed like their originals.
+    let locals: Vec<&str> = d["locals"].as_array().unwrap()
+        .iter().map(|l| l["name"].as_str().unwrap()).collect();
+    assert!(locals.contains(&"s1_2") && locals.contains(&"s2_2"), "{locals:?}");
+    let s2_2 = d["locals"].as_array().unwrap().iter().find(|l| l["name"] == "s2_2").unwrap();
+    assert_eq!(s2_2["type"]["kind"], "Int32");
+
+    // New equations: external refs (a, b) unchanged; the internal s1 → s1_2.
+    let eqs = d["equations"].as_array().unwrap();
+    assert_eq!(eqs[2]["body"], "a + b");
+    assert_eq!(eqs[2]["lhs"], serde_json::json!(["s1_2"]));
+    assert_eq!(eqs[3]["body"], "s1_2 * 2");
+    assert_eq!(eqs[3]["lhs"], serde_json::json!(["s2_2"]));
+
+    // The copies land at the original position plus the paste offset.
+    assert_eq!(d["positions"]["eq2"]["x"], 34.0);
+    assert_eq!(d["positions"]["eq2"]["y"], 34.0);
+
+    // A second paste of the same clipboard makes a third name, no collisions.
+    post_ok(port, "/api/edit/paste",
+        r#"{"node":"Calc","dx":48,"dy":48,"items":[{"lhs":["s1"],"body":"a + b","x":10,"y":10}]}"#);
+    let d = get_json(port, "/api/diagram?node=Calc");
+    let locals: Vec<&str> = d["locals"].as_array().unwrap()
+        .iter().map(|l| l["name"].as_str().unwrap()).collect();
+    assert!(locals.contains(&"s1_3"), "second paste should make s1_3: {locals:?}");
+
+    // Pasting a block whose original no longer exists is a clear error.
+    let (s, body) = request(port, "POST", "/api/edit/paste",
+        r#"{"node":"Calc","items":[{"lhs":["gone"],"body":"a + b","x":0,"y":0}]}"#).unwrap();
+    assert_eq!(s, 400);
+    assert!(body.contains("no longer exists"), "{body}");
+}
+
 // --- Compile C-Lite from the GUI ----------------------------------------------
 
 #[test]

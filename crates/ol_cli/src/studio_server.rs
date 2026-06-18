@@ -335,6 +335,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/remove_equation") => {
             apply_edit_response(ctx, body, edit_remove_equation)
         }
+        ("POST", "/api/edit/paste") => apply_edit_response(ctx, body, edit_paste),
         ("POST", "/api/edit/add_block_call") => add_block_call_response(ctx, body),
         ("GET", "/api/operations") => (
             200,
@@ -1283,6 +1284,127 @@ fn edit_add_equation(project: &mut ol_ir::Project, req: &serde_json::Value) -> R
     let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("body: {e}"))?;
     let node = find_node_mut(project, &node_name)?;
     node.equations.push(ol_ir::Equation { lhs, rhs });
+    Ok(())
+}
+
+/// The declared type of a variable (input, output, or local) in a node.
+fn node_var_type(node: &ol_ir::NodeDef, name: &str) -> Option<ol_ir::Type> {
+    node.inputs
+        .iter()
+        .chain(node.outputs.iter())
+        .find(|p| p.name == name)
+        .map(|p| p.ty.clone())
+        .or_else(|| node.locals.iter().find(|l| l.name == name).map(|l| l.ty.clone()))
+}
+
+/// First free name of the form `base`, `base_2`, `base_3`, … not already in
+/// `taken`; the chosen name is reserved.
+fn fresh_name(base: &str, taken: &mut std::collections::HashSet<String>) -> String {
+    let mut cand = base.to_string();
+    let mut n = 1;
+    while taken.contains(&cand) {
+        n += 1;
+        cand = format!("{base}_{n}");
+    }
+    taken.insert(cand.clone());
+    cand
+}
+
+/// Paste (duplicate) a set of equations into a node — the canvas copy/paste.
+/// Each clipboard item carries the original equation's `lhs` names, `body`
+/// text, and source position; the new copies get fresh result-local names, and
+/// references *among the copied set* are rewired to the new names so a copied
+/// chain stays connected (references to anything outside the set are left as
+/// is — they read the existing signal, or surface as a red unbound pin). The
+/// result types are looked up by name from the live node, so the clipboard
+/// survives index shifts; pasting an equation whose original was deleted is a
+/// clear error rather than a wrong guess.
+fn edit_paste(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let items = req
+        .get("items")
+        .and_then(|v| v.as_array())
+        .ok_or("missing array field `items`")?;
+    if items.is_empty() {
+        return Err("nothing to paste".into());
+    }
+    let dx = req.get("dx").and_then(|v| v.as_f64()).unwrap_or(24.0);
+    let dy = req.get("dy").and_then(|v| v.as_f64()).unwrap_or(24.0);
+
+    let node = find_node_mut(project, &node_name)?;
+    let mut taken: std::collections::HashSet<String> = node
+        .inputs
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(node.outputs.iter().map(|p| p.name.clone()))
+        .chain(node.locals.iter().map(|l| l.name.clone()))
+        .collect();
+
+    struct Plan {
+        lhs: Vec<String>,
+        rhs: ol_ir::Expr,
+        new_locals: Vec<(String, ol_ir::Type)>,
+        x: f64,
+        y: f64,
+    }
+    // Phase 1 — parse, allocate fresh names, record the old→new rename map.
+    let mut rename: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut plans: Vec<Plan> = Vec::new();
+    for it in items {
+        let lhs_arr = it
+            .get("lhs")
+            .and_then(|v| v.as_array())
+            .ok_or("paste item missing array `lhs`")?;
+        let body = it
+            .get("body")
+            .and_then(|v| v.as_str())
+            .ok_or("paste item missing string `body`")?;
+        let x = it.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let y = it.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("paste body `{body}`: {e}"))?;
+        let mut new_lhs = Vec::new();
+        let mut new_locals = Vec::new();
+        for l in lhs_arr {
+            let name = l.as_str().ok_or("paste `lhs` entry must be a string")?;
+            let ty = node_var_type(node, name).ok_or_else(|| {
+                format!("cannot paste: `{name}` no longer exists in `{node_name}`")
+            })?;
+            let newname = fresh_name(name, &mut taken);
+            rename.insert(name.to_string(), newname.clone());
+            new_locals.push((newname.clone(), ty));
+            new_lhs.push(newname);
+        }
+        plans.push(Plan { lhs: new_lhs, rhs, new_locals, x, y });
+    }
+    // Phase 2 — rewrite references across the whole copied set to the new
+    // names (fresh names never collide with existing ones, so order is moot).
+    for p in &mut plans {
+        for (old, new) in &rename {
+            p.rhs.rename_var(old, new);
+        }
+    }
+    // Phase 3 — materialize locals, equations, and offset positions.
+    for p in plans {
+        for (name, ty) in p.new_locals {
+            node.locals.push(ol_ir::Local { name, ty });
+        }
+        let idx = node.equations.len();
+        node.equations.push(ol_ir::Equation { lhs: p.lhs.clone(), rhs: p.rhs });
+        node.diagram.positions.insert(
+            format!("eq{idx}"),
+            ol_ir::NodePos { x: p.x + dx, y: p.y + dy, ..Default::default() },
+        );
+        for (k, name) in p.lhs.iter().enumerate() {
+            node.diagram.positions.insert(
+                name.clone(),
+                ol_ir::NodePos {
+                    x: p.x + dx + 320.0,
+                    y: p.y + dy + (k as f64) * 44.0,
+                    ..Default::default()
+                },
+            );
+        }
+    }
     Ok(())
 }
 

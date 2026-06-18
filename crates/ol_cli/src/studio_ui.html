@@ -209,6 +209,8 @@
   #diagram-host { background: #fff; border: 1px solid #c5c5c5; overflow: auto;
                   flex: 1 1 auto; min-height: 0; }
   #diagram-host.panning { cursor: grabbing; }
+  svg .marquee { fill: rgba(43, 87, 154, 0.08); stroke: #2b579a; stroke-width: 1;
+                 stroke-dasharray: 4 3; pointer-events: none; }
   .diagram-toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0;
                      font-size: 12px; color: #3c3c3c; }
   .zoom-label { margin-left: auto; font-size: 11px; color: #5a5a5a; cursor: pointer;
@@ -724,6 +726,9 @@ const state = {
   // fixed `0 0 W H` viewBox, so model coordinates never change) and a transient
   // pan-drag (middle-button / space-drag scrolls #diagram-host).
   zoom: 1, panning: null,
+  // Rubber-band selection (drag on empty canvas) and the block clipboard
+  // (Ctrl+C/V); pasteSeq cascades repeated pastes so copies don't stack.
+  marquee: null, clipboard: null, pasteSeq: 0,
   sim: { built: false, running: false, values: {} },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
@@ -1348,6 +1353,11 @@ document.addEventListener("keydown", ev => {
     const k = ev.key.toLowerCase();
     if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
     else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
+    // Canvas clipboard — only when something is selected / on the clipboard, so
+    // ordinary text copy/paste elsewhere is untouched.
+    else if (k === "c" && state.selected.length && state.diagramData) { ev.preventDefault(); copySelection(); }
+    else if (k === "x" && state.selected.length && state.diagramData) { ev.preventDefault(); cutSelection(); }
+    else if (k === "v" && state.clipboard && state.diagramData) { ev.preventDefault(); pasteClipboard(); }
     // Canvas zoom — Ctrl +/-/0, matching the View menu.
     else if (k === "=" || ev.key === "+") { ev.preventDefault(); zoomBy(1.25); }
     else if (k === "-" || ev.key === "_") { ev.preventDefault(); zoomBy(0.8); }
@@ -2032,6 +2042,12 @@ function renderDiagram() {
         (a.x + a.w) + ' ' + (a.y + (a.h || DIAG.BOXH) / 2) + ' L ' + state.wireDrag.x + ' ' + state.wireDrag.y + '"/>';
     }
   }
+  // Rubber-band selection rectangle.
+  if (state.marquee && state.marquee.moved) {
+    const mq = state.marquee;
+    svg += '<rect class="marquee" x="' + Math.min(mq.x0, mq.x1) + '" y="' + Math.min(mq.y0, mq.y1) +
+      '" width="' + Math.abs(mq.x1 - mq.x0) + '" height="' + Math.abs(mq.y1 - mq.y0) + '"/>';
+  }
   svg += "</svg>";
   const host = document.getElementById("diagram-host");
   host.innerHTML = svg;
@@ -2148,8 +2164,15 @@ function diagPointerDown(ev) {
   }
   const g = ev.target.closest("g.diag-item");
   if (!g) {
-    // Clicking empty canvas clears the selection.
-    if (ev.button === 0) setSelection(null);
+    // Left-drag on empty canvas is a rubber-band selection; a plain click
+    // (no drag) clears the selection on pointer-up.
+    if (ev.button === 0) {
+      const pt = svgPoint(ev);
+      state.marquee = {
+        x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y, moved: false,
+        additive: ev.shiftKey || ev.ctrlKey || ev.metaKey,
+      };
+    }
     return;
   }
   const id = g.dataset.id;
@@ -2168,6 +2191,15 @@ function diagPointerMove(ev) {
     host.scrollLeft = state.panning.sl - (ev.clientX - state.panning.x0);
     host.scrollTop = state.panning.st - (ev.clientY - state.panning.y0);
     ev.preventDefault();
+    return;
+  }
+  if (state.marquee) {
+    const pt = svgPoint(ev);
+    state.marquee.x1 = pt.x; state.marquee.y1 = pt.y;
+    if (Math.abs(pt.x - state.marquee.x0) + Math.abs(pt.y - state.marquee.y0) > 3) {
+      state.marquee.moved = true;
+    }
+    renderDiagram();
     return;
   }
   if (state.wireDrag) {
@@ -2204,6 +2236,28 @@ async function diagPointerUp(ev) {
   if (state.panning) {
     state.panning = null;
     document.getElementById("diagram-host").classList.remove("panning");
+    return;
+  }
+  if (state.marquee) {
+    const mq = state.marquee;
+    state.marquee = null;
+    if (!mq.moved) { if (!mq.additive) setSelection(null); else renderDiagram(); return; }
+    // Select every selectable box overlapping the rubber-band rectangle.
+    const x0 = Math.min(mq.x0, mq.x1), x1 = Math.max(mq.x0, mq.x1);
+    const y0 = Math.min(mq.y0, mq.y1), y1 = Math.max(mq.y0, mq.y1);
+    const known = new Set(knownVarNames());
+    if (!mq.additive) state.selected = [];
+    for (const id in state.diagPos) {
+      if (!/^eq\d+$/.test(id) && !known.has(id)) continue;
+      const p = state.diagPos[id];
+      const w = p.w || DIAG.EQW, h = p.h || DIAG.BOXH;
+      if (p.x < x1 && p.x + w > x0 && p.y < y1 && p.y + h > y0 && !state.selected.includes(id)) {
+        state.selected.push(id);
+      }
+    }
+    state.selection = state.selected[state.selected.length - 1] || null;
+    renderDiagram();
+    renderProps();
     return;
   }
   if (state.resize) { state.resize = null; saveLayout(); return; }
@@ -2849,7 +2903,19 @@ function setSelection(id, additive) {
 function showCtxMenu(x, y) {
   const m = document.getElementById("ctx-menu");
   const n = state.selected.length;
+  // How many of the selected items are operation blocks (copyable).
+  const eqCount = state.selected.filter(id => /^eq\d+$/.test(id)).length;
   let html = '<div class="ctx-item" onclick="hideCtxMenu()">Properties</div>';
+  if (eqCount) {
+    html += '<div class="ctx-sep"></div>' +
+      '<div class="ctx-item" onclick="hideCtxMenu();copySelection()">Copy' +
+      (eqCount > 1 ? " (" + eqCount + " blocks)" : "") + '</div>';
+  }
+  if (state.clipboard) {
+    html += (eqCount ? "" : '<div class="ctx-sep"></div>') +
+      '<div class="ctx-item" onclick="hideCtxMenu();pasteClipboard()">Paste' +
+      ' (' + state.clipboard.items.length + ')</div>';
+  }
   // Per-box ergonomics on a single selection: text-wrap toggle and a size reset.
   if (n === 1) {
     const p = state.diagPos[state.selected[0]];
@@ -2966,6 +3032,48 @@ async function deleteSelected() {
   state.selection = null;
   wireStatus("deleted " + (vars.length + eqIdx.length) + " item(s) — Ctrl+Z to undo");
   await propsReload();
+}
+
+// --- Canvas clipboard: copy / paste / cut (operation blocks) -----------------
+
+/// Snapshot the selected operation blocks (equations) into the clipboard. Each
+/// item keeps the equation's lhs names, body text, and canvas position; types
+/// are resolved by name server-side at paste time.
+function copySelection() {
+  const d = state.diagramData;
+  if (!d) return;
+  const items = [];
+  for (const id of state.selected) {
+    const m = /^eq(\d+)$/.exec(id);
+    if (!m) continue;
+    const eq = d.equations[+m[1]];
+    if (!eq) continue;
+    const p = state.diagPos[id] || { x: 0, y: 0 };
+    items.push({ lhs: eq.lhs.slice(), body: eq.body, x: p.x, y: p.y });
+  }
+  if (!items.length) { wireStatus("nothing to copy — select an operation block"); return; }
+  state.clipboard = { node: d.node, items };
+  state.pasteSeq = 0;
+  wireStatus("copied " + items.length + " block" + (items.length > 1 ? "s" : "") + " — Ctrl+V to paste");
+}
+
+/// Duplicate the clipboard's blocks into the current operator, cascaded so
+/// repeated pastes don't land on top of each other.
+async function pasteClipboard() {
+  const cb = state.clipboard, d = state.diagramData;
+  if (!cb || !d) return;
+  if (cb.node !== d.node) {
+    wireStatus("paste: the clipboard is from another operator (v1 pastes within one operator)");
+    return;
+  }
+  state.pasteSeq = (state.pasteSeq || 0) + 1;
+  const off = 24 * state.pasteSeq;
+  await postEdit("/api/edit/paste", { node: d.node, items: cb.items, dx: off, dy: off });
+}
+
+async function cutSelection() {
+  copySelection();
+  if (state.clipboard && state.clipboard.items.length) await deleteSelected();
 }
 
 /// The defining equation of a single-output variable, if any.

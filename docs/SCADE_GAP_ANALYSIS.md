@@ -119,9 +119,9 @@ symbols; typed wire labels.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — **zoom/pan landed 2026-06-18** (§6); remaining:
-   orthogonal (Manhattan) wire routing, copy/paste, distinct per-family gate
-   silhouettes (§2).
+4. **Editor polish** (P1/P2) — **zoom/pan and copy/paste + marquee select
+   landed 2026-06-18** (§6); remaining: orthogonal (Manhattan) wire routing and
+   distinct per-family gate silhouettes (§2).
 5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 6. **Automata depth** (P2) — history / signals UI, and richer parallel
@@ -134,7 +134,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
-| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, multi-select + right-click menu + Delete, red invalid-link coding |
+| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, **marquee select + copy/paste of blocks**, multi-select + right-click menu + Delete, red invalid-link coding |
 | Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
@@ -161,7 +161,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
 | ~~P1 — Zoom/pan~~ | Standard | **Landed 2026-06-18**: a fixed `0 0 W H` viewBox painted at `W·zoom × H·zoom`; Ctrl/⌘+wheel (and trackpad pinch) zooms toward the cursor, middle-/Space-drag and scrollbars pan, View ▸ Zoom + Ctrl +/−/0, a click-to-reset % badge; `getScreenCTM().inverse()` makes drag/drop/wire math exact at any zoom. See §6 | done |
-| **P1 — Copy/paste, marquee select** | Standard | Selection-rectangle marquee + clipboard (duplicate via add_operation/add_equation) | Medium |
+| ~~P1 — Copy/paste, marquee select~~ | Standard | **Landed 2026-06-18**: drag on empty canvas for a rubber-band marquee (overlap-selects boxes, Shift/Ctrl adds); Ctrl+C/X/V (and a context menu) copy/cut/paste operation blocks via `/api/edit/paste`, which clones equations with fresh result-local names, rewires references *within* the copied set, looks types up by name (clipboard survives index shifts), and cascades repeated pastes. See §6 | done |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
 | **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
 
@@ -215,6 +215,30 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-18 — canvas copy/paste & marquee select
+
+The second §2 editor-polish slice, building on the zoom/pan transform.
+
+* **Rubber-band selection.** Dragging on empty canvas draws a selection
+  rectangle (model-space, so it's correct at any zoom) and selects every
+  operation/variable box it overlaps; Shift/Ctrl adds to the existing
+  selection, a plain click still clears. A bare click vs. a drag is
+  distinguished by a 3 px threshold.
+* **Block clipboard.** Ctrl+C/Ctrl+X copy/cut the selected operation blocks
+  into an in-session clipboard (also on the right-click menu); Ctrl+V pastes.
+  The clipboard snapshots each equation's `lhs`, body text, and position — not
+  indices — so it survives later edits.
+* **Server `/api/edit/paste`.** One journaled (undoable) edit clones the
+  equations into the operator: each result local gets a fresh name
+  (`s1` → `s1_2` → `s1_3` …), references *among the copied set* are rewired to
+  the new names (a copied chain stays connected) while references outside it
+  are left to resolve against existing signals or surface as red unbound pins,
+  and result types are resolved by name from the live node — pasting a block
+  whose original was deleted is a clear error, not a wrong guess. Repeated
+  pastes cascade by a growing offset. Covered by
+  `paste_clones_equations_and_rewires_internal_references`
+  (tests/numeric_cast_and_operations.rs).
 
 ### 2026-06-18 — canvas zoom & pan
 
