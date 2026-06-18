@@ -29,6 +29,11 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64compatible
 PrivilegesRequiredOverridesAllowed=dialog
 UninstallDisplayName=OpenLustre Studio
+; Brand the wizard, the Add/Remove Programs entry, and (with ChangesAssociations)
+; refresh the shell so associated files pick up the icon immediately.
+SetupIconFile=openlustre.ico
+UninstallDisplayIcon={app}\openlustre.ico
+ChangesAssociations=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -42,17 +47,40 @@ Source: "..\..\target\release\openlustre.exe"; DestDir: "{app}"; \
   Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "openlustre.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; The shortcut every common Windows app has: double-click -> app opens.
 Name: "{group}\OpenLustre Studio"; Filename: "{app}\openlustre.exe"; \
   Parameters: "studio launch"; WorkingDir: "{app}"; \
+  IconFilename: "{app}\openlustre.ico"; \
   Comment: "Graphical Lustre/CoCoSpec modeling IDE"
 Name: "{group}\OpenLustre Studio (CLI here)"; Filename: "{cmd}"; \
   Parameters: "/K cd /D ""%USERPROFILE%\OpenLustre"" && ""{app}\openlustre.exe"" --help"; \
   Comment: "Command prompt with the openlustre CLI"
 Name: "{autodesktop}\OpenLustre Studio"; Filename: "{app}\openlustre.exe"; \
-  Parameters: "studio launch"; WorkingDir: "{app}"; Tasks: desktopicon
+  Parameters: "studio launch"; WorkingDir: "{app}"; \
+  IconFilename: "{app}\openlustre.ico"; Tasks: desktopicon
+
+[Registry]
+; Associate OpenLustre model files with the Studio: double-click a `.wksc`
+; workspace or a `.ols` model and it opens in the Studio (resolve_workspace
+; serves a file path directly). `.lus` is intentionally not claimed (it is an
+; import-only format shared with other Lustre tooling) and `.json` is too
+; generic to hijack. HKA = per-machine on an admin install, per-user otherwise.
+; The extension keys delete only our own value on uninstall; the ProgID key is
+; removed whole.
+Root: HKA; Subkey: "Software\Classes\.wksc"; ValueType: string; ValueName: ""; \
+  ValueData: "OpenLustreStudio.Model"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\.ols"; ValueType: string; ValueName: ""; \
+  ValueData: "OpenLustreStudio.Model"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\OpenLustreStudio.Model"; ValueType: string; \
+  ValueName: ""; ValueData: "OpenLustre Studio model"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\OpenLustreStudio.Model\DefaultIcon"; \
+  ValueType: string; ValueName: ""; ValueData: "{app}\openlustre.ico,0"
+Root: HKA; Subkey: "Software\Classes\OpenLustreStudio.Model\shell\open\command"; \
+  ValueType: string; ValueName: ""; \
+  ValueData: """{app}\openlustre.exe"" studio launch ""%1"""
 
 [Run]
 Filename: "{app}\openlustre.exe"; Parameters: "studio launch"; \
