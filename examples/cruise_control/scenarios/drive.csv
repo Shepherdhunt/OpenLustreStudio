@@ -1,0 +1,8 @@
+speed,set_cruise_on,brake,turn_cruise_off,increase_by_one
+50,false,false,false,false
+55,true,false,false,false
+60,false,false,false,false
+62,false,false,false,true
+64,false,false,false,true
+66,false,true,false,false
+70,false,false,false,false
