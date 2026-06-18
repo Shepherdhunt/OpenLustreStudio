@@ -41,12 +41,14 @@ fn fixed_model() -> Project {
             Port { name: "owide".into(), ty: Type::Int32 },
             Port { name: "as_real".into(), ty: Type::Float64 },
             Port { name: "pick".into(), ty: Type::Int32 },
+            Port { name: "oquot".into(), ty: Type::Int32 },
         ],
         locals: vec![
             Local { name: "fa".into(), ty: fix(true, 16, 8) },
             Local { name: "fb".into(), ty: fix(true, 16, 8) },
             Local { name: "sum".into(), ty: fix(true, 16, 8) },
             Local { name: "prod".into(), ty: fix(true, 16, 8) },
+            Local { name: "quot".into(), ty: fix(true, 16, 8) },
             Local { name: "wide".into(), ty: fix(true, 32, 16) },
         ],
         equations: vec![
@@ -54,12 +56,14 @@ fn fixed_model() -> Project {
             Equation { lhs: vec!["fb".into()], rhs: e("sfix16_8(b)") },
             Equation { lhs: vec!["sum".into()], rhs: e("fa + fb") },
             Equation { lhs: vec!["prod".into()], rhs: e("fa * fb") },
+            Equation { lhs: vec!["quot".into()], rhs: e("fa / fb") },
             Equation { lhs: vec!["wide".into()], rhs: e("sfix32_16(fa)") },
             Equation { lhs: vec!["osum".into()], rhs: e("int32(sum)") },
             Equation { lhs: vec!["oprod".into()], rhs: e("int32(prod)") },
             Equation { lhs: vec!["owide".into()], rhs: e("int32(wide)") },
             Equation { lhs: vec!["as_real".into()], rhs: e("float64(prod)") },
             Equation { lhs: vec!["pick".into()], rhs: e("if fa > fb then a else b") },
+            Equation { lhs: vec!["oquot".into()], rhs: e("int32(quot)") },
         ],
         contract: None,
         diagram: Default::default(),
@@ -119,15 +123,15 @@ fn fixed_point_simulates_with_exact_values() {
     let trace = sim.run_csv("a,b\n3,2\n5,-4\n0,7\n-6,-1\n").unwrap();
     let csv = trace.to_csv();
     let lines: Vec<&str> = csv.trim().lines().collect();
-    assert_eq!(lines[0], "cycle,osum,oprod,owide,as_real,pick");
-    // (3,2):  sum=5, prod=6, wide→3, real=6.0, fa>fb ⇒ a=3
-    assert_eq!(lines[1], "0,5,6,3,6,3");
-    // (5,-4): sum=1, prod=-20, wide→5, real=-20.0, fa>fb ⇒ a=5
-    assert_eq!(lines[2], "1,1,-20,5,-20,5");
-    // (0,7):  sum=7, prod=0, wide→0, real=0.0, !(fa>fb) ⇒ b=7
-    assert_eq!(lines[3], "2,7,0,0,0,7");
-    // (-6,-1): sum=-7, prod=6, wide→-6, real=6.0, !(fa>fb) ⇒ b=-1
-    assert_eq!(lines[4], "3,-7,6,-6,6,-1");
+    assert_eq!(lines[0], "cycle,osum,oprod,owide,as_real,pick,oquot");
+    // (3,2):  sum=5, prod=6, wide→3, real=6.0, fa>fb ⇒ a=3, 3/2 → 1.5 trunc 1
+    assert_eq!(lines[1], "0,5,6,3,6,3,1");
+    // (5,-4): sum=1, prod=-20, wide→5, real=-20.0, fa>fb ⇒ a=5, 5/-4 → -1.25 trunc -1
+    assert_eq!(lines[2], "1,1,-20,5,-20,5,-1");
+    // (0,7):  sum=7, prod=0, wide→0, real=0.0, !(fa>fb) ⇒ b=7, 0/7 → 0
+    assert_eq!(lines[3], "2,7,0,0,0,7,0");
+    // (-6,-1): sum=-7, prod=6, wide→-6, real=6.0, !(fa>fb) ⇒ b=-1, -6/-1 → 6
+    assert_eq!(lines[4], "3,-7,6,-6,6,-1,6");
 }
 
 // --- The hard guarantee: IR sim and compiled C agree cell-for-cell -----------
@@ -181,23 +185,35 @@ fn project_json(v: serde_json::Value) -> Project {
 }
 
 #[test]
-fn fixed_division_is_rejected_as_roadmap() {
+fn fixed_modulo_is_rejected_but_divide_is_allowed() {
     let f = || serde_json::json!({"kind": "Fixed", "signed": true, "bits": 16, "frac": 8});
-    let report = ol_typecheck::check_project(&project_json(serde_json::json!({
-        "name": "d",
-        "packages": [{"name": "user", "nodes": [{
-            "name": "D", "kind": "Function",
-            "inputs": [{"name": "x", "ty": f()}, {"name": "y", "ty": f()}],
-            "outputs": [{"name": "q", "ty": f()}],
-            "equations": [{"lhs": ["q"], "rhs": {"expr": "Binary", "op": "Div",
-                "lhs": {"expr": "Var", "name": "x"}, "rhs": {"expr": "Var", "name": "y"}}}]
-        }]}]
-    })));
+    let model = |op: &str| {
+        serde_json::json!({
+            "name": "d",
+            "packages": [{"name": "user", "nodes": [{
+                "name": "D", "kind": "Function",
+                "inputs": [{"name": "x", "ty": f()}, {"name": "y", "ty": f()}],
+                "outputs": [{"name": "q", "ty": f()}],
+                "equations": [{"lhs": ["q"], "rhs": {"expr": "Binary", "op": op,
+                    "lhs": {"expr": "Var", "name": "x"}, "rhs": {"expr": "Var", "name": "y"}}}]
+            }]}]
+        })
+    };
+    // Modulo on a fixed type is rejected (E0088) — it has no Q-format meaning.
+    let modr = ol_typecheck::check_project(&project_json(model("Mod")));
     assert!(
-        report.diagnostics.iter().any(|d| d.code == "E0088"),
-        "expected E0088 (fixed divide roadmap), got: {:?}",
-        report.diagnostics
+        modr.diagnostics.iter().any(|d| d.code == "E0088"),
+        "expected E0088 for fixed modulo, got: {:?}",
+        modr.diagnostics
     );
+    // Divide is now supported: no E0088 and the operator type-checks clean.
+    let divr = ol_typecheck::check_project(&project_json(model("Div")));
+    assert!(
+        divr.diagnostics.iter().all(|d| d.code != "E0088"),
+        "fixed divide must be accepted, got: {:?}",
+        divr.diagnostics
+    );
+    assert!(!has_error(&divr), "fixed divide should type-check clean: {:?}", divr.diagnostics);
 }
 
 #[test]
@@ -254,4 +270,6 @@ fn generated_c_scales_fixed_casts_and_multiply() {
     assert!(src.contains("/ ((int64_t)1 << 8)"), "fixed→int truncation missing:\n{src}");
     // Fixed multiply uses an int64 intermediate then `>> frac`.
     assert!(src.contains("(int64_t)") && src.contains(">> 8"), "fixed multiply missing:\n{src}");
+    // Fixed divide shifts the numerator left by frac, then an int64 divide.
+    assert!(src.contains("<< 8) / (int64_t)"), "fixed divide missing:\n{src}");
 }

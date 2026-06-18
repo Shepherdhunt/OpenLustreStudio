@@ -836,14 +836,13 @@ pub fn infer_expr_type(
                             );
                             return None;
                         }
-                        if matches!(op, BinOp::Div | BinOp::Mod) {
+                        if matches!(op, BinOp::Mod) {
                             diags.push(
                                 Diagnostic::error(
                                     "E0088",
-                                    format!(
-                                        "fixed-point `{op:?}` is not yet supported (divide and \
-                                         saturation are roadmap); cast to float or integer first"
-                                    ),
+                                    "fixed-point modulo is not supported; cast to an integer \
+                                     type first"
+                                        .to_string(),
                                 )
                                 .with_context(ctx.to_string()),
                             );

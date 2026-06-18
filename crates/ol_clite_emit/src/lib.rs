@@ -1146,16 +1146,20 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let (mut s, l) = lower_anf(lhs, ctx);
             let (sr, r) = lower_anf(rhs, ctx);
             s.extend(sr);
-            // Fixed-point multiply: i64 intermediate then `>> frac`, narrowed by
-            // the storage cast — identical to the simulator's stored-value op.
-            // (Add/sub/compare are plain integer ops on the stored value.)
-            if *op == BinOp::Mul {
+            // Fixed-point multiply/divide use an i64 intermediate, narrowed by
+            // the storage cast — identical to the simulator's stored-value ops.
+            // Multiply shifts the product right by frac; divide shifts the
+            // numerator left by frac first. (Add/sub/compare are plain integer
+            // ops on the stored value.)
+            if matches!(op, BinOp::Mul | BinOp::Div) {
                 if let Some(Type::Fixed { signed, bits, frac }) = expr_type(lhs, ctx) {
                     let store = Type::Fixed { signed, bits, frac }.c_name();
-                    return (
-                        s,
-                        format!("(({store})(((int64_t)({l}) * (int64_t)({r})) >> {frac}))"),
-                    );
+                    let expr = if *op == BinOp::Mul {
+                        format!("(({store})(((int64_t)({l}) * (int64_t)({r})) >> {frac}))")
+                    } else {
+                        format!("(({store})((((int64_t)({l})) << {frac}) / (int64_t)({r})))")
+                    };
+                    return (s, expr);
                 }
             }
             let sym = match op {
