@@ -1035,8 +1035,29 @@ fn numeric_type_name(name: &str) -> Option<Type> {
         "uint64" => Type::Uint64,
         "float32" => Type::Float32,
         "real" | "float64" => Type::Float64,
-        _ => return None,
+        // `sfix<bits>_<frac>` / `ufix<bits>_<frac>` are valid cast targets too.
+        _ => return fixed_type_name(name),
     })
+}
+
+/// Parse a fixed-point type name `sfix<bits>_<frac>` (signed) or
+/// `ufix<bits>_<frac>` (unsigned), e.g. `sfix32_16`. `bits` must be a storable
+/// width (8/16/32/64) and `frac` must leave at least one integer/sign bit
+/// (`frac < bits`); anything else returns `None` so a malformed name never
+/// slips through as a valid type.
+fn fixed_type_name(name: &str) -> Option<Type> {
+    let (signed, rest) = match name.strip_prefix("sfix") {
+        Some(r) => (true, r),
+        None => (false, name.strip_prefix("ufix")?),
+    };
+    let (bits, frac) = rest.split_once('_')?;
+    let bits: u32 = bits.parse().ok()?;
+    let frac: u32 = frac.parse().ok()?;
+    if matches!(bits, 8 | 16 | 32 | 64) && frac < bits {
+        Some(Type::Fixed { signed, bits, frac })
+    } else {
+        None
+    }
 }
 
 /// Parse a textual OpenLustre expression into IR.
@@ -1086,6 +1107,12 @@ pub fn parse_type(src: &str) -> Result<Type, ParseError> {
             return Ok(Type::Var { name: name.to_string() });
         }
         return Err(ParseError::UnknownType(src.to_string()));
+    }
+    // Fixed-point: `sfix<bits>_<frac>` / `ufix<bits>_<frac>`. Caught before the
+    // named-type fallback so a malformed spelling is a clear error, not a
+    // dangling type reference.
+    if src.starts_with("sfix") || src.starts_with("ufix") {
+        return fixed_type_name(src).ok_or_else(|| ParseError::UnknownType(src.to_string()));
     }
     Ok(match src {
         "bool" => Type::Bool,

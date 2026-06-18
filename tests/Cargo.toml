@@ -191,3 +191,7 @@ path = "activate_conditioning.rs"
 [[test]]
 name = "generic_operators"
 path = "generic_operators.rs"
+
+[[test]]
+name = "fixed_point"
+path = "fixed_point.rs"

@@ -730,6 +730,9 @@ fn default_expr_for_type(ty: &Type) -> Expr {
         | Type::Uint64 => Expr::int_lit(0),
         Type::Char => Expr::Const { lit: Literal::Char { value: 0 } },
         Type::Var { .. } | Type::ArrayVar { .. } => Expr::int_lit(0),
+        // Fixed-point zero: real 0.0 stores as integer 0, kept Fixed-typed by
+        // the cast (this terminal else is unreachable when every state assigns).
+        Type::Fixed { .. } => Expr::cast(ty.clone(), Expr::int_lit(0)),
         // Compound / named types fall back to the integer-zero literal; if
         // every state assigns the output (which we require above) this branch
         // is unreachable at runtime, but lowering still has to produce

@@ -175,8 +175,10 @@ fn fmi_type(ty: &Type) -> Option<Fmi> {
         | Type::Uint16
         | Type::Uint32
         | Type::Uint64 => Some(Fmi::Integer),
+        // Fixed-point has no faithful FMI scalar: the C value is the raw
+        // Q-format integer, which an FMI master would misread as the real.
         Type::Char | Type::Array { .. } | Type::Named { .. }
-        | Type::Var { .. } | Type::ArrayVar { .. } => None,
+        | Type::Var { .. } | Type::ArrayVar { .. } | Type::Fixed { .. } => None,
     }
 }
 

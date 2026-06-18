@@ -161,6 +161,9 @@ fn type_tag(t: &Type) -> String {
         Type::Float32 => "float32".into(),
         Type::Float64 => "float64".into(),
         Type::Char => "char".into(),
+        Type::Fixed { signed, bits, frac } => {
+            format!("{}fix{bits}_{frac}", if *signed { "s" } else { "u" })
+        }
         Type::Array { elem, len } => format!("{}x{len}", type_tag(elem)),
         Type::Named { name } => name.clone(),
         Type::Var { name } => name.clone(),
