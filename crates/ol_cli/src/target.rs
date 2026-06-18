@@ -106,6 +106,19 @@ pub(crate) fn find_target(id: Option<&str>) -> TargetProfile {
         .unwrap_or_else(|| target_profiles().into_iter().next().expect("host profile exists"))
 }
 
+impl TargetProfile {
+    /// The integration-scaffold idiom `emit_integration_main` should produce for
+    /// this target: a portable super-loop, a VxWorks task, or a bare-metal tick.
+    pub(crate) fn integration_style(&self) -> ol_clite_emit::harness::IntegrationStyle {
+        use ol_clite_emit::harness::IntegrationStyle as S;
+        match self.id {
+            "vxworks" => S::VxWorksTask,
+            "baremetal-arm" => S::BareMetalIsr,
+            _ => S::Loop,
+        }
+    }
+}
+
 /// The generated `Makefile` for an entry operator built for `t`.
 pub(crate) fn makefile_for_target(entry: &str, t: &TargetProfile) -> String {
     let build_hint = if t.cross {
@@ -151,16 +164,14 @@ clean:
 
 /// A target-specific integration note written next to the generated sources.
 pub(crate) fn integration_readme(entry: &str, t: &TargetProfile) -> String {
-    let periodic = match t.id {
-        "vxworks" => "On VxWorks, spawn a periodic task that calls the step function each tick:\n\
-            \n    void {e}_task(void) {\n        {e}_state st; {e}_reset(&st);\n        for (;;) {\n            /* read inputs from your I/O */\n            {e}_step(&st, &in, &out);\n            /* publish outputs */\n            taskDelay(period_ticks);\n        }\n    }\n",
-        "baremetal-arm" => "On bare metal, call the step function from a timer ISR (or a super-loop) at the system rate. No heap is used:\n\
-            \n    {e}_state st;   /* static — reset once at boot */\n    void SysTick_Handler(void) {\n        /* read inputs from registers/ADC */\n        {e}_step(&st, &in, &out);\n        /* drive outputs */\n    }\n",
-        _ => "Call the step function once per period from your scheduler/main loop:\n\
-            \n    {e}_state st; {e}_reset(&st);\n    while (running) {\n        /* read inputs */\n        {e}_step(&st, &in, &out);\n        /* write outputs */\n        /* wait for the next period */\n    }\n",
-    }
-    .replace("{e}", entry);
-
+    // How the generated integration.c is entered, per target idiom.
+    let entry_point = match t.id {
+        "vxworks" => format!("`taskSpawn` the `{entry}_task` function (it runs the periodic loop)"),
+        "baremetal-arm" => format!(
+            "call `{entry}_app_init()` once at boot, then `{entry}_tick()` from your periodic timer ISR"
+        ),
+        _ => "its `main()` runs the periodic super-loop".to_string(),
+    };
     format!(
         "# Integrating `{entry}` on {label}
 
@@ -177,15 +188,16 @@ make            # uses CC={cc}, CFLAGS={cflags}
 
 ## Files
 
-- `openlustre_generated.h` / `.c` — the model as portable C-Lite (the `{entry}_*` API).
-- `driver.c` — a reference harness: it reads a CSV of inputs on stdin, calls
-  `{entry}_step` each row, and prints the trace. **It shows the exact call
-  shape** — replace its CSV I/O with your target's I/O.
-- `Makefile` — toolchain + flags for this target.
-
-## Periodic integration
-
-{periodic}
+- `openlustre_generated.h` / `.c` — the model as portable C-Lite. API:
+  `{entry}_init`, `{entry}_step`, and the `{entry}_Input` / `{entry}_Output` /
+  `{entry}_State` structs.
+- `integration.c` — **your embedded entry point**, generated for this target:
+  {entry_point}. Fill in the marked input/output stubs; it `memset`s the inputs
+  to zero so it builds as-is.
+- `driver.c` — the CSV test harness (reads inputs on stdin, prints the trace),
+  for host verification.
+- `Makefile` — toolchain + flags (builds `driver.c` by default; compile
+  `integration.c` into your application).
 
 ## Verifying on the host first
 
@@ -199,13 +211,13 @@ emulation + Docker test harness that runs this build on an emulated board.)
         arch = t.arch,
         cc = t.cc,
         cflags = t.cflags,
+        entry_point = entry_point,
         build_line = if t.cross {
             "This is a **cross target** — OpenLustre generates the files; build them with the \
              toolchain above on the target or its SDK. Install/source that toolchain first."
         } else {
             "Builds and runs on this machine."
         },
-        periodic = periodic,
     )
 }
 
@@ -249,15 +261,19 @@ mod tests {
 
     #[test]
     fn integration_readme_has_balanced_braces_and_names_the_entry() {
-        // The periodic snippet is a plain literal, so a stray `{{`/`}}` would
-        // leak doubled braces into the C example — guard against that.
+        // Guard against stray `{{`/`}}` leaking into the doc, and confirm it
+        // names the API and the per-target integration entry point.
         for id in ["host", "vxworks", "baremetal-arm", "linux-arm"] {
             let t = find_target(Some(id));
             let doc = integration_readme("Doubler", &t);
             assert!(!doc.contains("{{") && !doc.contains("}}"), "{id}: doubled braces in:\n{doc}");
-            assert!(doc.contains("Doubler_step"), "{id}: shows the step call");
+            assert!(doc.contains("Doubler_step"), "{id}: names the step API");
+            assert!(doc.contains("integration.c"), "{id}: points at the integration skeleton");
             assert!(doc.contains(t.cc), "{id}: names the toolchain");
         }
-        assert!(integration_readme("Doubler", &find_target(Some("vxworks"))).contains("taskDelay"));
+        // The per-target entry point is described (the loop body itself now lives
+        // in integration.c, exercised by the harness tests).
+        assert!(integration_readme("Doubler", &find_target(Some("vxworks"))).contains("Doubler_task"));
+        assert!(integration_readme("Doubler", &find_target(Some("baremetal-arm"))).contains("Doubler_tick"));
     }
 }

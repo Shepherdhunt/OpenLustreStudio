@@ -262,13 +262,22 @@ fn workspace_new_open_save_switches_the_active_workspace() {
     // The helper opened tmp/ws (named "ws").
     assert_eq!(get_json(port, "/api/inspect")["project"]["name"], "ws");
 
-    // New Workspace in tmp/wsB → switch to a fresh starter project named wsB.
+    // New Workspace in tmp/wsB → switch to a fresh EMPTY project named wsB
+    // (no starter/Heartbeat carried in).
     let wsb = g.tmp.join("wsB");
     let (s, b) = request(port, "POST", "/api/workspace/new",
         &serde_json::json!({ "path": wsb.to_str().unwrap() }).to_string()).expect("new");
     assert_eq!(s, 200, "new workspace: {b}");
     assert!(wsb.join("wsB.wksc").exists(), "wsB.wksc created");
-    assert_eq!(get_json(port, "/api/inspect")["project"]["name"], "wsB", "switched to wsB");
+    let fresh = get_json(port, "/api/inspect");
+    assert_eq!(fresh["project"]["name"], "wsB", "switched to wsB");
+    assert!(fresh["project"]["main"].is_null(), "a new workspace is empty (no main)");
+    let user_ops: Vec<String> = fresh["project"]["packages"].as_array().unwrap().iter()
+        .filter(|p| p["name"] != "stdlib")
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|n| n["name"].as_str().map(String::from))
+        .collect();
+    assert!(user_ops.is_empty(), "a new workspace has no user operators, got {user_ops:?}");
 
     // An edit now lands in wsB's file.
     post_ok(port, "/api/edit/add_node", r#"{"name":"OnlyInB","kind":"operator"}"#);

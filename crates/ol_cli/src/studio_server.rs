@@ -3609,7 +3609,10 @@ fn workspace_new_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Some(s) => PathBuf::from(s),
         None => return bad("missing string field `path`"),
     };
-    let empty = req.get("empty").and_then(|v| v.as_bool()).unwrap_or(false);
+    // A workspace created from the Studio is empty by default — the engineer
+    // adds their own operators; no starter/Heartbeat is carried in. (Pass
+    // `empty:false` to seed the starter; the CLI `new` still does for demos.)
+    let empty = req.get("empty").and_then(|v| v.as_bool()).unwrap_or(true);
     if let Err(e) = std::fs::create_dir_all(&dir) {
         return bad(&format!("creating {}: {e}", dir.display()));
     }
@@ -3810,6 +3813,10 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         ("openlustre_generated.h", bundle.header),
         ("openlustre_generated.c", bundle.source),
         ("driver.c", driver),
+        (
+            "integration.c",
+            ol_clite_emit::harness::emit_integration_main(&entry, profile.integration_style()),
+        ),
         ("Makefile", crate::target::makefile_for_target(&entry_name, &profile)),
         ("INTEGRATION.md", crate::target::integration_readme(&entry_name, &profile)),
     ];

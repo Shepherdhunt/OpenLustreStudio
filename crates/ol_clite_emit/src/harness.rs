@@ -115,6 +115,100 @@ pub fn emit_csv_driver_with_monitor(
     s
 }
 
+/// The shape of the periodic integration scaffold an embedded target wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrationStyle {
+    /// A portable `main()` super-loop (host / Linux).
+    Loop,
+    /// A VxWorks task to `taskSpawn`, pacing on `taskDelay`.
+    VxWorksTask,
+    /// A bare-metal tick called from a timer ISR; static state, no heap.
+    BareMetalIsr,
+}
+
+/// A compilable **integration skeleton**: it declares the model's state / input
+/// / output, calls `<node>_step` periodically in the target's idiom, and marks
+/// where to wire the target's real I/O. The CSV `driver.c` stays the host test
+/// harness; this is the starting point for the *embedded* entry point. Inputs
+/// are `memset` to zero so it compiles and runs before you fill the stubs in.
+pub fn emit_integration_main(node: &NodeDef, style: IntegrationStyle) -> String {
+    let mut s = String::new();
+    let p = &node.name;
+    let stateful = node.kind != NodeKind::Function;
+    let step = if stateful {
+        format!("{p}_step(&state, &in, &out);")
+    } else {
+        format!("{p}_step(&in, &out);")
+    };
+    let decls = |s: &mut String, indent: &str| {
+        if stateful {
+            let _ = writeln!(s, "{indent}{p}_State state;");
+            let _ = writeln!(s, "{indent}{p}_init(&state);");
+        }
+        let _ = writeln!(s, "{indent}{p}_Input in;");
+        let _ = writeln!(s, "{indent}{p}_Output out;");
+        let _ = writeln!(s, "{indent}memset(&in, 0, sizeof in);");
+    };
+
+    let _ = writeln!(s, "/* Integration skeleton for `{p}` — adapt the I/O stubs to your target.");
+    let _ = writeln!(s, "   driver.c stays the CSV test harness; this is your embedded entry point. */");
+    let _ = writeln!(s, "#include \"openlustre_generated.h\"");
+    let _ = writeln!(s, "#include <string.h>");
+    s.push('\n');
+
+    match style {
+        IntegrationStyle::Loop => {
+            let _ = writeln!(s, "int main(void) {{");
+            decls(&mut s, "  ");
+            let _ = writeln!(s, "  for (;;) {{");
+            let _ = writeln!(s, "    /* TODO: read inputs into `in` from your I/O (sensors, bus, registers). */");
+            let _ = writeln!(s, "    {step}");
+            let _ = writeln!(s, "    /* TODO: publish `out` to your actuators / outputs. */");
+            let _ = writeln!(s, "    /* TODO: wait for the next period (clock_nanosleep / RTOS delay). */");
+            let _ = writeln!(s, "  }}");
+            let _ = writeln!(s, "}}");
+        }
+        IntegrationStyle::VxWorksTask => {
+            let _ = writeln!(s, "#include <vxWorks.h>");
+            let _ = writeln!(s, "#include <taskLib.h>");
+            s.push('\n');
+            let _ = writeln!(s, "/* taskSpawn(\"{p}\", prio, 0, 8192, (FUNCPTR){p}_task, ticks,0,0,0,0,0,0,0,0,0); */");
+            let _ = writeln!(s, "void {p}_task(int period_ticks) {{");
+            decls(&mut s, "  ");
+            let _ = writeln!(s, "  for (;;) {{");
+            let _ = writeln!(s, "    /* TODO: read inputs into `in`. */");
+            let _ = writeln!(s, "    {step}");
+            let _ = writeln!(s, "    /* TODO: publish `out`. */");
+            let _ = writeln!(s, "    taskDelay(period_ticks);");
+            let _ = writeln!(s, "  }}");
+            let _ = writeln!(s, "}}");
+        }
+        IntegrationStyle::BareMetalIsr => {
+            if stateful {
+                let _ = writeln!(s, "static {p}_State state;");
+            }
+            let _ = writeln!(s, "static {p}_Input in;");
+            let _ = writeln!(s, "static {p}_Output out;");
+            s.push('\n');
+            let _ = writeln!(s, "/* Call once at boot. */");
+            let _ = writeln!(s, "void {p}_app_init(void) {{");
+            if stateful {
+                let _ = writeln!(s, "  {p}_init(&state);");
+            }
+            let _ = writeln!(s, "  memset(&in, 0, sizeof in);");
+            let _ = writeln!(s, "}}");
+            s.push('\n');
+            let _ = writeln!(s, "/* Call from your periodic timer ISR (e.g. SysTick_Handler). No heap. */");
+            let _ = writeln!(s, "void {p}_tick(void) {{");
+            let _ = writeln!(s, "  /* TODO: read inputs from registers/ADC into `in`. */");
+            let _ = writeln!(s, "  {step}");
+            let _ = writeln!(s, "  /* TODO: drive outputs from `out`. */");
+            let _ = writeln!(s, "}}");
+        }
+    }
+    s
+}
+
 /// Parse a bracketed `[e0;e1;…]` token into `in.<name>[k]`. `strtoll`/`strtod`
 /// advance a cursor past each element; we skip the `[` and `;` separators by
 /// hand (strtok is already in use on the outer comma split, so no nesting).
@@ -262,5 +356,63 @@ fn print_stmt(ty: &Type, expr: &str) -> String {
         Type::Bool => format!("printf({expr} ? \"true\" : \"false\");"),
         Type::Float32 | Type::Float64 => format!("printf(\"%g\", (double){expr});"),
         _ => format!("printf(\"%lld\", (long long){expr});"),
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::emit_integration_main;
+    use super::IntegrationStyle;
+    use ol_ir::{NodeDef, NodeKind, Port, Type};
+
+    fn node(name: &str, kind: NodeKind) -> NodeDef {
+        NodeDef {
+            name: name.into(),
+            kind,
+            inputs: vec![Port { name: "x".into(), ty: Type::Bool }],
+            outputs: vec![Port { name: "y".into(), ty: Type::Bool }],
+            locals: vec![],
+            equations: vec![],
+            contract: None,
+            diagram: Default::default(),
+            probes: vec![],
+        }
+    }
+
+    #[test]
+    fn loop_style_is_a_periodic_main_using_the_real_api() {
+        let c = emit_integration_main(&node("Doubler", NodeKind::Operator), IntegrationStyle::Loop);
+        assert!(c.contains("int main(void)"));
+        assert!(c.contains("for (;;)"));
+        assert!(c.contains("Doubler_State state;"));
+        assert!(c.contains("Doubler_init(&state);"));
+        assert!(c.contains("Doubler_step(&state, &in, &out);"));
+        assert!(c.contains("memset(&in, 0, sizeof in);"));
+        // Guard against the old README's wrong API leaking back.
+        assert!(!c.contains("_reset("), "must use _init, not _reset");
+    }
+
+    #[test]
+    fn vxworks_style_spawns_a_task() {
+        let c = emit_integration_main(&node("Doubler", NodeKind::Operator), IntegrationStyle::VxWorksTask);
+        assert!(c.contains("#include <vxWorks.h>"));
+        assert!(c.contains("void Doubler_task(int period_ticks)"));
+        assert!(c.contains("taskDelay(period_ticks);"));
+    }
+
+    #[test]
+    fn baremetal_style_is_an_isr_tick_with_static_state() {
+        let c = emit_integration_main(&node("Doubler", NodeKind::Operator), IntegrationStyle::BareMetalIsr);
+        assert!(c.contains("static Doubler_State state;"));
+        assert!(c.contains("void Doubler_app_init(void)"));
+        assert!(c.contains("void Doubler_tick(void)"));
+        assert!(!c.contains("int main"), "bare-metal has no main()");
+    }
+
+    #[test]
+    fn function_node_has_no_state_param() {
+        let c = emit_integration_main(&node("Pure", NodeKind::Function), IntegrationStyle::Loop);
+        assert!(c.contains("Pure_step(&in, &out);"));
+        assert!(!c.contains("Pure_State"));
     }
 }
