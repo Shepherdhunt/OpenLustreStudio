@@ -239,9 +239,35 @@ verification burden the qualified tool would otherwise discharge.
 | winget/MSIX distribution | `winget install OpenLustreStudio` once the repo publishes releases | P2 |
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 | ~~Target/OS build profiles~~ | Pick the OS/board for codegen; generate a toolchain-tuned Makefile + integration note | **Done 2026-06-18**: host (compiles locally) + embedded Linux-ARM / VxWorks / bare-metal-ARM (directional — emit build files for the target toolchain). `crates/ol_cli/src/target.rs`, `/api/targets`, Compile dialog selector |
-| ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests); full-system board/RTOS emulation remains. |
+| ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests). `--system` adds **full-system arm64** (`qemu-system-aarch64 -M virt` + a busybox initramfs, kernel supplied as input) — generation tested; first boot needs a Docker host. RTOS full-system (VxWorks under `qemu-system-*`) remains (no freely-distributable image). |
 
 ## 6. What closed recently
+
+### 2026-06-18 — full-system arm64 emulation (`clite-emulate --system`)
+
+Extends the emulation backend from qemu-user to a **real booted kernel/board**:
+`--system` emits a Docker context that cross-compiles arm64, assembles a busybox
+**initramfs** (the static model + an `/init` that runs it on the baked-in
+scenario, frames the trace on the serial console, and powers off), and boots it
+on **`qemu-system-aarch64 -M virt`** with a user-supplied kernel (`kernel/Image`
+— the board/kernel choice is the engineer's). `extract_framed_trace` pulls the
+CSV trace out of the boot log between markers; the comparison against the IR sim
+is unchanged. `cmd_clite_emulate_system` orchestrates build → boot → extract →
+compare where Docker is present, and otherwise emits the harness + a header-only
+scenario template + clear next steps.
+
+* **Why full-system is *integration*, not new equivalence:** the generated
+  `_step` is pure compute (no syscalls), so the qemu-user backend already proves
+  the compiled ARM behavior matches the model. Full-system adds booting the
+  `integration.c`/driver on a real kernel — useful for the eventual RTOS story.
+* **Verified:** unit tests pin the generated Dockerfile (static arm64 cross-link,
+  initramfs assembly, `qemu-system-aarch64 -M virt` + `rdinit=/init`), the
+  `/init` (frames + powers off), and `extract_framed_trace` (pulls the CSV from
+  boot noise, errors on missing markers). Live generation verified on `Doubler`.
+  **Not verified here:** the actual boot — this machine has no Docker/QEMU, and a
+  boot harness has failure modes (kernel/console/busybox specifics) that need a
+  first run on a Docker host. RTOS full-system (VxWorks) remains blocked by image
+  availability.
 
 ### 2026-06-18 — Docker + QEMU emulated-target backend (`clite-emulate`)
 
