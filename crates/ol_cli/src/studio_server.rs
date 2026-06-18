@@ -342,6 +342,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             "application/json",
             operations_catalog().to_string().into_bytes(),
         ),
+        ("GET", "/api/targets") => (200, "application/json", targets_catalog().into_bytes()),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
         ("POST", "/api/edit/add_type_op") => add_type_op_response(ctx, body),
         ("POST", "/api/edit/add_expression") => add_expression_response(ctx, body),
@@ -3746,9 +3747,25 @@ fn edit_remove_probe(project: &mut ol_ir::Project, req: &serde_json::Value) -> R
 
 // --- Compile C-Lite: emit + compile into a user directory --------------------
 
-/// Emit the selected root's C (header, source, driver, monitors, Makefile)
-/// into `out_dir` and compile it on this machine with the requested
-/// compiler. Cross-compilation is not attempted — the target is the host.
+/// The build-target catalog (host + the cross profiles) for the compile dialog.
+fn targets_catalog() -> String {
+    let targets: Vec<_> = crate::target::target_profiles()
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id, "label": t.label, "os": t.os, "arch": t.arch,
+                "cc": t.cc, "cross": t.cross, "note": t.note,
+            })
+        })
+        .collect();
+    serde_json::json!({ "schema_version": 1, "targets": targets }).to_string()
+}
+
+/// Emit the selected root's C (header, source, driver, monitors, Makefile,
+/// INTEGRATION.md) into `out_dir` for the requested **target**. The `host`
+/// target compiles locally with the chosen compiler; a cross target (embedded
+/// Linux, VxWorks, bare-metal) emits build files tuned to its toolchain and is
+/// built on the target — it is not compiled on this machine.
 fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
     let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
     let req: serde_json::Value = match serde_json::from_slice(body) {
@@ -3756,6 +3773,7 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Err(e) => return bad(&format!("bad JSON: {e}")),
     };
     let compiler = req.get("compiler").and_then(|v| v.as_str()).unwrap_or("auto");
+    let profile = crate::target::find_target(req.get("target").and_then(|v| v.as_str()));
     let model = ctx.model();
     let out_dir = match req.get("out_dir").and_then(|v| v.as_str()) {
         Some(d) if !d.trim().is_empty() => PathBuf::from(d),
@@ -3792,7 +3810,8 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         ("openlustre_generated.h", bundle.header),
         ("openlustre_generated.c", bundle.source),
         ("driver.c", driver),
-        ("Makefile", crate::makefile_for_entry(&entry_name)),
+        ("Makefile", crate::target::makefile_for_target(&entry_name, &profile)),
+        ("INTEGRATION.md", crate::target::integration_readme(&entry_name, &profile)),
     ];
     let mut sources = vec!["openlustre_generated.c", "driver.c"];
     if has_contract {
@@ -3812,15 +3831,28 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     } else {
         entry_name.clone()
     };
-    let compile_log =
-        crate::scenario::compile_in_dir(&out_dir, &sources, &exe_name, Some(compiler));
-    let (compiled, log) = match compile_log {
-        Ok(l) => (true, l),
-        Err(e) => (false, e),
+    // The host target compiles here; a cross target is generated for its own
+    // toolchain and built on the target (not on this machine).
+    let (compiled, log) = if profile.cross {
+        (
+            false,
+            format!(
+                "Generated for {} ({} · {}). Cross target — not built on this machine; \
+                 run `make` with `{}` on the target or its SDK. See INTEGRATION.md.",
+                profile.label, profile.os, profile.arch, profile.cc
+            ),
+        )
+    } else {
+        match crate::scenario::compile_in_dir(&out_dir, &sources, &exe_name, Some(compiler)) {
+            Ok(l) => (true, l),
+            Err(e) => (false, e),
+        }
     };
     let value = serde_json::json!({
         "schema_version": 1,
         "out_dir": out_dir.display().to_string(),
+        "target": profile.id,
+        "cross": profile.cross,
         "wrote": wrote.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         "compiled": compiled,
         "exe": if compiled { serde_json::Value::String(out_dir.join(&exe_name).display().to_string()) } else { serde_json::Value::Null },
