@@ -276,3 +276,164 @@ fn generated_c_scales_fixed_casts_and_multiply() {
     // Fixed divide shifts the numerator left by frac, then an int64 divide.
     assert!(src.contains("<< 8) / (int64_t)"), "fixed divide missing:\n{src}");
 }
+
+// --- Saturating arithmetic ---------------------------------------------------
+
+/// `sfix8_4` (int8 storage, real range [-8, 7.9375]) so modest inputs overflow
+/// and exercise the clamp. Inputs/outputs are int32; the saturating ops clamp
+/// identically in the sim and the generated C, so traces still match.
+fn sat_model() -> Project {
+    let e = |s: &str| ol_stdlib::parse_expr(s).expect(s);
+    let q = || fix(true, 8, 4);
+    let node = NodeDef {
+        name: "Sat".into(),
+        kind: NodeKind::Function,
+        inputs: vec![
+            Port { name: "a".into(), ty: Type::Int32 },
+            Port { name: "b".into(), ty: Type::Int32 },
+        ],
+        outputs: vec![
+            Port { name: "osadd".into(), ty: Type::Int32 },
+            Port { name: "ossub".into(), ty: Type::Int32 },
+            Port { name: "osmul".into(), ty: Type::Int32 },
+            Port { name: "osdiv".into(), ty: Type::Int32 },
+        ],
+        locals: vec![
+            Local { name: "fa".into(), ty: q() },
+            Local { name: "fb".into(), ty: q() },
+            Local { name: "sadd".into(), ty: q() },
+            Local { name: "ssub".into(), ty: q() },
+            Local { name: "smul".into(), ty: q() },
+            Local { name: "sdiv".into(), ty: q() },
+        ],
+        equations: vec![
+            Equation { lhs: vec!["fa".into()], rhs: e("sfix8_4(a)") },
+            Equation { lhs: vec!["fb".into()], rhs: e("sfix8_4(b)") },
+            Equation { lhs: vec!["sadd".into()], rhs: e("sat_add(fa, fb)") },
+            Equation { lhs: vec!["ssub".into()], rhs: e("sat_sub(fa, fb)") },
+            Equation { lhs: vec!["smul".into()], rhs: e("sat_mul(fa, fb)") },
+            Equation { lhs: vec!["sdiv".into()], rhs: e("sat_div(fa, fb)") },
+            Equation { lhs: vec!["osadd".into()], rhs: e("int32(sadd)") },
+            Equation { lhs: vec!["ossub".into()], rhs: e("int32(ssub)") },
+            Equation { lhs: vec!["osmul".into()], rhs: e("int32(smul)") },
+            Equation { lhs: vec!["osdiv".into()], rhs: e("int32(sdiv)") },
+        ],
+        contract: None,
+        diagram: Default::default(),
+        probes: vec![],
+        requirements: vec![],
+        sysml: None,
+        generics: vec![],
+    };
+    Project {
+        name: "satpt".into(),
+        packages: vec![Package { name: "user".into(), nodes: vec![node], ..Default::default() }],
+        main: Some("Sat".into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn saturating_ops_parse_and_round_trip() {
+    let e = ol_stdlib::parse_expr("sat_add(x, y)").expect("parse sat_add");
+    assert!(matches!(&e, Expr::Binary { op: ol_ir::BinOp::SatAdd, .. }), "{e:?}");
+    // Surface and Kind 2 both render saturating ops as function calls.
+    assert_eq!(ol_lustre_emit::format_expr(&e), "sat_add(x, y)");
+    assert_eq!(ol_stdlib::parse_expr(&ol_lustre_emit::format_expr(&e)).unwrap(), e);
+    assert_eq!(ol_lustre_emit::format_expr_lustre(&e), "sat_add(x, y)");
+
+    use ol_ir::BinOp::{SatDiv, SatMul, SatSub};
+    for (src, want) in [("sat_sub(x, y)", SatSub), ("sat_mul(x, y)", SatMul), ("sat_div(x, y)", SatDiv)]
+    {
+        let got = ol_stdlib::parse_expr(src).unwrap();
+        assert!(matches!(got, Expr::Binary { op, .. } if op == want), "{src} -> {got:?}");
+    }
+    // Arity is enforced: a saturating op takes exactly two operands.
+    assert!(ol_stdlib::parse_expr("sat_add(x)").is_err());
+}
+
+#[test]
+fn saturating_ops_clamp_in_simulation() {
+    let project = sat_model();
+    let report = ol_typecheck::check_project(&project);
+    assert!(!has_error(&report), "typecheck errors: {:?}", report.diagnostics);
+    let mut sim = ol_sim::Sim::new(&project, "Sat").unwrap();
+    // sfix8_4 real range is [-8, 7.9375]; the add and multiply overflow and clamp.
+    let trace = sim.run_csv("a,b\n5,6\n-7,-6\n").unwrap();
+    let csv = trace.to_csv();
+    let lines: Vec<&str> = csv.trim().lines().collect();
+    assert_eq!(lines[0], "cycle,osadd,ossub,osmul,osdiv");
+    // (5,6): 11 clamps to 7, sub -1, 30 clamps to 7, 5/6 -> 0
+    assert_eq!(lines[1], "0,7,-1,7,0");
+    // (-7,-6): -13 clamps to -8, sub -1, 42 clamps to 7, -7/-6 -> 1
+    assert_eq!(lines[2], "1,-8,-1,7,1");
+}
+
+#[test]
+fn saturating_ops_match_between_ir_and_compiled_c() {
+    let tmp = make_tempdir("sat_c");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&sat_model()).unwrap()).unwrap();
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    std::fs::write(scen.join("sweep.csv"), "a,b\n5,6\n2,3\n-7,-6\n1,1\n7,-5\n").unwrap();
+
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO"))
+            .args(["run", "-q", "-p", "ol_cli", "--"])
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let (ok, out) =
+        run(&["test", "record", model.to_str().unwrap(), "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record: {out}");
+    let (ok, out) = run(&[
+        "test",
+        "run",
+        model.to_str().unwrap(),
+        "--scenarios",
+        scen.to_str().unwrap(),
+        "--backend",
+        "both",
+    ]);
+    assert!(ok, "run: {out}");
+    assert!(out.contains("[PASS] sweep (ir)"), "{out}");
+    assert!(out.contains("[PASS] sweep (c )"), "saturating C backend diverged: {out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn generated_c_emits_clamp_for_saturating_ops() {
+    let bundle = ol_clite_emit::emit_project(&sat_model());
+    assert!(bundle.source.contains("ol_clamp_i64"), "clamp helper/use missing:\n{}", bundle.source);
+}
+
+#[test]
+fn saturating_op_on_non_fixed_is_rejected() {
+    // Saturating arithmetic is defined for fixed-point only; plain ints are
+    // rejected (E0089).
+    let report = ol_typecheck::check_project(&project_json(serde_json::json!({
+        "name": "s",
+        "packages": [{"name": "user", "nodes": [{
+            "name": "S", "kind": "Function",
+            "inputs": [{"name": "x", "ty": {"kind": "Int32"}}, {"name": "y", "ty": {"kind": "Int32"}}],
+            "outputs": [{"name": "z", "ty": {"kind": "Int32"}}],
+            "equations": [{"lhs": ["z"], "rhs": {"expr": "Binary", "op": "SatAdd",
+                "lhs": {"expr": "Var", "name": "x"}, "rhs": {"expr": "Var", "name": "y"}}}]
+        }]}]
+    })));
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "E0089"),
+        "expected E0089 (saturating op on non-fixed), got: {:?}",
+        report.diagnostics
+    );
+}

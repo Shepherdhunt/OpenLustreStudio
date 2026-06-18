@@ -730,6 +730,16 @@ fn narrow_fixed(signed: bool, bits: u32, v: i64) -> i64 {
     }
 }
 
+/// Clamp a fixed-point stored value to its type's saturation range. Uses the
+/// shared `Type::fixed_sat_range` so the bound matches the C-Lite emitter
+/// exactly (keeping saturating arithmetic bit-identical across backends).
+fn clamp_fixed(signed: bool, bits: u32, v: i64) -> i64 {
+    let (lo, hi) = Type::Fixed { signed, bits, frac: 0 }
+        .fixed_sat_range()
+        .unwrap_or((i64::MIN, i64::MAX));
+    v.clamp(lo, hi)
+}
+
 /// True on the cycles where every condition along `ck`'s chain holds.
 fn clock_active(ck: &ol_ir::Clock, env: &BTreeMap<String, Value>) -> Result<bool, SimError> {
     for (var, on) in ck.conditions() {
@@ -1560,6 +1570,30 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         // identical to the generated `(intN)(((int64_t)a << frac) / b)`.
         (BinOp::Div, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) if b != 0 => {
             Fixed { stored: narrow_fixed(signed, bits, a.wrapping_shl(frac) / b), signed, bits, frac }
+        }
+        // Saturating ops: same i64 intermediate as their plain counterparts, then
+        // clamp to the type's [min,max] (no wrap). The bound comes from the shared
+        // `fixed_sat_range`, so it is identical to the C-Lite emitter.
+        (BinOp::SatAdd, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: clamp_fixed(signed, bits, a.wrapping_add(b)),
+            signed,
+            bits,
+            frac,
+        },
+        (BinOp::SatSub, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: clamp_fixed(signed, bits, a.wrapping_sub(b)),
+            signed,
+            bits,
+            frac,
+        },
+        (BinOp::SatMul, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) => Fixed {
+            stored: clamp_fixed(signed, bits, a.wrapping_mul(b) >> frac),
+            signed,
+            bits,
+            frac,
+        },
+        (BinOp::SatDiv, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) if b != 0 => {
+            Fixed { stored: clamp_fixed(signed, bits, a.wrapping_shl(frac) / b), signed, bits, frac }
         }
         (BinOp::Lt, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a < b),
         (BinOp::Le, Fixed { stored: a, .. }, Fixed { stored: b, .. }) => Bool(a <= b),

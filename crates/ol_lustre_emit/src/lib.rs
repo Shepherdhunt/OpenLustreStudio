@@ -198,10 +198,10 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             (t, 90)
         }
         Expr::Binary { op, lhs, rhs } => {
-            // Bit operators are not part of standard Lustre. We emit them as
-            // function calls (`bit_and`, `bit_or`, ...) so a user can supply
-            // matching imported Lustre functions for Kind 2.
-            if let Some(fname) = bit_op_name(*op) {
+            // Bit and saturating operators are not part of standard Lustre. We
+            // emit them as function calls (`bit_and`, `sat_add`, ...) so a user
+            // can supply matching imported Lustre functions for Kind 2.
+            if let Some(fname) = bit_op_name(*op).or(sat_op_name(*op)) {
                 let l = format_expr_prec(lhs, 0, lustre);
                 let r = format_expr_prec(rhs, 0, lustre);
                 (format!("{fname}({l}, {r})"), 100)
@@ -454,6 +454,8 @@ fn bin_op_syntax(op: BinOp) -> (&'static str, u8) {
         BinOp::Mod => ("mod", 50),
         // Bit ops never reach here — they are rendered as function calls.
         BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => ("?bit?", 0),
+        // Saturating ops are also rendered as function calls (see sat_op_name).
+        BinOp::SatAdd | BinOp::SatSub | BinOp::SatMul | BinOp::SatDiv => ("?sat?", 0),
     }
 }
 
@@ -464,6 +466,19 @@ fn bit_op_name(op: BinOp) -> Option<&'static str> {
         BinOp::BitXor => "bit_xor",
         BinOp::Shl => "shift_left",
         BinOp::Shr => "shift_right",
+        _ => return None,
+    })
+}
+
+/// Saturating fixed-point ops render as function calls in both the surface and
+/// Kind 2 views (a user supplies matching Lustre functions when proving), the
+/// same convention as the bit ops.
+fn sat_op_name(op: BinOp) -> Option<&'static str> {
+    Some(match op {
+        BinOp::SatAdd => "sat_add",
+        BinOp::SatSub => "sat_sub",
+        BinOp::SatMul => "sat_mul",
+        BinOp::SatDiv => "sat_div",
         _ => return None,
     })
 }

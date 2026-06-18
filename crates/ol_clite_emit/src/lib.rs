@@ -65,6 +65,14 @@ pub fn emit_project(project: &Project) -> EmittedClite {
     let _ = writeln!(source, "#include <stdio.h>");
     let _ = writeln!(source, "extern int ol_dbg_print;");
     let _ = writeln!(source, "#endif");
+    // Saturating fixed-point ops clamp their i64 intermediate to the target
+    // type's [min,max] before narrowing. Unused (and elided) when no model uses
+    // a saturating operator.
+    let _ = writeln!(
+        source,
+        "static inline int64_t ol_clamp_i64(int64_t v, int64_t lo, int64_t hi) {{ \
+         return v < lo ? lo : (v > hi ? hi : v); }}"
+    );
     source.push('\n');
 
     // User-declared types must appear before any node struct that uses them.
@@ -175,6 +183,13 @@ fn format_const_expr(expr: &Expr) -> String {
                 BinOp::BitXor => "^",
                 BinOp::Shl => "<<",
                 BinOp::Shr => ">>",
+                // Saturating ops are fully modeled only in operator equation
+                // bodies (lower_anf); a constant initializer has no Q-format
+                // context, so it falls back to the base operation.
+                BinOp::SatAdd => "+",
+                BinOp::SatSub => "-",
+                BinOp::SatMul => "*",
+                BinOp::SatDiv => "/",
             };
             format!("({l} {sym} {r})")
         }
@@ -1178,6 +1193,19 @@ fn emit_cast_expr(to: &Type, src: Option<&Type>, a: &str) -> String {
     }
 }
 
+/// Format an `i64` saturation bound as a C literal: the int64 extremes use the
+/// `<stdint.h>` macros (a plain `-9223372036854775808` literal is ill-formed),
+/// and other bounds get an `LL` suffix so the constant is `int64_t`.
+fn c_i64_lit(v: i64) -> String {
+    if v == i64::MIN {
+        "INT64_MIN".to_string()
+    } else if v == i64::MAX {
+        "INT64_MAX".to_string()
+    } else {
+        format!("{v}LL")
+    }
+}
+
 fn record_fields<'a>(name: &str, project: &'a Project) -> Option<&'a Vec<ol_ir::RecordField>> {
     for pkg in &project.packages {
         for t in &pkg.types {
@@ -1291,18 +1319,51 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let (mut s, l) = lower_anf(lhs, ctx);
             let (sr, r) = lower_anf(rhs, ctx);
             s.extend(sr);
-            // Fixed-point multiply/divide use an i64 intermediate, narrowed by
-            // the storage cast — identical to the simulator's stored-value ops.
-            // Multiply shifts the product right by frac; divide shifts the
-            // numerator left by frac first. (Add/sub/compare are plain integer
-            // ops on the stored value.)
-            if matches!(op, BinOp::Mul | BinOp::Div) {
+            // Fixed-point multiply/divide and the saturating ops use an i64
+            // intermediate, narrowed by the storage cast — identical to the
+            // simulator's stored-value ops. Multiply shifts the product right by
+            // frac; divide shifts the numerator left by frac first; the
+            // saturating ops then clamp to the type's range. (Plain add/sub and
+            // compare are ordinary integer ops on the stored value.)
+            if matches!(
+                op,
+                BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::SatAdd
+                    | BinOp::SatSub
+                    | BinOp::SatMul
+                    | BinOp::SatDiv
+            ) {
                 if let Some(Type::Fixed { signed, bits, frac }) = expr_type(lhs, ctx) {
-                    let store = Type::Fixed { signed, bits, frac }.c_name();
-                    let expr = if *op == BinOp::Mul {
-                        format!("(({store})(((int64_t)({l}) * (int64_t)({r})) >> {frac}))")
-                    } else {
-                        format!("(({store})((((int64_t)({l})) << {frac}) / (int64_t)({r})))")
+                    let ty = Type::Fixed { signed, bits, frac };
+                    let store = ty.c_name();
+                    let expr = match op {
+                        BinOp::Mul => {
+                            format!("(({store})(((int64_t)({l}) * (int64_t)({r})) >> {frac}))")
+                        }
+                        BinOp::Div => {
+                            format!("(({store})((((int64_t)({l})) << {frac}) / (int64_t)({r})))")
+                        }
+                        sat => {
+                            let (lo, hi) = ty.fixed_sat_range().unwrap();
+                            let wide = match sat {
+                                BinOp::SatAdd => {
+                                    format!("((int64_t)({l}) + (int64_t)({r}))")
+                                }
+                                BinOp::SatSub => {
+                                    format!("((int64_t)({l}) - (int64_t)({r}))")
+                                }
+                                BinOp::SatMul => {
+                                    format!("(((int64_t)({l}) * (int64_t)({r})) >> {frac})")
+                                }
+                                _ => format!("((((int64_t)({l})) << {frac}) / (int64_t)({r}))"),
+                            };
+                            format!(
+                                "(({store})ol_clamp_i64({wide}, {}, {}))",
+                                c_i64_lit(lo),
+                                c_i64_lit(hi)
+                            )
+                        }
                     };
                     return (s, expr);
                 }
@@ -1328,6 +1389,13 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
                 BinOp::BitXor => "^",
                 BinOp::Shl => "<<",
                 BinOp::Shr => ">>",
+                // Reached only if a saturating op's operand type couldn't be
+                // resolved (it always returns early above for fixed operands);
+                // fall back to the base operator.
+                BinOp::SatAdd => "+",
+                BinOp::SatSub => "-",
+                BinOp::SatMul => "*",
+                BinOp::SatDiv => "/",
             };
             (s, format!("({l} {sym} {r})"))
         }

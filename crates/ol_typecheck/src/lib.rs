@@ -1034,6 +1034,7 @@ pub fn infer_expr_type(
             // the surrounding hint so integer literals adopt the target type.
             let sub_hint = match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => hint,
+                BinOp::SatAdd | BinOp::SatSub | BinOp::SatMul | BinOp::SatDiv => hint,
                 BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => hint,
                 BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Neq => None,
                 BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies => None,
@@ -1149,6 +1150,24 @@ pub fn infer_expr_type(
                                 "E0087",
                                 format!(
                                     "bitwise operator requires matching integer operands, got {l:?} and {r:?}"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                    Some(l)
+                }
+                BinOp::SatAdd | BinOp::SatSub | BinOp::SatMul | BinOp::SatDiv => {
+                    // Saturating arithmetic clamps to the type's range; defined
+                    // only for fixed-point, where both operands share a format.
+                    if !(lr.is_fixed() && rr.is_fixed() && types_compatible(tctx, &l, &r)) {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0089",
+                                format!(
+                                    "saturating operators require matching fixed-point operands, \
+                                     got {l:?} and {r:?}"
                                 ),
                             )
                             .with_context(ctx.to_string()),
