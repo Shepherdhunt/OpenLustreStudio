@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod emulate;
 mod lustre_import;
 mod scenario;
 mod studio_server;
@@ -147,6 +148,27 @@ enum Cmd {
         /// this, a small starter operator is created.
         #[arg(long)]
         empty: bool,
+    },
+    /// Emit a Docker + QEMU emulation harness for the model and — where Docker
+    /// is available — cross-build it, run it on an emulated ARM (Linux) target,
+    /// and check the trace against the IR simulator. The harness runs on any
+    /// Docker host. A third equivalence backend beside the IR sim and host C.
+    CliteEmulate {
+        model: PathBuf,
+        #[arg(long)]
+        node: Option<String>,
+        /// Target profile (default `linux-arm` — the QEMU user-mode case).
+        #[arg(long, default_value = "linux-arm")]
+        target: String,
+        /// Output directory for the Docker context (default `<model dir>/emulate`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// CSV input vector that drives the emulated run AND the IR-sim
+        /// equivalence check. Without it, only the harness is emitted.
+        #[arg(long)]
+        scenario: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
     },
 }
 
@@ -372,6 +394,21 @@ fn main() -> Result<()> {
                 backend,
             ),
         },
+        Cmd::CliteEmulate {
+            model,
+            node,
+            target,
+            out,
+            scenario,
+            with_stdlib,
+        } => cmd_clite_emulate(
+            &model,
+            node.as_deref(),
+            &target,
+            out.as_deref(),
+            scenario.as_deref(),
+            with_stdlib.as_deref(),
+        ),
     }
 }
 
@@ -769,6 +806,80 @@ fn cmd_simulate(
         }
     }
     Ok(())
+}
+
+fn cmd_clite_emulate(
+    model: &Path,
+    node: Option<&str>,
+    target: &str,
+    out: Option<&Path>,
+    scenario: Option<&Path>,
+    with_stdlib: Option<&Path>,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let node_name = node
+        .map(String::from)
+        .or_else(|| project.main.clone())
+        .context("no --node specified and project has no `main`")?;
+    let out_dir = match out {
+        Some(p) => p.to_path_buf(),
+        None => model.parent().unwrap_or_else(|| Path::new(".")).join("emulate"),
+    };
+
+    let written = crate::emulate::emit_harness(&out_dir, &project, &node_name)?;
+    println!(
+        "clite-emulate: emitted {} into {} (target {target}: emulated armhf via QEMU user-mode)",
+        written.join(", "),
+        out_dir.display()
+    );
+
+    let tag = format!("openlustre-emu-{}", node_name.to_lowercase());
+    let print_instructions = || {
+        println!("\nOn a Docker host, run the emulated ARM target with:");
+        println!("    cd {}", out_dir.display());
+        println!("    docker build -t {tag} .");
+        println!("    docker run --rm -i {tag} < scenario.csv > emulated_trace.csv");
+        println!(
+            "then diff it against `openlustre simulate {} --inputs scenario.csv`.",
+            model.display()
+        );
+    };
+
+    let Some(scn) = scenario else {
+        println!("\nNo --scenario given; the Docker + QEMU harness is ready to run.");
+        print_instructions();
+        return Ok(());
+    };
+    let scenario_csv =
+        std::fs::read_to_string(scn).with_context(|| format!("reading scenario {}", scn.display()))?;
+    std::fs::write(out_dir.join("scenario.csv"), &scenario_csv).ok();
+
+    // The IR simulator is the reference (expected) trace.
+    let mut sim = ol_sim::Sim::new(&project, &node_name)?;
+    let expected = sim.run_csv(&scenario_csv)?.to_csv();
+    std::fs::write(out_dir.join("expected_ir_trace.csv"), &expected).ok();
+
+    if !crate::emulate::docker_available() {
+        println!(
+            "\nDocker not found on PATH — wrote scenario.csv and expected_ir_trace.csv (the IR-sim reference)."
+        );
+        print_instructions();
+        return Ok(());
+    }
+
+    println!("\nBuilding the image and running under QEMU (the first build pulls the base image + toolchain)…");
+    let actual = crate::emulate::build_and_run(&out_dir, &node_name, &scenario_csv)?;
+    std::fs::write(out_dir.join("emulated_trace.csv"), &actual).ok();
+    match crate::emulate::traces_match(&expected, &actual) {
+        Ok(()) => {
+            println!("\n✓ EQUIVALENT — the emulated ARM run matches the IR simulator cell-for-cell.");
+            Ok(())
+        }
+        Err(e) => {
+            println!("\n✗ MISMATCH — {e}");
+            anyhow::bail!("emulated trace diverged from the IR simulator");
+        }
+    }
 }
 
 fn cmd_prove(
