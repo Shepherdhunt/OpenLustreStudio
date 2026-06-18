@@ -59,7 +59,8 @@
     background: #efefef; border-bottom: 1px solid #e0e0e0;
   }
   #left details details > summary { padding-left: 18px; }
-  #center { overflow: auto; padding: 8px 12px; grid-row: 3; grid-column: 2; background: #fafafa; }
+  #center { overflow: hidden; padding: 8px 12px; grid-row: 3; grid-column: 2; background: #fafafa;
+            display: flex; flex-direction: column; }
   #rightdock {
     grid-row: 3; grid-column: 3; background: #f5f5f5; border-left: 1px solid #c5c5c5;
     display: flex; flex-direction: column; overflow: hidden;
@@ -205,9 +206,15 @@
   #toolbox .op-item:hover { background: #e3eef9; }
   #toolbox .op-item.disabled { color: #9a9a9a; cursor: not-allowed; }
   /* --- Canvas ----------------------------------------------------------- */
-  #diagram-host { background: #fff; border: 1px solid #c5c5c5; overflow: auto; }
+  #diagram-host { background: #fff; border: 1px solid #c5c5c5; overflow: auto;
+                  flex: 1 1 auto; min-height: 0; }
+  #diagram-host.panning { cursor: grabbing; }
   .diagram-toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0;
                      font-size: 12px; color: #3c3c3c; }
+  .zoom-label { margin-left: auto; font-size: 11px; color: #5a5a5a; cursor: pointer;
+                padding: 1px 7px; border: 1px solid #cfd6dd; border-radius: 3px;
+                background: #fff; user-select: none; }
+  .zoom-label:hover { background: #e3eef9; }
   svg .box { fill: #fff; stroke: #5a5a5a; stroke-width: 1.1; }
   svg .box.eq { fill: #eef4fb; stroke: #2b579a; }
   svg .box.invalid { stroke: #d11a1a; stroke-width: 2; fill: #fdeeee; }
@@ -308,6 +315,11 @@
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
       <div class="menu-sep"></div>
+      <div class="mi" onclick="zoomBy(1.25)">Zoom In<span class="shortcut">Ctrl +</span></div>
+      <div class="mi" onclick="zoomBy(0.8)">Zoom Out<span class="shortcut">Ctrl −</span></div>
+      <div class="mi" onclick="zoomReset()">Reset Zoom<span class="shortcut">Ctrl 0</span></div>
+      <div class="mi" onclick="zoomFit()">Fit to Window</div>
+      <div class="menu-sep"></div>
       <div class="mi" onclick="setSidePane('lustre')">Lustre Text Pane</div>
       <div class="mi" onclick="setSidePane('c')">Generated C Pane</div>
       <div class="menu-sep"></div>
@@ -362,6 +374,7 @@
   <div style="display:flex; align-items:center; gap:10px; margin:2px 0 6px">
     <strong id="diagram-node-name">…</strong>
     <div id="diagram-crumbs"></div>
+    <span id="zoom-label" class="zoom-label" title="Canvas zoom — Ctrl/⌘+wheel, middle-drag or Space-drag to pan; click to reset" onclick="zoomReset()">100%</span>
   </div>
   <div id="diagram-problems"></div>
   <div id="diagram-host"></div>
@@ -707,6 +720,10 @@ const state = {
   inspect: null, selectedNode: null, stepHistory: "",
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
+  // Canvas view: zoom multiplier (the SVG is drawn at W*zoom × H*zoom over a
+  // fixed `0 0 W H` viewBox, so model coordinates never change) and a transient
+  // pan-drag (middle-button / space-drag scrolls #diagram-host).
+  zoom: 1, panning: null,
   sim: { built: false, running: false, values: {} },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
@@ -1324,11 +1341,21 @@ document.addEventListener("keydown", ev => {
     deleteSelected();
     return;
   }
+  // Hold Space to drag-pan the canvas with the left button (middle-button
+  // drag pans without it). Tracked here so pointerdown can branch on it.
+  if (ev.code === "Space" && !ev.repeat) { state.spaceDown = true; }
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = ev.key.toLowerCase();
     if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
     else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
+    // Canvas zoom — Ctrl +/-/0, matching the View menu.
+    else if (k === "=" || ev.key === "+") { ev.preventDefault(); zoomBy(1.25); }
+    else if (k === "-" || ev.key === "_") { ev.preventDefault(); zoomBy(0.8); }
+    else if (k === "0") { ev.preventDefault(); zoomReset(); }
   }
+});
+document.addEventListener("keyup", ev => {
+  if (ev.code === "Space") state.spaceDown = false;
 });
 // Any click outside the menu dismisses it.
 document.addEventListener("click", ev => {
@@ -1893,7 +1920,14 @@ function renderDiagram() {
   d.locals.forEach(l => typeOf[l.name] = typeName(l.type));
 
   const g = gridPitch();
-  let svg = '<svg id="diagram-svg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  // Zoom is a pure presentation scale: the viewBox stays in model units
+  // (`0 0 W H`) so every box/wire/pin coordinate and the grid are unchanged,
+  // while the SVG is painted at W*zoom × H*zoom CSS pixels. #diagram-host's
+  // scrollbars (and drag-pan) then navigate the scaled canvas. svgPoint() uses
+  // getScreenCTM().inverse(), so pointer math is correct at any zoom.
+  const z = state.zoom;
+  let svg = '<svg id="diagram-svg" viewBox="0 0 ' + W + ' ' + H + '" width="' + (W * z) +
+    '" height="' + (H * z) + '" xmlns="http://www.w3.org/2000/svg">';
   if (document.getElementById("grid-show").checked) {
     // Engineering grid: minor lines every pitch, major every 5 pitches.
     svg += '<defs>' +
@@ -2007,6 +2041,7 @@ function renderDiagram() {
   svgEl.addEventListener("pointermove", diagPointerMove);
   svgEl.addEventListener("pointerup", diagPointerUp);
   svgEl.addEventListener("contextmenu", diagContextMenu);
+  updateZoomLabel();
 }
 
 function boxCls(base, p) {
@@ -2015,13 +2050,84 @@ function boxCls(base, p) {
   return base;
 }
 
-function svgPoint(ev) {
-  const r = document.getElementById("diagram-svg").getBoundingClientRect();
-  return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+// Client (screen) coordinates → model (viewBox) coordinates. Using the SVG's
+// own screen CTM makes this exact regardless of zoom, scroll, or page layout.
+function clientToModel(cx, cy) {
+  const svg = document.getElementById("diagram-svg");
+  const ctm = svg && svg.getScreenCTM && svg.getScreenCTM();
+  if (ctm) {
+    const pt = svg.createSVGPoint();
+    pt.x = cx; pt.y = cy;
+    const m = pt.matrixTransform(ctm.inverse());
+    return { x: m.x, y: m.y };
+  }
+  const r = svg.getBoundingClientRect();
+  return { x: (cx - r.left) / state.zoom, y: (cy - r.top) / state.zoom };
+}
+function svgPoint(ev) { return clientToModel(ev.clientX, ev.clientY); }
+
+// --- Canvas zoom & pan -------------------------------------------------------
+const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
+function clampZoom(z) { return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z)); }
+
+// The current diagram extent in model units, matching renderDiagram's W/H.
+function diagramExtent() {
+  let maxX = 0, maxY = 0;
+  for (const p of Object.values(state.diagPos)) {
+    maxX = Math.max(maxX, p.x + (p.w || DIAG.EQW));
+    maxY = Math.max(maxY, p.y + (p.h || DIAG.BOXH));
+  }
+  return { W: Math.max(maxX + 40, 780), H: Math.max(maxY + 30, 240) };
+}
+
+function updateZoomLabel() {
+  const el = document.getElementById("zoom-label");
+  if (el) el.textContent = Math.round(state.zoom * 100) + "%";
+}
+
+// Re-render at `newZoom`, keeping the model point under (clientX, clientY)
+// fixed on screen. With no anchor given, the host viewport centre is held.
+function setZoomAnchored(newZoom, clientX, clientY) {
+  const host = document.getElementById("diagram-host");
+  newZoom = clampZoom(newZoom);
+  if (!host || !state.diagramData) { state.zoom = newZoom; updateZoomLabel(); return; }
+  const rect = host.getBoundingClientRect();
+  const ax = (clientX == null ? rect.left + host.clientWidth / 2 : clientX) - rect.left;
+  const ay = (clientY == null ? rect.top + host.clientHeight / 2 : clientY) - rect.top;
+  const modelX = (host.scrollLeft + ax) / state.zoom;
+  const modelY = (host.scrollTop + ay) / state.zoom;
+  state.zoom = newZoom;
+  renderDiagram();
+  host.scrollLeft = modelX * newZoom - ax;
+  host.scrollTop = modelY * newZoom - ay;
+  updateZoomLabel();
+}
+
+function zoomBy(factor) { setZoomAnchored(state.zoom * factor, null, null); }
+function zoomReset() { setZoomAnchored(1, null, null); }
+function zoomFit() {
+  const host = document.getElementById("diagram-host");
+  if (!host || !state.diagramData) return;
+  const { W, H } = diagramExtent();
+  const z = clampZoom(Math.min(host.clientWidth / W, host.clientHeight / H));
+  state.zoom = z;
+  renderDiagram();
+  host.scrollLeft = 0; host.scrollTop = 0;
+  updateZoomLabel();
 }
 
 function diagPointerDown(ev) {
   hideCtxMenu();
+  // Middle-button (or Space + left) drag pans the canvas by scrolling the host.
+  if (ev.button === 1 || (state.spaceDown && ev.button === 0)) {
+    const host = document.getElementById("diagram-host");
+    state.panning = { x0: ev.clientX, y0: ev.clientY, sl: host.scrollLeft, st: host.scrollTop };
+    host.classList.add("panning");
+    const svgEl = document.getElementById("diagram-svg");
+    svgEl.setPointerCapture && svgEl.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+    return;
+  }
   // Grabbing a pin starts a wire, not a move.
   if (ev.target.classList && ev.target.classList.contains("pin")) {
     const pt = svgPoint(ev);
@@ -2057,6 +2163,13 @@ function diagPointerDown(ev) {
 }
 
 function diagPointerMove(ev) {
+  if (state.panning) {
+    const host = document.getElementById("diagram-host");
+    host.scrollLeft = state.panning.sl - (ev.clientX - state.panning.x0);
+    host.scrollTop = state.panning.st - (ev.clientY - state.panning.y0);
+    ev.preventDefault();
+    return;
+  }
   if (state.wireDrag) {
     const pt = svgPoint(ev);
     state.wireDrag.x = pt.x;
@@ -2088,6 +2201,11 @@ function diagPointerMove(ev) {
 }
 
 async function diagPointerUp(ev) {
+  if (state.panning) {
+    state.panning = null;
+    document.getElementById("diagram-host").classList.remove("panning");
+    return;
+  }
   if (state.resize) { state.resize = null; saveLayout(); return; }
   if (state.wireDrag) {
     const wd = state.wireDrag;
@@ -2557,6 +2675,15 @@ async function switchedWorkspace(note) {
 }
 
 const diagramHostEl = document.getElementById("diagram-host");
+// Ctrl/⌘ + wheel (and trackpad pinch, which arrives as a ctrl-wheel) zooms
+// toward the cursor; a plain wheel scrolls natively.
+diagramHostEl.addEventListener("wheel", ev => {
+  if (!(ev.ctrlKey || ev.metaKey) || !state.diagramData) return;
+  ev.preventDefault();
+  setZoomAnchored(state.zoom * (ev.deltaY < 0 ? 1.12 : 0.89), ev.clientX, ev.clientY);
+}, { passive: false });
+// Middle-button drag is a pan gesture; suppress the browser's autoscroll.
+diagramHostEl.addEventListener("auxclick", ev => { if (ev.button === 1) ev.preventDefault(); });
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
   ev.preventDefault();
@@ -2565,10 +2692,10 @@ diagramHostEl.addEventListener("drop", async ev => {
   // A state machine isn't a placed block — it opens the textual editor bound
   // to the operator whose canvas this is.
   if (data === "sm:new") { openStateMachineForCurrent(); return; }
-  const svgEl = document.getElementById("diagram-svg");
-  const r = (svgEl || diagramHostEl).getBoundingClientRect();
-  const x = snap(Math.max(0, ev.clientX - r.left));
-  const y = snap(Math.max(0, ev.clientY - r.top));
+  // Convert through the SVG's screen CTM so the drop lands correctly at any zoom.
+  const m = clientToModel(ev.clientX, ev.clientY);
+  const x = snap(Math.max(0, m.x));
+  const y = snap(Math.max(0, m.y));
 
   // A type dropped from the Types section opens a kind-specific action menu
   // (MAKE/FLATTEN/SLICE for arrays, MAKE/FLATTEN for records, variant/compare/

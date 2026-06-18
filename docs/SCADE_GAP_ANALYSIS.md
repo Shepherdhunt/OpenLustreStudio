@@ -119,8 +119,9 @@ symbols; typed wire labels.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
-   copy/paste, distinct per-family gate silhouettes (§2).
+4. **Editor polish** (P1/P2) — **zoom/pan landed 2026-06-18** (§6); remaining:
+   orthogonal (Manhattan) wire routing, copy/paste, distinct per-family gate
+   silhouettes (§2).
 5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 6. **Automata depth** (P2) — history / signals UI, and richer parallel
@@ -133,7 +134,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
-| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, multi-select + right-click menu + Delete, red invalid-link coding |
+| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, multi-select + right-click menu + Delete, red invalid-link coding |
 | Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
@@ -159,7 +160,8 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
-| **P1 — Zoom/pan, copy/paste** | Standard | SVG viewBox transforms + selection-rectangle marquee + clipboard | Medium |
+| ~~P1 — Zoom/pan~~ | Standard | **Landed 2026-06-18**: a fixed `0 0 W H` viewBox painted at `W·zoom × H·zoom`; Ctrl/⌘+wheel (and trackpad pinch) zooms toward the cursor, middle-/Space-drag and scrollbars pan, View ▸ Zoom + Ctrl +/−/0, a click-to-reset % badge; `getScreenCTM().inverse()` makes drag/drop/wire math exact at any zoom. See §6 | done |
+| **P1 — Copy/paste, marquee select** | Standard | Selection-rectangle marquee + clipboard (duplicate via add_operation/add_equation) | Medium |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
 | **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
 
@@ -213,6 +215,30 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-18 — canvas zoom & pan
+
+The first of the §2 editor-polish gaps, and the foundation for the rest
+(marquee-select and copy/paste all depend on a correct screen↔model transform).
+
+* **Zoom as a pure presentation scale.** The diagram SVG keeps a fixed
+  `viewBox="0 0 W H"` (model units) and is painted at `W·zoom × H·zoom` CSS
+  pixels, so every box/wire/pin coordinate, the grid, snap-to-grid, and the
+  saved layout are completely unchanged — zoom is never persisted or mixed into
+  the model. `#diagram-host`'s scrollbars navigate the scaled canvas.
+* **One coordinate transform for everything.** `clientToModel()` (used by
+  `svgPoint`, the drag/resize/wire handlers, *and* the palette-drop handler)
+  now goes through `svg.getScreenCTM().inverse()`, so pointer math is exact at
+  any zoom or scroll offset — the previous `getBoundingClientRect()` subtraction
+  only worked at 1:1.
+* **Gestures.** Ctrl/⌘+wheel (and trackpad pinch, which arrives as a
+  ctrl-wheel) zooms toward the cursor by anchoring the model point under the
+  pointer; middle-button drag and Space+left-drag pan (scroll the host);
+  scrollbars pan natively. View ▸ Zoom In/Out/Reset/Fit, Ctrl +/−/0, and a
+  click-to-reset `%` badge in the diagram header. Zoom clamps to 25 %–400 %.
+* GUI-only slice: JS syntax-checked, the served page verified to carry the new
+  controls and code, full Rust suite still green. (Browser-driven interaction
+  verified live, per the project's GUI-testing convention.)
 
 ### 2026-06-18 — float intrinsics (`sqrt`, `sin`, `cos`, `abs`, `min`, `max`, …)
 
