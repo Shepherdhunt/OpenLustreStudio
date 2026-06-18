@@ -19,7 +19,11 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Float intrinsics.** `square_root` is
+**Landed recently (newest first):** **Tool Operational Requirements document.**
+`docs/TOOL_OPERATIONAL_REQUIREMENTS.md` states every operation the tool claims as
+a numbered requirement (TOR-001 … TOR-702) bound to its test evidence — the fourth
+and last pillar of verification-by-equivalence (§4). Before that: **Float
+intrinsics.** `square_root` is
 un-greyed and a full math family — `sin`, `cos`, `tan`, `exp`, `log`, `abs`,
 `min`, `max`, `pow` — is first-class across every stage, mirroring
 `numeric_cast`: a new `Expr::Intrinsic { func, args }` IR node, surface syntax
@@ -116,16 +120,26 @@ symbols; typed wire labels.
    `sin/cos/tan/exp/log/abs/min/max/pow` as a `float64` family across IR, parse,
    typecheck, sim, generated C (`<math.h>`), and the Kind 2 view (§6). `float32`
    intrinsics remain roadmap.
-3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
-   the last piece of the verification-by-equivalence story (§4); pure docs, the
-   test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — **zoom/pan and copy/paste + marquee select
-   landed 2026-06-18** (§6); remaining: orthogonal (Manhattan) wire routing and
-   distinct per-family gate silhouettes (§2).
-5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
-   cosmetic), then code signing (P2, cost not code).
-6. **Automata depth** (P2) — history / signals UI, and richer parallel
-   composition beyond instantiating several machines in one operator.
+3. *(Landed 2026-06-18)* ~~**Tool Operational Requirements document**~~ —
+   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` enumerates every operation the tool
+   claims (TOR-001…TOR-702) and binds each to its test evidence, completing the
+   verification-by-equivalence story (§4). 214 passing tests across 57 groups are
+   the verification cases.
+4. *(Landed 2026-06-18)* ~~**Editor polish**~~ — zoom/pan, copy/paste + marquee
+   select, **orthogonal (Manhattan) wire routing**, and **distinct per-family gate
+   silhouettes** (curved-AND, pointed-OR, mux trapezoid, delay register) all
+   shipped (§2, §6). Remaining editor items are now P2: multi-sheet diagrams and
+   MDI document tabs.
+5. *(Landed 2026-06-18)* ~~**Deployment & target codegen**~~ — `.wksc`/`.ols`
+   file association, a generated multi-resolution app icon, and **target/OS build
+   profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional
+   cross-build Makefile + `INTEGRATION.md` per target) shipped (§5, §6).
+   Remaining: a **QEMU + Docker emulated-target test backend** (P3 — a third
+   equivalence backend), code signing (P2), winget/MSIX.
+6. **Automata depth** (P2) — **history + inline nested-region authoring landed
+   2026-06-18** (§6); remaining: **signals** (a new cross-stack IR construct —
+   the next real automata feature) and richer parallel composition beyond
+   instantiating several machines in one operator.
 
 Everything ships across all stages — IR → typecheck → sim → generated C →
 dual-backend equivalence test — or it isn't done. The §6 log records each slice.
@@ -134,12 +148,12 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
-| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, **marquee select + copy/paste of blocks**, multi-select + right-click menu + Delete, red invalid-link coding |
+| Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), **per-family gate silhouettes** (D-shape AND, pointed-OR, mux trapezoid, delay register), **orthogonal (Manhattan) wire routing**, draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, **marquee select + copy/paste of blocks**, multi-select + right-click menu + Delete, red invalid-link coding |
 | Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
-| Build & codegen | KCG qualified C/Ada (TQL-1) | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing |
+| Build & codegen | KCG qualified C/Ada (TQL-1), multiple target integrations | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing, **target/OS build profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional cross-build Makefile + `INTEGRATION.md` per target) |
 | Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage **and unique-cause MC/DC** with uncovered reporting |
 | Deployment | Commercial installer suite | Inno Setup Windows installer, Start Menu/Desktop shortcuts, embedded stdlib, Linux install script, CI release workflow |
 | Qualification | DO-178C/DO-330 qualification kits, 20+ years of certification credit | None (see §4) |
@@ -159,11 +173,11 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P0 — Pin-to-pin wire drawing~~ | Drag from an output pin to an input pin creates a connection | **Landed 2026-06-13**: operation blocks render as SCADE gates with one input pin per operand on the left edge (red when unbound) and an output pin on the right; dragging a source pin onto a specific input pin binds that operand. AND/OR/etc. drop with their minimum two pins and grow to twelve. See §6 | done |
 | ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
-| **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
+| ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-06-18**: cubic Béziers replaced with H/V routing — forward wires turn through a mid-x channel, backward (feedback) wires detour around boxes, near-aligned wires draw straight, all with rounded elbows (`orthoPoints`/`roundedPath` in studio_ui.html). See §6 | done |
 | ~~P1 — Zoom/pan~~ | Standard | **Landed 2026-06-18**: a fixed `0 0 W H` viewBox painted at `W·zoom × H·zoom`; Ctrl/⌘+wheel (and trackpad pinch) zooms toward the cursor, middle-/Space-drag and scrollbars pan, View ▸ Zoom + Ctrl +/−/0, a click-to-reset % badge; `getScreenCTM().inverse()` makes drag/drop/wire math exact at any zoom. See §6 | done |
 | ~~P1 — Copy/paste, marquee select~~ | Standard | **Landed 2026-06-18**: drag on empty canvas for a rubber-band marquee (overlap-selects boxes, Shift/Ctrl adds); Ctrl+C/X/V (and a context menu) copy/cut/paste operation blocks via `/api/edit/paste`, which clones equations with fresh result-local names, rewires references *within* the copied set, looks types up by name (clipboard survives index shifts), and cascades repeated pastes. See §6 | done |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
-| **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
+| ~~P2 — Per-family gate silhouettes~~ | Distinct shapes per operator family (gates, delays, switches) | **Landed 2026-06-18**: `gateFamily`/`gateBody` key off the symbol glyph — AND is a D-shape, OR/XOR/⇒ a pointed shield, ITE a multiplexer trapezoid, pre/FBY/-> a register block; the straight left edge keeps input pins seated and the right tip keeps the output pin seated. See §6 | done |
 
 ## 3. Language and toolchain gaps
 
@@ -171,7 +185,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: signals, and richer parallel/history UI (a state's inline nested-region authoring beyond `refine`) | P2 |
+| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned**; a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6); the editor now authors a **nested region inline** with a `{ … }` block including the **`history`** flag (§6). Remaining: signals, and richer parallel composition beyond instantiating several machines in one operator | P2 |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
@@ -196,9 +210,11 @@ qualification-by-pedigree**, and it is already half-built:
    Level A metric) measured on the IR backend and reported per condition (done 2026-06-12;
    masking MC/DC for coupled conditions remains roadmap).
 4. **Tool Operational Requirements document** — enumerate what the tool claims to do,
-   with the test suite as verification cases (not started; pure documentation work,
-   P1 if certification-adjacent use is a goal). With MC/DC landed, this is now the
-   single remaining piece of the verification-by-equivalence story.
+   with the test suite as verification cases (**done 2026-06-18**:
+   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md`, TOR-001…TOR-702, each requirement bound
+   to its test evidence; 214 tests / 57 groups are the verification cases). With
+   MC/DC and now the TOR document landed, the four pillars of
+   verification-by-equivalence are all in place.
 
 That story positions the tool as: *generated code you independently verify*, which
 is a legitimate (if more laborious) DO-178C path where the applicant carries the
@@ -208,13 +224,154 @@ verification burden the qualified tool would otherwise discharge.
 
 | Gap | Notes | Priority |
 |---|---|---|
-| File association | `.ols`/`.json` model double-click should open the Studio (registry entries in the installer) | P1 |
-| App icon | The shortcut currently uses the default exe icon | P1, cosmetic |
+| ~~File association~~ | `.ols`/`.json` model double-click should open the Studio (registry entries in the installer) | **Done 2026-06-18**: the installer registers `.wksc` and `.ols` → `OpenLustreStudio.Model` → `openlustre.exe studio launch "%1"` (HKA, so per-user or per-machine). `.lus` is left unclaimed (import-only, shared with other Lustre tools) and `.json` is too generic to hijack. |
+| ~~App icon~~ | The shortcut currently uses the default exe icon | **Done 2026-06-18**: `packaging/windows/make-icon.ps1` generates a multi-resolution `openlustre.ico` (white AND-gate on the app blue); used for the Setup.exe, Start-Menu/Desktop shortcuts, the file-type DefaultIcon, and the uninstall entry. |
 | Code signing | Unsigned installers trip SmartScreen; needs a cert (cost, not code) | P2 |
 | winget/MSIX distribution | `winget install OpenLustreStudio` once the repo publishes releases | P2 |
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
+| ~~Target/OS build profiles~~ | Pick the OS/board for codegen; generate a toolchain-tuned Makefile + integration note | **Done 2026-06-18**: host (compiles locally) + embedded Linux-ARM / VxWorks / bare-metal-ARM (directional — emit build files for the target toolchain). `crates/ol_cli/src/target.rs`, `/api/targets`, Compile dialog selector |
+| Emulated target testing (QEMU + Docker) | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — effectively a *third* equivalence backend | P3 roadmap (the target profiles landed 2026-06-18 are the foundation; `INTEGRATION.md` flags it) |
 
 ## 6. What closed recently
+
+### 2026-06-18 — target / OS build profiles (directional codegen)
+
+The embedded-systems use case: generate C-Lite aimed at a specific OS/board, to
+be built with that target's toolchain — SCADE's "generate, then integrate on the
+target" workflow.
+
+* **Target profiles.** `crates/ol_cli/src/target.rs` defines a `TargetProfile`
+  (id, label, OS, arch, toolchain `cc`, CFLAGS/LDFLAGS, `cross`, integration
+  note) and a built-in set: **host** (compiles locally with the auto-detected
+  compiler, as before), **Linux x86-64 (gcc)**, **embedded Linux ARM**
+  (`arm-linux-gnueabihf-gcc`), **VxWorks** (`wr-cc`), and **bare-metal ARM**
+  (`arm-none-eabi-gcc`).
+* **Directional generation.** `/api/clite/compile` takes a `target`: it emits a
+  toolchain-tuned `Makefile` (right `CC`/`CFLAGS`/`LDLIBS`, target named in the
+  header) and a target-specific `INTEGRATION.md` (build steps + the periodic
+  `<entry>_step` integration pattern — `taskSpawn`/`taskDelay` for VxWorks, a
+  timer ISR for bare-metal). The **host** target compiles locally as today; a
+  **cross** target writes the build files and reports "build on the target
+  toolchain" rather than attempting a cross-compile here. `makefile_for_entry`
+  now delegates to the host profile (one source of truth).
+* **UI.** The Compile-C-Lite dialog's target selector (previously a roadmap stub)
+  is populated from `GET /api/targets`; choosing a cross target shows its
+  toolchain note and explains the compiler box is ignored.
+* **Verified.** Unit tests in `target.rs` (profiles, `find_target` defaulting to
+  host, the Makefile carries the cross toolchain, `INTEGRATION.md` has balanced
+  braces and names the step call). Live: all five targets list, the host target
+  compiles `Doubler.exe`, embedded-Linux/VxWorks targets emit their files +
+  `INTEGRATION.md` with the correct `arm-linux-gnueabihf-gcc` / `wr-cc`
+  toolchains and are not compiled locally.
+* **Roadmap (logged in §5):** a one-click **QEMU emulation + Docker** run of the
+  generated build against the scenario suite — a *third* equivalence backend
+  alongside the IR simulator and host-compiled C.
+
+### 2026-06-18 — automata: inline nested-region & history authoring
+
+The hierarchical-automata *engine* (nested `Region`s with restart-on-entry,
+freeze, and **history**) has been in place since the June 16 slices, but the
+text editor could only author flat machines and `refine`-by-reference. Now the
+states box authors a nested region **inline**:
+
+```
+On: { initial Lo; history; Lo: beat=false; Hi: beat=true; Lo -> Hi when up; Hi -> Lo when down }
+```
+
+* **Client-only** — the server (`parse_sm_states`/`sm_state_json`) already
+  round-trips nested `regions` with `history`, and the engine already lowers
+  them; this slice is purely the editor. `fsmBuildPayload` parses the `{ … }`
+  block (segments `initial Sub`, `history`, sub-state `Sub: lhs = expr`, and
+  sub-transition `A -> B when g`) into the `regions` JSON; `fsmLoadIntoForm`
+  reconstructs the block (so it round-trips); `fsmPreview` keyword-colours
+  `initial`/`history` and the sub-states/transitions. One level of nesting in
+  v1 (deeper nesting reports a clear error, never silently truncates).
+* **Verified** end to end in the Studio: the client parse produces the exact
+  `regions`/`history` shape and is round-trip-identical (load → re-parse); and a
+  hierarchical, `history` machine authored this way, added to a fresh operator,
+  is accepted, **lowers and typechecks clean** (both `…_StateEnum` and
+  `…_r1_StateEnum`, and the nested-region activation local `__sm_r1_active`),
+  and round-trips back through `/api/fsm` — all in a throwaway workspace so the
+  user's workspace is untouched. The coloured preview was verified visually.
+* **Still open (the next real automata feature):** **signals** — broadcast
+  events within a synchronous step. Unlike history, signals are *not* in the
+  engine yet; they need a new IR construct carried across typecheck, sim, and
+  generated C (the project's "every stage" bar), so they are their own slice,
+  not an editor-only addition.
+
+### 2026-06-18 — file association & app icon (deployment)
+
+The two §5 P1 deployment gaps, both in `packaging/windows`.
+
+* **App icon.** `make-icon.ps1` generates `openlustre.ico` from scratch (no
+  image tooling needed at build time): a white AND-gate D-shape with pin stubs
+  on the app's blue (#2B579A) rounded square — the same silhouette the canvas
+  draws — rendered with `System.Drawing` at 16/24/32/48/64/128/256 px and packed
+  into a PNG-compressed multi-resolution `.ico` (validated by re-loading it and
+  sampling pixels: transparent corner, blue field, white gate). The installer
+  uses it for the Setup.exe (`SetupIconFile`), the Start-Menu and Desktop
+  shortcuts (`IconFilename`), the file-type `DefaultIcon`, and the Add/Remove
+  Programs entry (`UninstallDisplayIcon`).
+* **File association.** A `[Registry]` block maps `.wksc` (the canonical
+  workspace file) and `.ols` (a YAML model) to a `OpenLustreStudio.Model` ProgID
+  whose `shell\open\command` runs `openlustre.exe studio launch "%1"` —
+  `resolve_workspace` already serves a direct file path, so a double-click opens
+  that model in the Studio. Written under `HKA` (per-machine on an elevated
+  install, per-user otherwise), cleaned up on uninstall, with
+  `ChangesAssociations=yes` so Explorer refreshes immediately. `.lus` is
+  deliberately *not* claimed (it is an import-only format shared with other
+  Lustre tooling) and `.json` is too generic to take over.
+* Verified by building the installer end to end (`build-installer.ps1`): the
+  release binary recompiles with the new icon embedded in the page, ISCC parses
+  the new `[Registry]`/icon directives, packs `openlustre.ico`, and emits
+  `OpenLustreStudio-0.1.0-Setup.exe`. (Installing and double-clicking a `.wksc`
+  is the final manual confirmation.)
+
+### 2026-06-18 — orthogonal wire routing & per-family gate silhouettes
+
+The remaining §2 diagram-editor gaps, both GUI-only (studio_ui.html).
+
+* **Orthogonal (Manhattan) wire routing.** The cubic-Bézier wire is replaced by
+  a right-angle route with rounded elbows. `orthoPoints(x1,y1,x2,y2)` picks the
+  route: a forward wire with a real vertical offset turns through a vertical
+  channel at the mid-x; a near-aligned forward wire draws as one straight line
+  (no pointless micro-jog); a backward/feedback wire (target left of source)
+  stands off both box edges and shares a horizontal channel between them, so it
+  detours *around* rather than looping through boxes. `roundedPath(pts, r)`
+  renders any polyline with quadratic-rounded corners (collinear points collapse
+  cleanly). All routing is in model space, so it is exact at any zoom.
+* **Per-family gate silhouettes.** `gateFamily(it)` maps the symbol glyph to a
+  family and `gateBody(fam, p, h, cls)` draws it: **AND** → a D-shape (flat
+  back, semicircular front), **OR / XOR / ⇒** → a pointed shield, **ITE** → a
+  multiplexer trapezoid (tall input edge, short output edge), **pre / FBY / ->**
+  → a rectangle with a register bar; everything else stays the rounded rect.
+  Every silhouette keeps a **straight left edge at `x`** (so the per-operand
+  input pins stay seated on it) and reaches its **right tip at `x+w`** (so the
+  output pin stays seated) — verified by measuring each shape's bounding box.
+  The shapes reuse the `.box`/`.eq`/`.invalid`/`.selected` classes, so red
+  invalid-coding and the selection highlight apply unchanged.
+* GUI-only slice: the four new helpers were verified live in the browser — the
+  served page parses cleanly (functions defined, zero console/server errors), the
+  real Heartbeat operator's AND renders as a D-shape with correctly-seated pins,
+  the three wire cases (straight / channel-elbow / feedback-detour) all draw
+  correctly, and a probe gallery confirmed OR/ITE/pre/default. The Rust suite is
+  untouched (no Rust changed; 214 tests green at baseline).
+
+### 2026-06-18 — Tool Operational Requirements document
+
+The fourth and final pillar of verification-by-equivalence (§4). New
+`docs/TOOL_OPERATIONAL_REQUIREMENTS.md` is a DO-330-style TOR: it states, as
+numbered requirements (TOR-001 … TOR-702), every operation the tool claims —
+model management & authoring (1xx), static verification (2xx), simulation (3xx),
+code generation (4xx), formal verification (5xx), test/coverage/equivalence
+(6xx), deployment (7xx) — and binds each to its DO-330 verification method
+(Test/Analysis/Review) and **evidence**: the test file/function or source
+location that demonstrates it. A §8 enumerates the conscious v1 limits (each
+loud, none silent) that bound the claims, and §9 records the verification
+baseline (214 passing tests, 0 failed, across 57 result groups on Windows/MSVC).
+The document's premise is that the test suite *is* the verification record —
+a requirement is unmet the moment its cited test fails, so there is no separate
+drifting artifact. Pure documentation; the test evidence already existed.
 
 ### 2026-06-18 — canvas copy/paste & marquee select
 
