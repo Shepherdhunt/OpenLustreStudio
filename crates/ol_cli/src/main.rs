@@ -1332,10 +1332,12 @@ fn welcome_project_path() -> Result<PathBuf> {
     }
     let path = dir.join("welcome.wksc");
     if !path.exists() {
-        let project = starter_project();
+        // The default workspace opens blank — no operators by default. Add your
+        // own (Insert ▸ Operator), or open an example (e.g. examples/cruise_control).
+        let project = empty_project();
         std::fs::write(&path, serde_json::to_string_pretty(&project)?)
             .with_context(|| format!("writing {}", path.display()))?;
-        println!("studio: created starter workspace at {}", path.display());
+        println!("studio: created empty workspace at {}", path.display());
     }
     Ok(path)
 }

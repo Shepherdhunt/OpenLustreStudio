@@ -135,12 +135,23 @@ fn launch_creates_welcome_project_and_serves_the_embedded_palette() {
     let welcome = g.home.join("OpenLustre/welcome.wksc");
     assert!(welcome.exists(), "welcome workspace not created");
 
-    // The served project is the starter model, with the embedded 41-block
-    // palette merged — no --with-stdlib flag, no libraries/ checkout needed.
+    // The default workspace opens BLANK — no operators by default (the user
+    // adds their own / opens an example). The embedded 41-block palette is still
+    // merged (no --with-stdlib flag, no libraries/ checkout needed).
     let (s, body) = http_get(g.port, "/api/inspect").expect("inspect");
     assert_eq!(s, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert_eq!(v["project"]["main"], "Heartbeat");
+    assert!(v["project"]["main"].is_null(), "welcome has no main: {}", v["project"]["main"]);
+    let user_ops: Vec<String> = v["project"]["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|p| p["name"] != "stdlib")
+        .flat_map(|p| p["nodes"].as_array().cloned().unwrap_or_default())
+        .filter_map(|n| n["name"].as_str().map(|s| s.to_string()))
+        .collect();
+    assert!(user_ops.is_empty(), "welcome must have no operators by default: {user_ops:?}");
+    // The stdlib palette is still merged and available.
     let names: Vec<&str> = v["project"]["packages"]
         .as_array()
         .unwrap()
@@ -148,8 +159,7 @@ fn launch_creates_welcome_project_and_serves_the_embedded_palette() {
         .flat_map(|p| p["nodes"].as_array().unwrap())
         .filter_map(|n| n["name"].as_str())
         .collect();
-    assert!(names.contains(&"Heartbeat"), "starter node missing: {names:?}");
     assert!(names.contains(&"RisingEdge"), "embedded palette missing: {names:?}");
     assert!(names.contains(&"SRFlipFlop"), "embedded FSM block missing");
-    assert_eq!(v["summary"]["errors"], 0, "starter project must be clean");
+    assert_eq!(v["summary"]["errors"], 0, "empty welcome must be clean");
 }

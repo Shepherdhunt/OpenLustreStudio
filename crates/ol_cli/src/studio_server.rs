@@ -3583,7 +3583,9 @@ fn workspace_open_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
     if !path.exists() {
         return bad(&format!("{} does not exist", path.display()));
     }
-    let resolved = match crate::resolve_workspace(&path, false) {
+    // `empty=true`: if the path is a not-yet-created folder, open it blank — no
+    // starter operator. An existing workspace loads its real contents regardless.
+    let resolved = match crate::resolve_workspace(&path, true) {
         Ok(p) => p,
         Err(e) => return bad(&format!("{e:#}")),
     };
