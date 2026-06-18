@@ -301,6 +301,31 @@ fn workspace_new_open_save_switches_the_active_workspace() {
     assert_eq!(s3, 400, "opening a missing path is rejected");
 }
 
+/// The Open/Save "browse" backend: `/api/fs/list` navigates the filesystem
+/// (dirs + workspace files + a parent for "Up"), and `save_as` writes the
+/// current workspace to a new path and switches to it.
+#[test]
+fn fs_list_navigates_and_save_as_switches() {
+    let g = start_server_on_workspace("ws_fs");
+    let port = g.port;
+    let ws = g.tmp.join("ws");
+
+    // Browse the workspace folder: its `.wksc` shows up and there is a parent.
+    let v = get_json(port, &format!("/api/fs/list?path={}", ws.to_str().unwrap()));
+    let files: Vec<String> = v["files"].as_array().unwrap().iter()
+        .filter_map(|f| f["name"].as_str().map(String::from)).collect();
+    assert!(files.iter().any(|f| f == "ws.wksc"), "fs/list shows the workspace file: {files:?}");
+    assert!(v["parent"].is_string(), "fs/list provides a parent for Up");
+
+    // Save As to a new folder: writes the .wksc + switches to it.
+    let dst = g.tmp.join("saved").join("copy.wksc");
+    let (s, b) = request(port, "POST", "/api/workspace/save_as",
+        &serde_json::json!({ "path": dst.to_str().unwrap() }).to_string()).expect("save_as");
+    assert_eq!(s, 200, "save_as: {b}");
+    assert!(dst.exists(), "save_as wrote {}", dst.display());
+    assert_eq!(get_json(port, "/api/inspect")["project"]["name"], "copy", "switched to the saved copy");
+}
+
 /// `openlustre new --empty` seeds a project with no operators; the Studio
 /// serves it without trouble and it stays editable (you can add operators in).
 #[test]

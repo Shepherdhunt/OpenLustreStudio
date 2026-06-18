@@ -243,6 +243,21 @@ verification burden the qualified tool would otherwise discharge.
 
 ## 6. What closed recently
 
+### 2026-06-18 — Open/Save/New workspace browse dialogs
+
+File ▸ Open / Save As / New now **browse the filesystem** instead of typing a
+path. The dialog is an **in-app navigator** (server `/api/fs/list` lists
+subfolders + workspace files with a parent for *Up* and a *This PC* drives view;
+the client renders breadcrumb + clickable entries) — works everywhere and is
+fully testable. **Open** picks a `.wksc` to open; **Save As** (`/api/workspace/save_as`)
+writes the current workspace to a chosen folder/name and switches to it
+(carrying `types.json`); **New** creates an empty workspace in the chosen
+folder. A **"Browse… (native)"** button additionally pops the native OS file
+dialog on Windows (`/api/dialog/pick`, server-side PowerShell), falling back to
+the in-app navigator when unavailable. Verified live (navigation incl. drives,
+Open list, Save-As writes + switches, New is empty) + a server test
+(`fs_list_navigates_and_save_as_switches`).
+
 ### 2026-06-18 — cruise-control example + blank-by-default workspaces
 
 * **Empty by default.** The default/welcome workspace and *opening a fresh

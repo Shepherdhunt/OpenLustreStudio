@@ -267,9 +267,9 @@
   <div class="menu" data-menu="file">
     <span class="menu-title">File</span>
     <div class="dropdown">
-      <div class="mi" onclick="newWorkspace()">New Workspace…</div>
-      <div class="mi" onclick="openWorkspaceDialog()">Open Workspace…</div>
-      <div class="mi" onclick="saveWorkspace()">Save Workspace</div>
+      <div class="mi" onclick="openWorkspaceDialog('new')">New Workspace…</div>
+      <div class="mi" onclick="openWorkspaceDialog('open')">Open Workspace…</div>
+      <div class="mi" onclick="openWorkspaceDialog('save')">Save Workspace As…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-operator')">New Operator…</div>
       <div class="mi" onclick="openDialog('dlg-main')">Set Main Operator…</div>
@@ -599,13 +599,19 @@
   </div>
 
   <div class="dlg" id="dlg-open-workspace">
-    <p>Open a workspace — the <code class="inline">.wksc</code> workspaces found in this folder (and its immediate subfolders):</p>
-    <div class="row">
-      <label>folder</label>
-      <input id="ws-base" style="flex:1" placeholder="(default: ~/OpenLustre)">
-      <button onclick="loadWorkspaceList()">Rescan</button>
+    <p id="ws-dlg-intro">Browse to a workspace.</p>
+    <div class="row" style="align-items:center">
+      <button id="ws-up" onclick="wsUp()" title="Up one folder">⬆ Up</button>
+      <button onclick="wsGo('drives')" title="This PC (drives)">🖳 This PC</button>
+      <button onclick="wsBrowseNative()" title="Use the native OS file dialog">Browse… (native)</button>
+      <span id="ws-crumb" class="tree-meta" style="flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; direction:rtl; text-align:left"></span>
     </div>
-    <div id="ws-list"></div>
+    <div id="ws-list" style="max-height:260px; overflow:auto; border:1px solid #d2dae2; padding:2px"></div>
+    <div class="row" id="ws-save-row" style="display:none">
+      <label>file name</label>
+      <input id="ws-name" style="flex:1" placeholder="my_workspace" onkeydown="if(event.key==='Enter')wsAction()">
+      <button class="primary" id="ws-action" onclick="wsAction()">Save here</button>
+    </div>
     <div class="build-note" id="ws-open-status"></div>
   </div>
 
@@ -2782,67 +2788,99 @@ async function placePort(node, name, x, y) {
 
 // --- Workspace: New / Open / Save (File menu) --------------------------------
 
-async function openWorkspaceDialog() {
+// Workspace browser: an in-app filesystem navigator (works everywhere) plus a
+// native "Browse…" button. Modes: open / save (Save As) / new.
+const wsNav = { mode: "open", path: "", parent: null };
+
+function openWorkspaceDialog(mode) {
+  wsNav.mode = mode || "open";
   openDialog("dlg-open-workspace");
-  document.getElementById("ws-base").value = "";
   document.getElementById("ws-open-status").textContent = "";
-  await loadWorkspaceList();
+  document.getElementById("ws-dlg-intro").textContent = {
+    open: "Browse to a workspace and click it to open.",
+    save: "Browse to a folder, name the file, and save the current workspace there.",
+    new: "Browse to a folder, name the new (empty) workspace, and create it.",
+  }[wsNav.mode];
+  const saving = wsNav.mode !== "open";
+  document.getElementById("ws-save-row").style.display = saving ? "" : "none";
+  document.getElementById("ws-action").textContent = wsNav.mode === "save" ? "Save here" : "Create here";
+  document.getElementById("ws-name").value = "";
+  wsGo("");
 }
 
-async function loadWorkspaceList() {
-  const base = document.getElementById("ws-base").value.trim();
-  const q = base ? "?base=" + encodeURIComponent(base) : "";
+async function wsGo(path) {
   let data;
-  try { data = await fetchJSON("/api/workspace/list" + q); }
-  catch (e) { document.getElementById("ws-open-status").textContent = "list failed: " + e; return; }
-  if (!document.getElementById("ws-base").value) document.getElementById("ws-base").value = data.base;
+  try { data = await fetchJSON("/api/fs/list?path=" + encodeURIComponent(path)); }
+  catch (e) { document.getElementById("ws-open-status").textContent = "browse failed: " + e; return; }
+  wsNav.path = data.path; wsNav.parent = data.parent;
+  document.getElementById("ws-crumb").textContent = data.path;
+  document.getElementById("ws-up").disabled = data.parent === null;
   const host = document.getElementById("ws-list");
   host.innerHTML = "";
-  if (!data.workspaces.length) {
-    host.innerHTML = '<p class="build-note">No .wksc workspaces here — change the folder, or use File ▸ New Workspace.</p>';
-    return;
+  for (const d of data.dirs) {
+    const el = document.createElement("div");
+    el.className = "node"; el.style.cursor = "pointer";
+    el.textContent = "📁 " + d.name;
+    el.onclick = () => wsGo(d.path);
+    host.appendChild(el);
   }
-  for (const w of data.workspaces) {
-    const cur = w.path === data.current;
-    const d = document.createElement("div");
-    d.className = "node";
-    d.style.cursor = cur ? "default" : "pointer";
-    d.innerHTML = '<span class="kind">W</span> ' + escapeHTML(w.name) +
-      (cur ? ' <span class="tree-meta">(current)</span>' : '') +
-      '<div class="tree-meta" style="margin-left:18px">' + escapeHTML(w.path) + '</div>';
-    if (!cur) d.onclick = () => openWorkspace(w.path);
-    host.appendChild(d);
+  for (const f of data.files) {
+    const el = document.createElement("div");
+    el.className = "node"; el.style.cursor = "pointer";
+    el.innerHTML = '<span class="kind">W</span> ' + escapeHTML(f.name);
+    el.onclick = () => {
+      if (wsNav.mode === "open") openWorkspace(f.path);
+      else document.getElementById("ws-name").value = f.name.replace(/\.[^.]*$/, "");
+    };
+    host.appendChild(el);
+  }
+  if (!data.dirs.length && !data.files.length) host.innerHTML = '<p class="build-note">(no subfolders or workspaces here)</p>';
+}
+
+function wsUp() { wsGo(wsNav.parent !== null ? wsNav.parent : "drives"); }
+
+async function wsAction() {
+  const name = document.getElementById("ws-name").value.trim();
+  if (!name) { document.getElementById("ws-open-status").textContent = "enter a file name"; return; }
+  const target = wsNav.path.replace(/[\\/]$/, "") + "/" + name;
+  if (wsNav.mode === "save") await saveWorkspaceAs(target);
+  else await newWorkspaceAt(target);
+}
+
+// Native OS dialog (Windows); falls back to the in-app navigator if unavailable.
+async function wsBrowseNative() {
+  const m = wsNav.mode === "save" ? "save" : wsNav.mode === "new" ? "folder" : "open";
+  let r;
+  try { r = await (await fetch("/api/dialog/pick?mode=" + m)).json(); }
+  catch (e) { document.getElementById("ws-open-status").textContent = "native dialog failed: " + e; return; }
+  if (r.path) {
+    if (wsNav.mode === "open") await openWorkspace(r.path);
+    else if (wsNav.mode === "save") await saveWorkspaceAs(r.path);
+    else await newWorkspaceAt(r.path);
+  } else if (r.unsupported) {
+    document.getElementById("ws-open-status").textContent = "native dialog unavailable here — use the list above.";
   }
 }
 
 async function openWorkspace(path) {
   const resp = await fetch("/api/workspace/open", { method: "POST", body: JSON.stringify({ path }) });
-  if (!resp.ok) {
-    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
-    document.getElementById("ws-open-status").textContent = "open failed: " + m;
-    return;
-  }
+  if (!resp.ok) { let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {} document.getElementById("ws-open-status").textContent = "open failed: " + m; return; }
   closeDialog();
   await switchedWorkspace("opened " + path);
 }
 
-async function newWorkspace() {
-  const dir = prompt("New workspace — destination folder (a <name>.wksc, types.json and scenarios/ are created inside):", "");
-  if (dir === null || !dir.trim()) return;
-  const resp = await fetch("/api/workspace/new", { method: "POST", body: JSON.stringify({ path: dir.trim() }) });
-  if (!resp.ok) {
-    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
-    document.getElementById("diagram-status").textContent = "new workspace failed: " + m;
-    return;
-  }
-  await switchedWorkspace("created workspace in " + dir.trim());
+async function saveWorkspaceAs(path) {
+  const resp = await fetch("/api/workspace/save_as", { method: "POST", body: JSON.stringify({ path }) });
+  if (!resp.ok) { let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {} document.getElementById("ws-open-status").textContent = "save failed: " + m; return; }
+  closeDialog();
+  await switchedWorkspace("saved workspace to " + path);
 }
 
-async function saveWorkspace() {
-  const resp = await fetch("/api/workspace/save", { method: "POST" });
-  let msg = "workspace saved";
-  if (!resp.ok) { let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {} msg = "save failed: " + m; }
-  document.getElementById("diagram-status").textContent = msg;
+async function newWorkspaceAt(path) {
+  const resp = await fetch("/api/workspace/new", { method: "POST", body: JSON.stringify({ path }) });
+  if (!resp.ok) { let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {} document.getElementById("ws-open-status").textContent = "new workspace failed: " + m; return; }
+  closeDialog();
+  await switchedWorkspace("created workspace in " + path);
 }
 
 // After switching the active workspace, reset the canvas and open the new
