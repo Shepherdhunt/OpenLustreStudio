@@ -2104,6 +2104,9 @@ fn type_str(t: &ol_ir::Type) -> String {
 const PRIMITIVE_TYPES: &[&str] = &[
     "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
     "float32", "float64", "char",
+    // Fixed-point (Q-format) presets — any `sfix<bits>_<frac>` / `ufix<bits>_<frac>`
+    // (bits 8/16/32/64, frac < bits) is valid; these are common defaults.
+    "sfix16_8", "sfix32_16", "ufix16_8",
 ];
 
 fn types_list(ctx: &ServerCtx) -> Result<String, String> {
@@ -3087,7 +3090,8 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("divide", "divide (/)", 2, "int32"),
             op("modulo", "modulo (mod)", 2, "int32"),
             OpDef { id: "numeric_cast", label: "numeric_cast", pins: 1, out_type: "int32",
-                    param: Some("type"), enabled: true, hint: "convert to int8…uint64, float32/64" },
+                    param: Some("type"), enabled: true,
+                    hint: "convert to int8…uint64, float32/64, or fixed sfix/ufix" },
             OpDef { id: "square_root", label: "square_root", pins: 1, out_type: "float64",
                     param: None, enabled: true,
                     hint: "sqrt(x) on float64 — cast float32 in/out explicitly" },
@@ -3302,8 +3306,10 @@ fn operation_body(
         "numeric_cast" => {
             let t = param.ok_or("numeric_cast needs parameter `type`")?;
             let ty = ol_stdlib::parse_type(t).map_err(|e| format!("cast type `{t}`: {e}"))?;
-            if !ty.is_numeric() {
-                return Err(format!("numeric_cast target must be numeric, got `{t}`"));
+            if !ty.is_numeric() && !ty.is_fixed() {
+                return Err(format!(
+                    "numeric_cast target must be numeric or fixed-point, got `{t}`"
+                ));
             }
             let body = format!("{t}({a})");
             return Ok((body, t.to_string()));
