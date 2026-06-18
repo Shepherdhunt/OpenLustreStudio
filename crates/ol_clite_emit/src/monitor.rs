@@ -209,6 +209,12 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
                 BinOp::BitXor => "^",
                 BinOp::Shl => "<<",
                 BinOp::Shr => ">>",
+                // Saturating ops are modeled in operator bodies (lower_anf); a
+                // contract monitor falls back to the base operation.
+                BinOp::SatAdd => "+",
+                BinOp::SatSub => "-",
+                BinOp::SatMul => "*",
+                BinOp::SatDiv => "/",
             };
             format!("({l} {sym} {r})")
         }

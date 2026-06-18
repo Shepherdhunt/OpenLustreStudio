@@ -105,6 +105,28 @@ impl Type {
         }
     }
 
+    /// Saturation bounds `[min, max]` of a fixed-point type's stored integer,
+    /// as `i64`. `None` for non-fixed types. The simulator and the C-Lite
+    /// emitter both clamp against these exact values, so saturating arithmetic
+    /// is bit-identical. (A `uint64` fixed clamps its top at `i64::MAX` — a
+    /// documented corner; saturation is exact for signed and for ≤32-bit.)
+    pub fn fixed_sat_range(&self) -> Option<(i64, i64)> {
+        if let Type::Fixed { signed, bits, .. } = self {
+            Some(match (signed, bits) {
+                (true, 8) => (i8::MIN as i64, i8::MAX as i64),
+                (true, 16) => (i16::MIN as i64, i16::MAX as i64),
+                (true, 32) => (i32::MIN as i64, i32::MAX as i64),
+                (true, _) => (i64::MIN, i64::MAX),
+                (false, 8) => (0, u8::MAX as i64),
+                (false, 16) => (0, u16::MAX as i64),
+                (false, 32) => (0, u32::MAX as i64),
+                (false, _) => (0, i64::MAX),
+            })
+        } else {
+            None
+        }
+    }
+
     pub fn is_bool(&self) -> bool {
         matches!(self, Type::Bool)
     }

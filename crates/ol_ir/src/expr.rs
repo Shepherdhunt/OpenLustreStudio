@@ -35,6 +35,16 @@ pub enum BinOp {
     Shl,
     /// Right shift (logical for unsigned, arithmetic for signed).
     Shr,
+    /// Saturating fixed-point add: clamps the result to the operand type's
+    /// `[min, max]` instead of wrapping. Surface `sat_add(a, b)`. Fixed-point
+    /// operands only (both the same type).
+    SatAdd,
+    /// Saturating fixed-point subtract. Surface `sat_sub(a, b)`.
+    SatSub,
+    /// Saturating fixed-point multiply — `(a*b) >> frac`, clamped. `sat_mul`.
+    SatMul,
+    /// Saturating fixed-point divide — `(a << frac) / b`, clamped. `sat_div`.
+    SatDiv,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

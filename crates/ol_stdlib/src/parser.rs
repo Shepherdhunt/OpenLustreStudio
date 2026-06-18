@@ -769,6 +769,19 @@ impl Parser {
                             arg: Box::new(args.pop().unwrap()),
                         });
                     }
+                    // A "call" to a saturating-op name is a binary fixed-point
+                    // operator: `sat_add(a, b)`, `sat_sub`, `sat_mul`, `sat_div`.
+                    if let Some(op) = sat_op_from_name(&name) {
+                        if args.len() != 2 {
+                            return Err(ParseError::Expected {
+                                expected: format!("exactly two arguments for `{name}(a, b)`"),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        let rhs = args.pop().unwrap();
+                        let lhs = args.pop().unwrap();
+                        return Ok(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) });
+                    }
                     Ok(Expr::call(name, args))
                 } else if matches!(self.peek(), Some(Tok::LBrace)) {
                     // Record literal `Name { field: value, … }`.
@@ -859,6 +872,18 @@ fn fixed_type_name(name: &str) -> Option<Type> {
     } else {
         None
     }
+}
+
+/// Saturating fixed-point operator names, used function-style: `sat_add(a, b)`,
+/// `sat_sub`, `sat_mul`, `sat_div`. They lower to the `Sat*` binary operators.
+fn sat_op_from_name(name: &str) -> Option<ol_ir::BinOp> {
+    Some(match name {
+        "sat_add" => ol_ir::BinOp::SatAdd,
+        "sat_sub" => ol_ir::BinOp::SatSub,
+        "sat_mul" => ol_ir::BinOp::SatMul,
+        "sat_div" => ol_ir::BinOp::SatDiv,
+        _ => return None,
+    })
 }
 
 /// Parse a textual OpenLustre expression into IR.
