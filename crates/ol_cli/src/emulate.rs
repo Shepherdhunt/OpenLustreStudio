@@ -242,6 +242,217 @@ pub(crate) fn traces_match(expected_ir: &str, emulated: &str) -> std::result::Re
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Full-system emulation: boot a real arm64 kernel on QEMU's `virt` board and
+// run the model inside a busybox initramfs (vs the lighter qemu-user backend).
+// The kernel is board-specific, so it is a user-supplied input (`kernel/Image`).
+// The model's trace is framed on the serial console between markers so the host
+// can extract it from the boot log.
+
+const TRACE_BEGIN: &str = "===OL-TRACE-BEGIN===";
+const TRACE_END: &str = "===OL-TRACE-END===";
+
+fn system_image_tag(entry: &str) -> String {
+    format!("openlustre-emusys-{}", entry.to_lowercase())
+}
+
+/// The full-system Dockerfile: cross-compile static arm64, assemble a busybox
+/// initramfs (model + `/init` + the scenario), and boot it on `qemu-system`.
+pub(crate) fn system_dockerfile(entry: &str, sources: &[&str]) -> String {
+    let tag = system_image_tag(entry);
+    let mut copy: Vec<&str> = vec!["openlustre_generated.h"];
+    if sources.iter().any(|s| *s == "openlustre_monitors.c") {
+        copy.push("openlustre_monitors.h");
+    }
+    copy.extend_from_slice(sources);
+    format!(
+        "# OpenLustre Studio — FULL-SYSTEM arm64 emulation harness for `{entry}`.
+# Boots a real arm64 kernel on QEMU's `virt` board and runs the model inside a
+# busybox initramfs (vs the lighter qemu-user backend). Provide a bootable arm64
+# kernel `Image` at ./kernel/Image — the board/kernel choice is yours.
+#   docker build -t {tag} .
+#   docker run --rm {tag}        # boots the board; the trace is framed on the console
+FROM debian:stable-slim
+RUN apt-get update \\
+ && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu qemu-system-arm busybox-static cpio gzip \\
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY {copy} ./
+RUN aarch64-linux-gnu-gcc -std=c11 -O2 -static -o model {srcs} -lm
+COPY init scenario.csv ./
+COPY kernel/Image /boot/Image
+# Assemble the initramfs: busybox + the static model + /init + the scenario.
+RUN mkdir -p ir/bin \\
+ && cp model scenario.csv ir/ \\
+ && cp init ir/init && chmod +x ir/init \\
+ && cp /bin/busybox ir/bin/busybox \\
+ && ln -s busybox ir/bin/sh && ln -s busybox ir/bin/mount && ln -s busybox ir/bin/poweroff \\
+ && ( cd ir && find . | cpio -o -H newc | gzip > /build/initramfs.cpio.gz )
+# Boot, run /init, power off. `-no-reboot` makes `poweroff` exit QEMU (and the container).
+CMD qemu-system-aarch64 -M virt -cpu cortex-a53 -m 256 -no-reboot -nographic \\
+    -kernel /boot/Image -initrd /build/initramfs.cpio.gz \\
+    -append \"console=ttyAMA0 rdinit=/init panic=-1\"
+",
+        entry = entry,
+        tag = tag,
+        copy = copy.join(" "),
+        srcs = sources.join(" "),
+    )
+}
+
+/// The initramfs `/init`: run the model on the baked-in scenario, frame the
+/// trace on the serial console, then power off so QEMU (and the container) exit.
+pub(crate) fn init_script() -> String {
+    format!(
+        "#!/bin/sh
+/bin/busybox mount -t proc proc /proc 2>/dev/null
+echo \"{begin}\"
+/model < /scenario.csv
+echo \"{end}\"
+/bin/busybox poweroff -f
+",
+        begin = TRACE_BEGIN,
+        end = TRACE_END,
+    )
+}
+
+/// Pull the framed model trace out of the QEMU serial console (boot log + the
+/// trace between the markers `/init` printed).
+pub(crate) fn extract_framed_trace(console: &str) -> std::result::Result<String, String> {
+    let b = console
+        .find(TRACE_BEGIN)
+        .ok_or("no trace markers in the QEMU console (did the system boot and run /init?)")?;
+    let after = &console[b + TRACE_BEGIN.len()..];
+    let e = after
+        .find(TRACE_END)
+        .ok_or("trace start marker found but no end marker (the run hung or crashed)")?;
+    Ok(after[..e].trim_matches(['\r', '\n', ' ']).to_string())
+}
+
+/// Emit the full-system Docker context into `out_dir` (sources, `/init`,
+/// Dockerfile, README, and a header-only `scenario.csv` template — the handler
+/// overwrites it with a real scenario when one is given). The kernel goes in
+/// `kernel/Image`, supplied separately.
+pub(crate) fn emit_system_harness(
+    out_dir: &Path,
+    project: &ol_ir::Project,
+    entry_name: &str,
+) -> Result<Vec<String>> {
+    let sliced = project
+        .slice_for_root(entry_name)
+        .map_err(|e| anyhow::anyhow!("slicing `{entry_name}` for emulation: {e}"))?;
+    let entry = sliced
+        .find_node(entry_name)
+        .with_context(|| format!("operator `{entry_name}` not found"))?
+        .clone();
+    std::fs::create_dir_all(out_dir.join("kernel"))
+        .with_context(|| format!("creating {}", out_dir.join("kernel").display()))?;
+
+    let bundle = ol_clite_emit::emit_project(&sliced);
+    let has_contract = entry.contract.is_some();
+    let driver = if has_contract {
+        ol_clite_emit::harness::emit_csv_driver_with_monitor(&entry, entry.contract.as_deref())
+    } else {
+        ol_clite_emit::harness::emit_csv_driver(&entry)
+    };
+    let mut sources = vec!["openlustre_generated.c".to_string(), "driver.c".to_string()];
+    let mut files: Vec<(String, String)> = vec![
+        ("openlustre_generated.h".into(), bundle.header),
+        ("openlustre_generated.c".into(), bundle.source),
+        ("driver.c".into(), driver),
+    ];
+    if has_contract {
+        let mon = ol_clite_emit::monitor::emit_monitors(&sliced);
+        files.push(("openlustre_monitors.h".into(), mon.header));
+        files.push(("openlustre_monitors.c".into(), mon.source));
+        sources.push("openlustre_monitors.c".into());
+    }
+    let src_refs: Vec<&str> = sources.iter().map(|s| s.as_str()).collect();
+    files.push(("Dockerfile".into(), system_dockerfile(entry_name, &src_refs)));
+    files.push(("init".into(), init_script()));
+    // Header-only scenario template (the operator's inputs), so `docker build`
+    // succeeds before a real scenario is dropped in.
+    let header = entry
+        .inputs
+        .iter()
+        .map(|p| p.name.clone())
+        .collect::<Vec<_>>()
+        .join(",");
+    files.push(("scenario.csv".into(), format!("{header}\n")));
+    files.push(("README.md".into(), system_readme(entry_name)));
+
+    let mut written = Vec::new();
+    for (name, text) in &files {
+        std::fs::write(out_dir.join(name), text).with_context(|| format!("writing {name}"))?;
+        written.push(name.clone());
+    }
+    written.push("kernel/ (drop a bootable arm64 Image here)".into());
+    Ok(written)
+}
+
+fn system_readme(entry: &str) -> String {
+    let tag = system_image_tag(entry);
+    format!(
+        "# Full-system arm64 emulation for `{entry}`
+
+Boots a real arm64 kernel on QEMU's `virt` board and runs the model in a busybox
+initramfs — heavier than the qemu-user backend, but a real kernel/board. Because
+the generated `_step` code is pure compute (no OS calls), this is *integration*
+demonstration; the qemu-user backend already covers cell-for-cell equivalence.
+
+## Provide a kernel
+
+Drop a bootable **arm64 `Image`** (your board's kernel) at `kernel/Image`. Any
+`qemu virt`-compatible arm64 kernel works (e.g. a distro arm64 kernel, or one
+from Buildroot/Yocto for your board).
+
+## Run
+
+```sh
+docker build -t {tag} .
+docker run --rm {tag} > console.txt    # the trace is framed between markers
+```
+
+`openlustre clite-emulate <model> --system --kernel kernel/Image --scenario scenario.csv`
+does the build/run and extracts + checks the framed trace against the IR
+simulator when Docker is on PATH.
+
+## Files
+- `openlustre_generated.{{h,c}}`, `driver.c` — the model + CSV harness.
+- `init` — the initramfs entry: runs the model, frames the trace, powers off.
+- `Dockerfile` — cross-compile arm64, build the initramfs, boot `qemu-system-aarch64 -M virt`.
+- `scenario.csv` — the input vector (a header-only template until you fill it).
+",
+        entry = entry,
+        tag = tag,
+    )
+}
+
+/// `docker build` the full-system context, then `docker run` it (no stdin — the
+/// scenario is baked into the initramfs); returns the QEMU console output.
+pub(crate) fn build_and_run_system(out_dir: &Path, entry: &str) -> Result<String> {
+    let tag = system_image_tag(entry);
+    let build = Command::new("docker")
+        .args(["build", "-t", &tag, "."])
+        .current_dir(out_dir)
+        .status()
+        .context("running `docker build` (is the Docker daemon running?)")?;
+    if !build.success() {
+        bail!("`docker build` failed (exit {:?}) — is `kernel/Image` present?", build.code());
+    }
+    let out = Command::new("docker")
+        .args(["run", "--rm", &tag])
+        .current_dir(out_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("running `docker run` (the QEMU boot)")?;
+    if !out.status.success() {
+        bail!("`docker run` failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -293,5 +504,33 @@ mod tests {
         assert!(traces_match("cycle,y\n0,6\n", "cycle,z\n0,6\n").is_err());
         assert!(traces_match("cycle,y\n0,6\n1,8\n", "cycle,y\n0,6\n").unwrap_err().contains("row count"));
         assert!(traces_match("cycle,y\n0,6\n", "").is_err());
+    }
+
+    #[test]
+    fn system_dockerfile_boots_qemu_virt_with_a_user_kernel() {
+        let d = system_dockerfile("Doubler", &["openlustre_generated.c", "driver.c"]);
+        assert!(d.contains("gcc-aarch64-linux-gnu") && d.contains("qemu-system-arm") && d.contains("busybox-static"));
+        assert!(d.contains("aarch64-linux-gnu-gcc -std=c11 -O2 -static -o model"), "static arm64 link:\n{d}");
+        assert!(d.contains("COPY kernel/Image /boot/Image"), "the kernel is a user-supplied input");
+        assert!(d.contains("cpio -o -H newc | gzip"), "builds the initramfs");
+        assert!(d.contains("qemu-system-aarch64 -M virt") && d.contains("rdinit=/init"), "boots the virt board:\n{d}");
+    }
+
+    #[test]
+    fn init_runs_the_model_frames_the_trace_and_powers_off() {
+        let s = init_script();
+        assert!(s.contains("/model < /scenario.csv"));
+        assert!(s.contains(TRACE_BEGIN) && s.contains(TRACE_END));
+        assert!(s.contains("poweroff -f"));
+    }
+
+    #[test]
+    fn extract_framed_trace_pulls_the_csv_out_of_boot_noise() {
+        let console = format!(
+            "[ 0.00] Booting Linux...\n[ 0.42] random init logs\n{TRACE_BEGIN}\ncycle,y\n0,6\n1,8\n{TRACE_END}\n[ 0.99] reboot: Power down\n"
+        );
+        assert_eq!(extract_framed_trace(&console).unwrap(), "cycle,y\n0,6\n1,8");
+        assert!(extract_framed_trace("boot noise, no markers").is_err());
+        assert!(extract_framed_trace(&format!("{TRACE_BEGIN}\nno end marker")).unwrap_err().contains("no end marker"));
     }
 }

@@ -167,6 +167,13 @@ enum Cmd {
         /// equivalence check. Without it, only the harness is emitted.
         #[arg(long)]
         scenario: Option<PathBuf>,
+        /// Full-system emulation: boot a real arm64 kernel on QEMU's `virt`
+        /// board (heavier than the default qemu-user backend). Needs --kernel.
+        #[arg(long)]
+        system: bool,
+        /// Bootable arm64 kernel `Image` for full-system emulation (--system).
+        #[arg(long)]
+        kernel: Option<PathBuf>,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
     },
@@ -400,6 +407,8 @@ fn main() -> Result<()> {
             target,
             out,
             scenario,
+            system,
+            kernel,
             with_stdlib,
         } => cmd_clite_emulate(
             &model,
@@ -407,6 +416,8 @@ fn main() -> Result<()> {
             &target,
             out.as_deref(),
             scenario.as_deref(),
+            system,
+            kernel.as_deref(),
             with_stdlib.as_deref(),
         ),
     }
@@ -808,12 +819,15 @@ fn cmd_simulate(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_clite_emulate(
     model: &Path,
     node: Option<&str>,
     target: &str,
     out: Option<&Path>,
     scenario: Option<&Path>,
+    system: bool,
+    kernel: Option<&Path>,
     with_stdlib: Option<&Path>,
 ) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
@@ -823,8 +837,15 @@ fn cmd_clite_emulate(
         .context("no --node specified and project has no `main`")?;
     let out_dir = match out {
         Some(p) => p.to_path_buf(),
-        None => model.parent().unwrap_or_else(|| Path::new(".")).join("emulate"),
+        None => model
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(if system { "emulate-system" } else { "emulate" }),
     };
+
+    if system {
+        return cmd_clite_emulate_system(&project, &node_name, &out_dir, scenario, kernel);
+    }
 
     let written = crate::emulate::emit_harness(&out_dir, &project, &node_name)?;
     println!(
@@ -878,6 +899,81 @@ fn cmd_clite_emulate(
         Err(e) => {
             println!("\n✗ MISMATCH — {e}");
             anyhow::bail!("emulated trace diverged from the IR simulator");
+        }
+    }
+}
+
+fn cmd_clite_emulate_system(
+    project: &ol_ir::Project,
+    node_name: &str,
+    out_dir: &Path,
+    scenario: Option<&Path>,
+    kernel: Option<&Path>,
+) -> Result<()> {
+    let written = crate::emulate::emit_system_harness(out_dir, project, node_name)?;
+    println!(
+        "clite-emulate --system: emitted {} into {} (full-system arm64, qemu-system -M virt)",
+        written.join(", "),
+        out_dir.display()
+    );
+
+    // A real scenario overwrites the header-only template and gives the IR reference.
+    if let Some(scn) = scenario {
+        let csv = std::fs::read_to_string(scn)
+            .with_context(|| format!("reading scenario {}", scn.display()))?;
+        std::fs::write(out_dir.join("scenario.csv"), &csv).ok();
+        let mut sim = ol_sim::Sim::new(project, node_name)?;
+        let expected = sim.run_csv(&csv)?.to_csv();
+        std::fs::write(out_dir.join("expected_ir_trace.csv"), &expected).ok();
+    }
+
+    // Place the kernel where the Dockerfile expects it (a board-specific input).
+    let kernel_dst = out_dir.join("kernel").join("Image");
+    let have_kernel = if let Some(k) = kernel {
+        std::fs::copy(k, &kernel_dst).with_context(|| format!("copying kernel {}", k.display()))?;
+        true
+    } else {
+        kernel_dst.exists()
+    };
+
+    let tag = format!("openlustre-emusys-{}", node_name.to_lowercase());
+    let instructions = || {
+        println!("\nOn a Docker host:");
+        println!("    cd {}", out_dir.display());
+        println!("    docker build -t {tag} .");
+        println!("    docker run --rm {tag} > console.txt   # the trace is framed in the console");
+    };
+
+    if scenario.is_none() {
+        println!("\nNote: fill scenario.csv (its header is the operator's inputs) before running.");
+    }
+    if !have_kernel {
+        println!("\nNo kernel found — drop a bootable arm64 `Image` at {}.", kernel_dst.display());
+        instructions();
+        return Ok(());
+    }
+    if scenario.is_none() || !crate::emulate::docker_available() {
+        if !crate::emulate::docker_available() {
+            println!("\nDocker not found on PATH — the full-system harness is ready to boot on a Docker host:");
+        }
+        instructions();
+        return Ok(());
+    }
+
+    println!("\nBuilding the image and booting the arm64 `virt` board under QEMU (the first build pulls the base image + toolchain)…");
+    let console = crate::emulate::build_and_run_system(out_dir, node_name)?;
+    std::fs::write(out_dir.join("console.txt"), &console).ok();
+    let actual = crate::emulate::extract_framed_trace(&console).map_err(anyhow::Error::msg)?;
+    std::fs::write(out_dir.join("emulated_trace.csv"), &actual).ok();
+    let expected = std::fs::read_to_string(out_dir.join("expected_ir_trace.csv")).unwrap_or_default();
+    match crate::emulate::traces_match(&expected, &actual) {
+        Ok(()) => {
+            println!("\n✓ EQUIVALENT — the full-system arm64 run matches the IR simulator cell-for-cell.");
+            Ok(())
+        }
+        Err(e) => {
+            println!("\n✗ MISMATCH — {e}");
+            anyhow::bail!("full-system emulated trace diverged from the IR simulator");
         }
     }
 }
