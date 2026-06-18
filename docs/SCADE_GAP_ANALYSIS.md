@@ -140,9 +140,11 @@ symbols; typed wire labels.
 5. *(Landed 2026-06-18)* ~~**Deployment & target codegen**~~ — `.wksc`/`.ols`
    file association, a generated multi-resolution app icon, and **target/OS build
    profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional
-   cross-build Makefile + `INTEGRATION.md` per target) shipped (§5, §6).
-   Remaining: a **QEMU + Docker emulated-target test backend** (P3 — a third
-   equivalence backend), code signing (P2), winget/MSIX.
+   cross-build Makefile + `INTEGRATION.md` per target), a compilable
+   `integration.c` entry skeleton, and a **Docker + QEMU emulated-target backend**
+   (`clite-emulate` — the third equivalence backend, §6) shipped (§5, §6).
+   Remaining: full-system board/RTOS emulation (under `qemu-system-*`), code
+   signing (P2), winget/MSIX.
 6. **Automata depth** (P2) — **history + inline nested-region authoring landed
    2026-06-18** (§6); remaining: **signals** (a new cross-stack IR construct —
    the next real automata feature) and richer parallel composition beyond
@@ -237,9 +239,37 @@ verification burden the qualified tool would otherwise discharge.
 | winget/MSIX distribution | `winget install OpenLustreStudio` once the repo publishes releases | P2 |
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 | ~~Target/OS build profiles~~ | Pick the OS/board for codegen; generate a toolchain-tuned Makefile + integration note | **Done 2026-06-18**: host (compiles locally) + embedded Linux-ARM / VxWorks / bare-metal-ARM (directional — emit build files for the target toolchain). `crates/ol_cli/src/target.rs`, `/api/targets`, Compile dialog selector |
-| Emulated target testing (QEMU + Docker) | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — effectively a *third* equivalence backend | P3 roadmap (the target profiles landed 2026-06-18 are the foundation; `INTEGRATION.md` flags it) |
+| ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests); full-system board/RTOS emulation remains. |
 
 ## 6. What closed recently
+
+### 2026-06-18 — Docker + QEMU emulated-target backend (`clite-emulate`)
+
+The **third equivalence backend**: the generated C-Lite is cross-compiled for
+armhf and run under QEMU user-mode inside Docker, and its trace is checked
+against the IR simulator — beside the IR sim and the host-compiled C.
+
+* **`crates/ol_cli/src/emulate.rs`.** Emits a self-contained Docker context:
+  a `Dockerfile` (base `debian:stable-slim`, installs `gcc-arm-linux-gnueabihf`
+  + `qemu-user-static`, **static-links** the model for armhf, and runs it under
+  `qemu-arm-static`), plus the generated `.c`/`.h`, the CSV `driver.c` (and
+  monitors when the operator has a contract), and a README. The binary stays the
+  CSV driver — a vector on stdin, the trace on stdout — so one scenario drives
+  all three backends. `traces_match` compares the emulated trace to the IR-sim
+  reference cell-for-cell on the columns the driver emits.
+* **`openlustre clite-emulate <model> [--node N] [--scenario csv] [--out dir]`.**
+  Emits the harness; with a scenario it computes the IR-sim reference and, where
+  Docker is on PATH, runs `docker build` + `docker run < scenario` and reports
+  EQUIVALENT / MISMATCH. Where Docker is absent (e.g. this dev box) it writes
+  `scenario.csv` + `expected_ir_trace.csv` and prints the exact commands — the
+  harness runs unchanged on any Docker host. Live execution is Docker-gated, the
+  same way the dual-backend C tests are cc-gated.
+* **Verified:** unit tests in `emulate.rs` (the Dockerfile cross-compiles +
+  qemu-runs, monitors included on contract, `traces_match` accepts a column
+  subset and locates a mismatch / row-count / unknown-column error); and live —
+  `clite-emulate` on `Doubler` emitted a correct armhf/qemu Dockerfile and the
+  right IR reference (`y = 2x` → 6, 8, 10). Full-system board/RTOS emulation
+  (a real VxWorks/bare-metal image under `qemu-system-*`) remains roadmap.
 
 ### 2026-06-18 — integration entry skeleton; empty new workspaces; C-Lite-only scope
 
