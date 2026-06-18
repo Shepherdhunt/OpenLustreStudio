@@ -47,6 +47,9 @@ Source: "..\..\target\release\openlustre.exe"; DestDir: "{app}"; \
   Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+; Documents the optional dependencies (compiler, Kind 2, Docker) and what each
+; unlocks; `openlustre doctor` (shortcut below) detects them at runtime.
+Source: "..\..\DEPENDENCIES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "openlustre.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
@@ -58,6 +61,10 @@ Name: "{group}\OpenLustre Studio"; Filename: "{app}\openlustre.exe"; \
 Name: "{group}\OpenLustre Studio (CLI here)"; Filename: "{cmd}"; \
   Parameters: "/K cd /D ""%USERPROFILE%\OpenLustre"" && ""{app}\openlustre.exe"" --help"; \
   Comment: "Command prompt with the openlustre CLI"
+Name: "{group}\Check Environment (dependencies)"; Filename: "{cmd}"; \
+  Parameters: "/K ""{app}\openlustre.exe"" doctor"; \
+  IconFilename: "{app}\openlustre.ico"; \
+  Comment: "Which optional dependencies (compiler, Kind 2, Docker) are installed and what each enables"
 Name: "{autodesktop}\OpenLustre Studio"; Filename: "{app}\openlustre.exe"; \
   Parameters: "studio launch"; WorkingDir: "{app}"; \
   IconFilename: "{app}\openlustre.ico"; Tasks: desktopicon

@@ -29,8 +29,8 @@ pub fn effective_generics(node: &NodeDef) -> Vec<GenericParam> {
     let mut out = node.generics.clone();
     let mut have: std::collections::HashSet<String> =
         out.iter().map(|g| g.name().to_string()).collect();
-    let mut walk = |ty: &Type, out: &mut Vec<GenericParam>,
-                    have: &mut std::collections::HashSet<String>| {
+    let walk = |ty: &Type, out: &mut Vec<GenericParam>,
+                have: &mut std::collections::HashSet<String>| {
         let mut stack = vec![ty.clone()];
         while let Some(t) = stack.pop() {
             match t {

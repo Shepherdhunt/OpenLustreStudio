@@ -208,6 +208,10 @@ enum Cmd {
         #[arg(long)]
         empty: bool,
     },
+    /// Report which OPTIONAL dependencies (C compiler, Kind 2, Docker) are
+    /// present and what functionality each one unlocks. The core tool needs
+    /// none of them.
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -456,6 +460,7 @@ fn main() -> Result<()> {
                 backend,
             ),
         },
+        Cmd::Doctor => cmd_doctor(),
     }
 }
 
@@ -1066,6 +1071,101 @@ fn cmd_simulate(
     Ok(())
 }
 
+/// Build the environment-check report: each optional dependency, whether it is
+/// present, and the functionality it unlocks. The core workflow needs none.
+fn doctor_report() -> String {
+    use std::fmt::Write as _;
+    use std::process::{Command, Stdio};
+    let probe = |cmd: &str, args: &[&str]| -> Option<String> {
+        let out = Command::new(cmd).args(args).output().ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let line = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        (!line.is_empty()).then_some(line)
+    };
+    let mut s = String::new();
+    let _ = writeln!(s, "OpenLustre Studio — environment check\n");
+    let _ = writeln!(s, "The core tool is self-contained (embedded standard library): authoring,");
+    let _ = writeln!(s, "type/clock/contract checking, simulation, and C-Lite generation all work");
+    let _ = writeln!(s, "with no extra software. These OPTIONAL dependencies unlock more:\n");
+
+    let mut dep = |found: Option<&str>, name: &str, enables: &str, how: &str| {
+        match found {
+            Some(v) => {
+                let _ = writeln!(s, "[ ok ] {name} — {v}");
+            }
+            None => {
+                let _ = writeln!(s, "[ -- ] {name} — not found");
+            }
+        }
+        let _ = writeln!(s, "        Enables: {enables}");
+        if found.is_none() {
+            let _ = writeln!(s, "        To enable: {how}.");
+        }
+        let _ = writeln!(s);
+    };
+
+    dep(
+        crate::scenario::compiler_description().as_deref(),
+        "C compiler",
+        "Compile C-Lite locally, the debug run, and the dual-backend equivalence tests (IR simulator vs compiled C).",
+        "install MSVC (Visual Studio Build Tools) or gcc/clang on PATH",
+    );
+    dep(
+        probe("kind2", &["--version"]).as_deref(),
+        "Kind 2",
+        "Formal proof of contracts (the Verify tab / `openlustre prove`).",
+        "install kind2 (https://kind2-mc.github.io/kind2) on PATH",
+    );
+
+    // Docker is special: the CLI can be present while the daemon is not running.
+    let docker = probe("docker", &["--version"]);
+    let daemon = docker.is_some()
+        && Command::new("docker")
+            .args(["info", "--format", "{{.ServerVersion}}"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|x| x.success())
+            .unwrap_or(false);
+    match (docker.as_deref(), daemon) {
+        (Some(v), true) => {
+            let _ = writeln!(s, "[ ok ] Docker — {v} (daemon running)");
+        }
+        (Some(v), false) => {
+            let _ = writeln!(s, "[ !! ] Docker — {v} present, but the daemon is not reachable");
+        }
+        (None, _) => {
+            let _ = writeln!(s, "[ -- ] Docker — not found");
+        }
+    }
+    let _ = writeln!(s, "        Enables (roadmap): the emulated-target equivalence backend");
+    let _ = writeln!(s, "                 (cross-compile + run under QEMU) once `clite-emulate` lands.");
+    match (docker.as_deref(), daemon) {
+        (None, _) => {
+            let _ = writeln!(s, "        To enable: install Docker Desktop (https://www.docker.com/products/docker-desktop).");
+        }
+        (Some(_), false) => {
+            let _ = writeln!(s, "        To enable: start Docker Desktop / the daemon (a fresh install may need WSL2 setup or a reboot).");
+        }
+        _ => {}
+    }
+    let _ = writeln!(s);
+    let _ = writeln!(s, "See DEPENDENCIES.md for details. The core design→check→simulate→generate");
+    let _ = writeln!(s, "workflow needs none of the above.");
+    s
+}
+
+fn cmd_doctor() -> Result<()> {
+    print!("{}", doctor_report());
+    Ok(())
+}
 fn cmd_prove(
     model: &Path,
     node: Option<&str>,
