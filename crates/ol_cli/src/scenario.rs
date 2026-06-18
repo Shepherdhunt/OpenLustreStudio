@@ -691,9 +691,12 @@ pub(crate) fn compile_in_dir_defs(
             for d in defines {
                 cmd.arg(format!("-D{d}"));
             }
+            // `-lm` (after the sources) links the math library that float
+            // intrinsics call; it is harmless when none are used.
             let out = cmd
                 .args(source_names)
                 .arg("-I.")
+                .arg("-lm")
                 .output()
                 .map_err(|e| format!("invoking {name}: {e}"))?;
             (out, name.to_string())
@@ -792,6 +795,7 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
             .arg(&exe)
             .args(&sources)
             .arg(format!("-I{}", d.display()))
+            .arg("-lm")
             .output()
             .map_err(|e| format!("invoking {name}: {e}"))?,
         #[cfg(windows)]

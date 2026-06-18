@@ -769,6 +769,8 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
             "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
+        // Float intrinsics render as a compact named block (sqrt, min, …).
+        Expr::Intrinsic { func, .. } => op(func.name()),
         Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
         _ => serde_json::Value::Null,
     }
@@ -2617,7 +2619,11 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "plus" | "minus" | "multiply" | "divide" | "modulo" | "squared" | "cubed"
         | "to_nth_power" => (n("number"), "number"),
         "numeric_cast" => (vec!["number"], "target type"),
-        "square_root" => (vec!["float"], "float"),
+        // Float intrinsics: float64 (real) operands, float64 result.
+        "square_root" | "sin" | "cos" | "tan" | "exp" | "log" | "abs" => {
+            (vec!["float64"], "float64")
+        }
+        "min" | "max" | "pow" => (vec!["float64", "float64"], "float64"),
         "equal" | "not_equal" => (vec!["T", "T"], "bool"),
         "greater_than" | "greater_equal" | "less_than" | "less_equal" => {
             (vec!["number", "number"], "bool")
@@ -2691,13 +2697,24 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("modulo", "modulo (mod)", 2, "int32"),
             OpDef { id: "numeric_cast", label: "numeric_cast", pins: 1, out_type: "int32",
                     param: Some("type"), enabled: true, hint: "convert to int8…uint64, float32/64" },
-            OpDef { id: "square_root", label: "square_root", pins: 1, out_type: "float64",
-                    param: None, enabled: false,
-                    hint: "needs float intrinsics (sqrt) across sim/C/Lustre — roadmap" },
             op("squared", "squared (x*x)", 1, "int32"),
             op("cubed", "cubed (x*x*x)", 1, "int32"),
             OpDef { id: "to_nth_power", label: "to_nth_power(n)", pins: 1, out_type: "int32",
                     param: Some("n"), enabled: true, hint: "n between 2 and 8" },
+            // Float intrinsics — float64 (real) in, float64 out, lowered to
+            // <math.h> in generated C and the IR simulator's f64 math.
+            OpDef { id: "square_root", label: "square_root (sqrt)", pins: 1, out_type: "float64",
+                    param: None, enabled: true, hint: "float64 square root" },
+            op("sin", "sine (sin)", 1, "float64"),
+            op("cos", "cosine (cos)", 1, "float64"),
+            op("tan", "tangent (tan)", 1, "float64"),
+            op("exp", "exponential (exp)", 1, "float64"),
+            op("log", "natural log (log)", 1, "float64"),
+            op("abs", "absolute value (abs)", 1, "float64"),
+            op("min", "minimum (min)", 2, "float64"),
+            op("max", "maximum (max)", 2, "float64"),
+            OpDef { id: "pow", label: "power (pow)", pins: 2, out_type: "float64",
+                    param: None, enabled: true, hint: "pow(base, exponent), float64" },
         ]),
         ("Comparisons", vec![
             op("equal", "equal (=)", 2, "bool"),
@@ -2824,6 +2841,11 @@ fn operation_body(
         "modulo" => format!("{a} mod {b}"),
         "squared" => format!("{a} * {a}"),
         "cubed" => format!("{a} * {a} * {a}"),
+        // Float intrinsics lower to a function-style call the parser maps to
+        // `Expr::Intrinsic`. `square_root` uses the canonical `sqrt` name.
+        "square_root" => format!("sqrt({a})"),
+        "sin" | "cos" | "tan" | "exp" | "log" | "abs" => format!("{}({a})", opdef.id),
+        "min" | "max" | "pow" => format!("{}({a}, {b})", opdef.id),
         "to_nth_power" => {
             let n: u32 = param
                 .and_then(|p| p.parse().ok())

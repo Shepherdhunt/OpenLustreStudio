@@ -1112,9 +1112,11 @@ CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -O2
 
 SOURCES = openlustre_generated.c driver.c
+# Float intrinsics (sqrt, sin, …) need the math library on POSIX toolchains.
+LDLIBS ?= -lm
 
 $(TARGET): $(SOURCES)
-\t$(CC) $(CFLAGS) -o $@ $(SOURCES)
+\t$(CC) $(CFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 run: $(TARGET)
 \t./$(TARGET)

@@ -1,6 +1,6 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-16.*
+*Updated 2026-06-18.*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove
@@ -19,7 +19,20 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **State machines are operator-owned.** A
+**Landed recently (newest first):** **Float intrinsics.** `square_root` is
+un-greyed and a full math family — `sin`, `cos`, `tan`, `exp`, `log`, `abs`,
+`min`, `max`, `pow` — is first-class across every stage, mirroring
+`numeric_cast`: a new `Expr::Intrinsic { func, args }` IR node, surface syntax
+`sqrt(x)` / `min(a, b)` (the parser maps the reserved names; arity checked),
+typechecked (`float64`/`real` operands only, result `float64` — E0160/E0161),
+simulated in `f64`, lowered to `<math.h>` in generated C (the double variants;
+`-lm` linked in the Makefile and both compile paths), and emitted to the Kind 2
+view as same-named user-suppliable functions (the cast/bit-op convention). A
+dual-backend equivalence test (IR vs compiled C, integer-valued results so the
+formatting matches cell-for-cell) and parser/typecheck/sim/codegen tests pin it.
+`float32` intrinsics are a conscious v1 limit (they need the `f`-suffixed math
+variants with matching f32 rounding in the sim). Before that: **State machines
+are operator-owned.** A
 machine now belongs to exactly one operator and *is* its body: `StateMachineDef`
 gained an `owner`, and lowering merges an owned machine's state/transition/output
 logic into that operator's node (it drives the operator's outputs) — no separate
@@ -96,18 +109,13 @@ boolean clocks (`when`/`merge`); undo/redo; properties dock; constants; block
 symbols; typed wire labels.
 
 **Best next gaps (pick up here):**
-1. **Canvas item ergonomics** (P1/P2) — resize inputs/outputs/locals/operations
-   on the canvas, and a right-click "wrap text / don't wrap" per box.
-   *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
-   it (construct an array/struct from element inputs, or destructure one) — a
-   Structures/Arrays authoring feature tied to the Types node.
-   *Also:* **composite constant values** — array/struct/string (`char[]`)
-   constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
-   scalar constants parse) plus a `char` type; scalar constants already work.
-2. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
-   add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
-   generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
-   pattern.
+1. *(Landed)* ~~**Canvas item ergonomics**~~ — resize boxes + per-box text
+   wrap, drag a composite **type to MAKE / FLATTEN / SLICE**, and **composite
+   constant values** (array/struct/`char[]` literals) all shipped (see git log).
+2. *(Landed 2026-06-18)* ~~**Float intrinsics**~~ — `square_root` plus
+   `sin/cos/tan/exp/log/abs/min/max/pow` as a `float64` family across IR, parse,
+   typecheck, sim, generated C (`<math.h>`), and the Kind 2 view (§6). `float32`
+   intrinsics remain roadmap.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
@@ -126,7 +134,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
 | Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, multi-select + right-click menu + Delete, red invalid-link coding |
-| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
+| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
@@ -205,6 +213,38 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-06-18 — float intrinsics (`sqrt`, `sin`, `cos`, `abs`, `min`, `max`, …)
+
+`square_root` was greyed out pending "float intrinsics across sim/C/Lustre";
+that family now exists, modelled exactly on `numeric_cast`.
+
+* **IR.** A new `Expr::Intrinsic { func: FloatFn, args }` node, where `FloatFn`
+  is the closed set of math built-ins the core operators cannot express —
+  `Sqrt`, `Sin`, `Cos`, `Tan`, `Exp`, `Log`, `Abs` (unary), `Min`, `Max`, `Pow`
+  (binary). It carries surface/Kind 2 names, arity, and the `<math.h>` C name
+  (with the `f`-suffixed variant reserved for future `float32`).
+* **Surface + Kind 2.** Function-style: `sqrt(x)`, `min(a, b)`. The parser maps
+  the reserved names to the intrinsic (arity-checked), the formatter round-trips
+  them, and the Kind 2 view emits the same call as a user-suppliable function —
+  the established cast / bit-op convention.
+* **Typecheck.** Operands must be `float64` (`real`) and the result is
+  `float64` (E0160 arity, E0161 non-`float64`). Restricting to one width keeps
+  the IR simulator (`f64`) and the generated `<math.h>` *double* calls exact,
+  cell for cell. `float32` intrinsics are roadmap (they need `sqrtf`/`sinf`/…
+  with matching f32 rounding in the simulator).
+* **Sim + C.** The simulator evaluates each intrinsic in `f64`
+  (`fmin`/`fmax`-matching NaN handling for `min`/`max`); the C emitter lowers to
+  the double `<math.h>` functions, adds `#include <math.h>` to the generated and
+  monitor sources, and links `-lm` (Makefile + both scenario/compile paths).
+* **Authoring.** The Mathematics toolbox family enables `square_root` and adds
+  `sin/cos/tan/exp/log/abs/min/max/pow`, each with a `float64` pin contract;
+  dropping one lands a typed `float64` result local and a `sqrt(pin)` /
+  `min(pin, pin)` equation.
+* **Tested** end to end: parser round-trip + arity errors, an E0161 type error,
+  an `f64` simulation (including `sin`/`cos` at clean points), a generated-C
+  string check for the `<math.h>` calls, and a dual-backend IR↔compiled-C
+  equivalence scenario (integer-valued results so the float formatting matches).
 
 ### 2026-06-16 (owned) — state machines are operator-owned
 
@@ -652,8 +692,7 @@ floating boxes. Now operation blocks render as SCADE gates:
   clears the redo branch, and empty stacks report instead of corrupting.
 
 Remaining for an industry deployment story (unchanged priorities):
-source spans in diagnostics, clocks, hierarchical automata, array
-iterators, MC/DC masking analysis, float intrinsics, requirements
+source spans in diagnostics, MC/DC masking analysis, requirements
 traceability, code signing, and the Tool Operational Requirements
 document for certification-adjacent use.
 

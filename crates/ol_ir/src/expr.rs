@@ -179,6 +179,16 @@ pub enum Expr {
         /// The array operands (one for `fold`, one or more for `map`).
         arrays: Vec<Expr>,
     },
+    /// A floating-point intrinsic — SCADE-style math built-ins (`sqrt`, `sin`,
+    /// `cos`, `abs`, `min`, `max`, …) that cannot be expressed with the core
+    /// operators. Surface syntax is function-style: `sqrt(x)`, `min(a, b)`.
+    /// Every operand and the result are floating-point of one width; the
+    /// generated C calls `<math.h>` (the `f`-suffixed variant for `float32`),
+    /// and the Kind 2 view emits the same call as a user-suppliable function.
+    Intrinsic {
+        func: FloatFn,
+        args: Vec<Expr>,
+    },
 }
 
 /// Which array iterator an [`Expr::Iterate`] is.
@@ -186,6 +196,100 @@ pub enum Expr {
 pub enum IterKind {
     Map,
     Fold,
+}
+
+/// A floating-point intrinsic in [`Expr::Intrinsic`]. Each maps to a
+/// `<math.h>` function in generated C; the variants are exactly the math
+/// built-ins that the core operators cannot express.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatFn {
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
+    Exp,
+    /// Natural logarithm.
+    Log,
+    /// Absolute value (C `fabs`).
+    Abs,
+    /// Lesser of two operands (C `fmin`).
+    Min,
+    /// Greater of two operands (C `fmax`).
+    Max,
+    /// `pow(base, exponent)`.
+    Pow,
+}
+
+impl FloatFn {
+    /// The surface (and Kind 2) name, e.g. `sqrt`. Round-trips through
+    /// [`FloatFn::from_name`].
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatFn::Sqrt => "sqrt",
+            FloatFn::Sin => "sin",
+            FloatFn::Cos => "cos",
+            FloatFn::Tan => "tan",
+            FloatFn::Exp => "exp",
+            FloatFn::Log => "log",
+            FloatFn::Abs => "abs",
+            FloatFn::Min => "min",
+            FloatFn::Max => "max",
+            FloatFn::Pow => "pow",
+        }
+    }
+
+    /// Parse a surface name into an intrinsic, or `None` if it is not one.
+    pub fn from_name(name: &str) -> Option<FloatFn> {
+        Some(match name {
+            "sqrt" => FloatFn::Sqrt,
+            "sin" => FloatFn::Sin,
+            "cos" => FloatFn::Cos,
+            "tan" => FloatFn::Tan,
+            "exp" => FloatFn::Exp,
+            "log" => FloatFn::Log,
+            "abs" => FloatFn::Abs,
+            "min" => FloatFn::Min,
+            "max" => FloatFn::Max,
+            "pow" => FloatFn::Pow,
+            _ => return None,
+        })
+    }
+
+    /// How many operands the intrinsic takes (1 for unary, 2 for binary).
+    pub fn arity(self) -> usize {
+        match self {
+            FloatFn::Min | FloatFn::Max | FloatFn::Pow => 2,
+            _ => 1,
+        }
+    }
+
+    /// The `<math.h>` function name to emit in C. `float32` selects the
+    /// single-precision (`f`-suffixed) variant so the generated code computes
+    /// in the operand's own width.
+    pub fn c_name(self, float32: bool) -> &'static str {
+        match (self, float32) {
+            (FloatFn::Sqrt, false) => "sqrt",
+            (FloatFn::Sqrt, true) => "sqrtf",
+            (FloatFn::Sin, false) => "sin",
+            (FloatFn::Sin, true) => "sinf",
+            (FloatFn::Cos, false) => "cos",
+            (FloatFn::Cos, true) => "cosf",
+            (FloatFn::Tan, false) => "tan",
+            (FloatFn::Tan, true) => "tanf",
+            (FloatFn::Exp, false) => "exp",
+            (FloatFn::Exp, true) => "expf",
+            (FloatFn::Log, false) => "log",
+            (FloatFn::Log, true) => "logf",
+            (FloatFn::Abs, false) => "fabs",
+            (FloatFn::Abs, true) => "fabsf",
+            (FloatFn::Min, false) => "fmin",
+            (FloatFn::Min, true) => "fminf",
+            (FloatFn::Max, false) => "fmax",
+            (FloatFn::Max, true) => "fmaxf",
+            (FloatFn::Pow, false) => "pow",
+            (FloatFn::Pow, true) => "powf",
+        }
+    }
 }
 
 impl Expr {
@@ -273,6 +377,9 @@ impl Expr {
             arrays: vec![array],
         }
     }
+    pub fn intrinsic(func: FloatFn, args: Vec<Expr>) -> Self {
+        Expr::Intrinsic { func, args }
+    }
     pub fn array(items: Vec<Expr>) -> Self {
         Expr::Array { items }
     }
@@ -358,6 +465,11 @@ impl Expr {
                         walk(i, f);
                     }
                     for a in arrays {
+                        walk(a, f);
+                    }
+                }
+                Expr::Intrinsic { args, .. } => {
+                    for a in args {
                         walk(a, f);
                     }
                 }
@@ -453,6 +565,11 @@ impl Expr {
                     i.rename_var(from, to);
                 }
                 for a in arrays {
+                    a.rename_var(from, to);
+                }
+            }
+            Expr::Intrinsic { args, .. } => {
+                for a in args {
                     a.rename_var(from, to);
                 }
             }

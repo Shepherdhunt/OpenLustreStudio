@@ -281,6 +281,15 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             parts.extend(arrays.iter().map(|a| format_expr_prec(a, 0, lustre)));
             (format!("{name}({})", parts.join(", ")), 100)
         }
+        // Float intrinsics print function-style and round-trip through the
+        // parser. The Kind 2 view uses the same call text — the user supplies
+        // matching Lustre functions to prove models that use them, as with the
+        // cast / bit-op convention.
+        Expr::Intrinsic { func, args } => {
+            let parts: Vec<String> =
+                args.iter().map(|a| format_expr_prec(a, 0, lustre)).collect();
+            (format!("{}({})", func.name(), parts.join(", ")), 100)
+        }
     };
     if prec < parent_prec {
         format!("({text})")

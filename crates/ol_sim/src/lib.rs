@@ -613,6 +613,28 @@ fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
     Ok(out)
 }
 
+/// Evaluate a float intrinsic in `f64`, matching the `<math.h>` double
+/// functions the generated C calls so the two backends agree exactly.
+fn eval_intrinsic(func: ol_ir::FloatFn, xs: &[f64]) -> f64 {
+    use ol_ir::FloatFn::*;
+    let a = xs.first().copied().unwrap_or(0.0);
+    let b = xs.get(1).copied().unwrap_or(0.0);
+    match func {
+        Sqrt => a.sqrt(),
+        Sin => a.sin(),
+        Cos => a.cos(),
+        Tan => a.tan(),
+        Exp => a.exp(),
+        Log => a.ln(),
+        Abs => a.abs(),
+        // C `fmin`/`fmax` return the non-NaN operand when one is NaN; Rust's
+        // `f64::min`/`max` match that, so the backends agree on edge cases.
+        Min => a.min(b),
+        Max => a.max(b),
+        Pow => a.powf(b),
+    }
+}
+
 fn narrow_int(t: &Type, i: i64) -> i64 {
     match t {
         Type::Int8 => i as i8 as i64,
@@ -863,6 +885,21 @@ fn eval(
         Expr::Cast { to, arg } => {
             let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             cast_value(to, v)
+        }
+        Expr::Intrinsic { func, args } => {
+            let mut xs = Vec::with_capacity(args.len());
+            for a in args {
+                match eval(a, env, state, call_states, project, site_clocks, cov)? {
+                    Value::Float(f) => xs.push(f),
+                    other => {
+                        return Err(SimError::EvalError(format!(
+                            "`{}` requires float operands, got {other:?}",
+                            func.name()
+                        )))
+                    }
+                }
+            }
+            Ok(Value::Float(eval_intrinsic(*func, &xs)))
         }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, site_clocks, cov),
         Expr::Field { base, field } => {

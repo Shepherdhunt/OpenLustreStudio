@@ -158,6 +158,184 @@ fn cast_of_a_bool_is_a_type_error() {
     );
 }
 
+// --- Float intrinsics: parser + formatter round-trip ------------------------
+
+#[test]
+fn float_intrinsics_parse_and_round_trip() {
+    // A unary intrinsic parses to Expr::Intrinsic and round-trips verbatim.
+    let e = ol_stdlib::parse_expr("sqrt(x)").expect("parse sqrt");
+    assert!(
+        matches!(&e, ol_ir::Expr::Intrinsic { func: ol_ir::FloatFn::Sqrt, .. }),
+        "{e:?}"
+    );
+    assert_eq!(ol_lustre_emit::format_expr(&e), "sqrt(x)");
+    assert_eq!(ol_stdlib::parse_expr(&ol_lustre_emit::format_expr(&e)).unwrap(), e);
+
+    // The Kind 2 view emits the same call (a user-suppliable function), like
+    // the cast / bit-op convention.
+    assert_eq!(ol_lustre_emit::format_expr_lustre(&e), "sqrt(x)");
+
+    // A binary intrinsic carries both operands.
+    let m = ol_stdlib::parse_expr("min(a, b)").expect("parse min");
+    assert!(
+        matches!(&m, ol_ir::Expr::Intrinsic { func: ol_ir::FloatFn::Max | ol_ir::FloatFn::Min, .. }),
+        "{m:?}"
+    );
+    assert_eq!(ol_lustre_emit::format_expr(&m), "min(a, b)");
+    assert_eq!(ol_stdlib::parse_expr("max(a, b)").unwrap(),
+        ol_ir::Expr::intrinsic(ol_ir::FloatFn::Max,
+            vec![ol_ir::Expr::var("a"), ol_ir::Expr::var("b")]));
+
+    // Arity is enforced at parse time: sqrt takes one argument, min takes two.
+    assert!(ol_stdlib::parse_expr("sqrt(a, b)").is_err());
+    assert!(ol_stdlib::parse_expr("min(a)").is_err());
+}
+
+#[test]
+fn intrinsic_of_an_int_is_a_type_error() {
+    let project: ol_ir::Project = serde_json::from_value(serde_json::json!({
+        "name": "bad",
+        "packages": [{
+            "name": "user",
+            "nodes": [{
+                "name": "Bad",
+                "kind": "Function",
+                "inputs": [{"name": "n", "ty": {"kind": "Int32"}}],
+                "outputs": [{"name": "y", "ty": {"kind": "Float64"}}],
+                "equations": [{"lhs": ["y"],
+                    "rhs": {"expr": "Intrinsic", "func": "Sqrt",
+                            "args": [{"expr": "Var", "name": "n"}]}}]
+            }]
+        }]
+    })).unwrap();
+    let report = ol_typecheck::check_project(&project);
+    assert!(
+        report.diagnostics.iter().any(|d| d.code == "E0161"),
+        "expected E0161, got: {:?}",
+        report.diagnostics
+    );
+}
+
+fn intrinsics_model() -> serde_json::Value {
+    // root = sqrt(x), lo = min(x, y), hi = max(x, y), ab = abs(y),
+    // pw = pow(x, y), sn = sin(z), cs = cos(z). float64 throughout.
+    let unary = |func: &str, var: &str| serde_json::json!({
+        "expr": "Intrinsic", "func": func, "args": [{"expr": "Var", "name": var}]
+    });
+    let binary = |func: &str, a: &str, b: &str| serde_json::json!({
+        "expr": "Intrinsic", "func": func,
+        "args": [{"expr": "Var", "name": a}, {"expr": "Var", "name": b}]
+    });
+    let f64 = || serde_json::json!({"kind": "Float64"});
+    serde_json::json!({
+        "name": "intrins",
+        "packages": [{
+            "name": "user",
+            "nodes": [{
+                "name": "Intrins",
+                "kind": "Function",
+                "inputs": [
+                    {"name": "x", "ty": f64()},
+                    {"name": "y", "ty": f64()},
+                    {"name": "z", "ty": f64()}
+                ],
+                "outputs": [
+                    {"name": "root", "ty": f64()},
+                    {"name": "lo", "ty": f64()},
+                    {"name": "hi", "ty": f64()},
+                    {"name": "ab", "ty": f64()},
+                    {"name": "pw", "ty": f64()},
+                    {"name": "sn", "ty": f64()},
+                    {"name": "cs", "ty": f64()}
+                ],
+                "equations": [
+                    {"lhs": ["root"], "rhs": unary("Sqrt", "x")},
+                    {"lhs": ["lo"], "rhs": binary("Min", "x", "y")},
+                    {"lhs": ["hi"], "rhs": binary("Max", "x", "y")},
+                    {"lhs": ["ab"], "rhs": unary("Abs", "y")},
+                    {"lhs": ["pw"], "rhs": binary("Pow", "x", "y")},
+                    {"lhs": ["sn"], "rhs": unary("Sin", "z")},
+                    {"lhs": ["cs"], "rhs": unary("Cos", "z")}
+                ]
+            }]
+        }],
+        "main": "Intrins"
+    })
+}
+
+#[test]
+fn intrinsics_simulate_in_f64() {
+    let tmp = make_tempdir("intrins_sim");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&intrinsics_model()).unwrap()).unwrap();
+    let project = ol_ir::load_project(&model).unwrap();
+    let mut sim = ol_sim::Sim::new(&project, "Intrins").unwrap();
+    // Inputs chosen so every result is integer-valued: sin/cos at 0 are 0/1.
+    // x=9, y=-4, z=0: sqrt=3, min=-4, max=9, abs=4, pow(9,-4)≈0.000152… (not
+    // integer) — use y=2 for a clean pow. Row1: x=9,y=2,z=0; Row2: x=16,y=-3,z=0.
+    let trace = sim.run_csv("x,y,z\n9,2,0\n16,-3,0\n").unwrap();
+    let csv = trace.to_csv();
+    let lines: Vec<&str> = csv.trim().lines().collect();
+    assert_eq!(lines[0], "cycle,root,lo,hi,ab,pw,sn,cs");
+    // Row1: sqrt(9)=3, min(9,2)=2, max(9,2)=9, abs(2)=2, pow(9,2)=81, sin0=0, cos0=1.
+    assert_eq!(lines[1], "0,3,2,9,2,81,0,1");
+    // Row2: sqrt(16)=4, min(16,-3)=-3, max=16, abs(-3)=3, pow(16,-3)? not integer.
+    // 16^-3 = 1/4096 ≈ 0.000244…; assert the integer-valued cells only.
+    let row2: Vec<&str> = lines[2].split(',').collect();
+    assert_eq!(&row2[1..5], &["4", "-3", "16", "3"]);
+    assert_eq!(&row2[6..8], &["0", "1"], "sin/cos at 0");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn intrinsic_traces_match_between_ir_and_compiled_c() {
+    let tmp = make_tempdir("intrins_c");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&intrinsics_model()).unwrap()).unwrap();
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    // Every row is chosen so all seven results are integer-valued, so the IR
+    // sim's round-trip float formatting and the C driver's %g agree exactly.
+    std::fs::write(scen.join("clean.csv"),
+        "x,y,z\n9,2,0\n16,3,0\n4,1,0\n25,0,0\n").unwrap();
+
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO"))
+            .args(["run", "-q", "-p", "ol_cli", "--"])
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let (ok, out) = run(&["test", "record", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record: {out}");
+    let (ok, out) = run(&["test", "run", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap(), "--backend", "both"]);
+    assert!(ok, "run: {out}");
+    assert!(out.contains("[PASS] clean (ir)"), "{out}");
+    assert!(out.contains("[PASS] clean (c )"), "intrinsics C backend: {out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn generated_c_lowers_intrinsics_to_math_h() {
+    let project: ol_ir::Project = serde_json::from_value(intrinsics_model()).unwrap();
+    let bundle = ol_clite_emit::emit_project(&project);
+    assert!(bundle.source.contains("#include <math.h>"), "{}", bundle.source);
+    // Unary doubles map to the plain <math.h> names, binaries to fmin/fmax/pow.
+    for call in ["sqrt(", "sin(", "cos(", "fabs(", "fmin(", "fmax(", "pow("] {
+        assert!(bundle.source.contains(call), "missing `{call}` in:\n{}", bundle.source);
+    }
+}
+
 // --- Server harness (workspace mode) -----------------------------------------
 
 struct ServerGuard {
@@ -260,13 +438,18 @@ fn operations_catalog_has_the_scade_families() {
     let ids: Vec<&str> = math.as_array().unwrap()
         .iter().map(|i| i["id"].as_str().unwrap()).collect();
     for id in ["plus", "minus", "divide", "multiply", "modulo", "numeric_cast",
-               "square_root", "squared", "cubed", "to_nth_power"] {
+               "square_root", "squared", "cubed", "to_nth_power",
+               "sin", "cos", "tan", "exp", "log", "abs", "min", "max", "pow"] {
         assert!(ids.contains(&id), "Mathematics missing {id}: {ids:?}");
     }
-    // square_root is offered but explicitly disabled with a hint, not silent.
+    // square_root (and the rest of the float-intrinsics family) is now a
+    // first-class, enabled operation — float64 in, float64 out.
     let sqrt = math.as_array().unwrap().iter().find(|i| i["id"] == "square_root").unwrap();
-    assert_eq!(sqrt["enabled"], false);
-    assert!(sqrt["hint"].as_str().unwrap().contains("roadmap"));
+    assert_eq!(sqrt["enabled"], true);
+    assert_eq!(sqrt["inputs"], serde_json::json!(["float64"]));
+    assert_eq!(sqrt["output"], "float64");
+    let min = math.as_array().unwrap().iter().find(|i| i["id"] == "min").unwrap();
+    assert_eq!(min["inputs"], serde_json::json!(["float64", "float64"]));
 }
 
 #[test]
@@ -308,11 +491,21 @@ fn dropping_operations_creates_placed_equations_with_red_pins() {
         r#"{"node":"Calc","op":"to_nth_power","param":"99","x":0,"y":0}"#).unwrap();
     assert_eq!(s, 400, "n out of range must be rejected");
 
-    // Disabled operations are rejected with their hint.
-    let (s, body) = request(port, "POST", "/api/edit/add_operation",
-        r#"{"node":"Calc","op":"square_root","x":0,"y":0}"#).unwrap();
-    assert_eq!(s, 400);
-    assert!(body.contains("roadmap"), "{body}");
+    // Float intrinsics drop as function-style calls the parser maps to
+    // Expr::Intrinsic: square_root → sqrt(pin), min → min(pin, pin).
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Calc","op":"square_root","x":96.0,"y":264.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Calc", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][3]["body"], "sqrt(p3_1)");
+    let sqrt_local = d["locals"].as_array().unwrap()
+        .iter().find(|l| l["name"] == "square_root3").unwrap();
+    assert_eq!(sqrt_local["type"]["kind"], "Float64");
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Calc","op":"min","x":96.0,"y":336.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Calc", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][4]["body"], "min(p4_1, p4_2)");
 }
 
 // --- Constant blocks + SCADE-style symbol descriptors -------------------------

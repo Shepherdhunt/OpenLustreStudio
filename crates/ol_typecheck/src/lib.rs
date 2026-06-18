@@ -570,6 +570,11 @@ fn check_pre_initialization(
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
         }
+        Expr::Intrinsic { args, .. } => {
+            for a in args {
+                check_pre_initialization(a, under_arrow_body, diags, ctx);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -635,6 +640,46 @@ pub fn infer_expr_type(
                 return None;
             }
             Some(to.clone())
+        }
+        Expr::Intrinsic { func, args } => {
+            // Float intrinsics take a fixed number of `float64` (`real`)
+            // operands and return `float64`. Restricting to one width keeps the
+            // IR simulator (f64) and the generated `<math.h>` calls (double)
+            // exact, cell for cell. `float32` intrinsics are roadmap (they need
+            // the `f`-suffixed math variants with matching f32 rounding).
+            if args.len() != func.arity() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0160",
+                        format!(
+                            "`{}` takes {} argument(s), got {}",
+                            func.name(),
+                            func.arity(),
+                            args.len()
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            for a in args {
+                let at = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, None)?;
+                if !matches!(tctx.resolve(&at), Type::Float64) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0161",
+                            format!(
+                                "`{}` requires float64 (real) operands, got {at:?} \
+                                 (float32 intrinsics are roadmap)",
+                                func.name()
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            }
+            Some(Type::Float64)
         }
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
@@ -1474,6 +1519,11 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
                 collect_immediate_deps(i, out);
             }
             for a in arrays {
+                collect_immediate_deps(a, out);
+            }
+        }
+        Expr::Intrinsic { args, .. } => {
+            for a in args {
                 collect_immediate_deps(a, out);
             }
         }

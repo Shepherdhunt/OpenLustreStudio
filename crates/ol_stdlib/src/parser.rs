@@ -741,6 +741,20 @@ impl Parser {
                         };
                         return Ok(Expr::merge(clock, on_true, on_false));
                     }
+                    // A "call" to a float-intrinsic name is SCADE's math
+                    // built-in: `sqrt(x)`, `sin(x)`, `min(a, b)`.
+                    if let Some(func) = ol_ir::FloatFn::from_name(&name) {
+                        if args.len() != func.arity() {
+                            return Err(ParseError::Expected {
+                                expected: format!(
+                                    "exactly {} argument(s) for `{name}(...)`",
+                                    func.arity()
+                                ),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        return Ok(Expr::Intrinsic { func, args });
+                    }
                     // A "call" to a numeric type name is SCADE's numeric_cast:
                     // `int16(x)`, `float64(x)`.
                     if let Some(ty) = numeric_type_name(&name) {

@@ -269,6 +269,9 @@ fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clo
             .as_deref()
             .and_then(|i| natural_clock(i, var_clocks))
             .or_else(|| arrays.iter().find_map(|a| natural_clock(a, var_clocks))),
+        Expr::Intrinsic { args, .. } => {
+            args.iter().find_map(|a| natural_clock(a, var_clocks))
+        }
     }
 }
 
@@ -383,6 +386,12 @@ fn check_expr(
                 check_expr(i, expected, var_clocks, eq, info);
             }
             for a in arrays {
+                check_expr(a, expected, var_clocks, eq, info);
+            }
+        }
+        // Intrinsics are pure and run on their operands' shared clock.
+        Expr::Intrinsic { args, .. } => {
+            for a in args {
                 check_expr(a, expected, var_clocks, eq, info);
             }
         }

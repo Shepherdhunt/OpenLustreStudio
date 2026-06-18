@@ -80,6 +80,12 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
                 same_cycle_reads(a, out);
             }
         }
+        // Intrinsics are stateless: every operand is an ordinary same-cycle read.
+        Expr::Intrinsic { args, .. } => {
+            for a in args {
+                same_cycle_reads(a, out);
+            }
+        }
     }
 }
 

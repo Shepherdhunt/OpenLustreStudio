@@ -31,6 +31,8 @@ pub fn emit_monitors(project: &Project) -> MonitorBundle {
     let _ = writeln!(source, "#include \"openlustre_monitors.h\"");
     let _ = writeln!(source, "#include <stdio.h>");
     let _ = writeln!(source, "#include <string.h>");
+    // Contracts may reference float intrinsics (sqrt, …).
+    let _ = writeln!(source, "#include <math.h>");
     source.push('\n');
     // Small label-appending helper shared by every monitor in the file.
     let _ = writeln!(source, "static void _ol_append(char* buf, size_t buf_size, const char* sep, const char* s) {{");
@@ -234,6 +236,13 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         // Iterators don't appear in boolean contracts; lower to a neutral
         // value so the monitor still compiles if one ever does.
         Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
+        // Float intrinsics can appear inside a boolean contract (e.g.
+        // `sqrt(x) >= 0.0`); emit the same <math.h> call as the node body.
+        Expr::Intrinsic { func, args } => format!(
+            "{}({})",
+            func.c_name(false),
+            args.iter().map(|a| emit_mon_expr(a, scope)).collect::<Vec<_>>().join(", ")
+        ),
         Expr::Field { base, field } => format!("{}.{field}", emit_mon_expr(base, scope)),
         Expr::Index { base, index } => format!(
             "{}[{}]",
