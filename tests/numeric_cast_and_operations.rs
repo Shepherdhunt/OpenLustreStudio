@@ -508,6 +508,42 @@ fn dropping_operations_creates_placed_equations_with_red_pins() {
     assert_eq!(d["equations"][4]["body"], "min(p4_1, p4_2)");
 }
 
+#[test]
+fn numeric_cast_to_a_fixed_point_type_drops_and_types_the_local() {
+    let g = start_server_on_workspace("ops_fixed_cast");
+    let port = g.port;
+
+    // The type palette advertises fixed-point presets next to the scalars so
+    // they appear in the GUI type selectors.
+    let types = get_json(port, "/api/types");
+    let prims: Vec<&str> =
+        types["primitives"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+    for p in ["sfix16_8", "sfix32_16", "ufix16_8"] {
+        assert!(prims.contains(&p), "primitives missing {p}: {prims:?}");
+    }
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Q","kind":"operator"}"#);
+    // Dropping numeric_cast with a fixed-point param carries it into the body and
+    // types the result local as Fixed (the cast handler accepts fixed targets).
+    post_ok(
+        port,
+        "/api/edit/add_operation",
+        r#"{"node":"Q","op":"numeric_cast","param":"sfix16_8","x":40.0,"y":40.0}"#,
+    );
+    let d = get_json(port, "/api/diagram?node=Q");
+    assert_eq!(d["equations"][0]["body"], "sfix16_8(p0_1)");
+    let local = d["locals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "numeric_cast0")
+        .expect("cast result local");
+    assert_eq!(local["type"]["kind"], "Fixed");
+    assert_eq!(local["type"]["bits"], 16);
+    assert_eq!(local["type"]["frac"], 8);
+    assert_eq!(local["type"]["signed"], true);
+}
+
 // --- Constant blocks + SCADE-style symbol descriptors -------------------------
 
 #[test]

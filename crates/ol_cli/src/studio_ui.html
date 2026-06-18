@@ -590,10 +590,10 @@
       <h4>New simple type, array, or string</h4>
       <div class="row">
         <label>name</label><input id="type-alias-name" placeholder="Celsius">
-        <label>= type</label><input id="type-alias-target" style="flex:1" placeholder="int8   ·   float32[3]   ·   char[16]">
+        <label>= type</label><input id="type-alias-target" style="flex:1" placeholder="int8   ·   float32[3]   ·   char[16]   ·   sfix16_8">
         <button class="primary" onclick="typesAddAlias()">Create</button>
       </div>
-      <p class="build-note">A simple named scalar (<code class="inline">int8</code>), a fixed array (<code class="inline">float32[3]</code>), or a character array / string (<code class="inline">char[16]</code>).</p>
+      <p class="build-note">A simple named scalar (<code class="inline">int8</code>), a fixed-length array (<code class="inline">float32[3]</code>), a character array / string (<code class="inline">char[16]</code>), or a fixed-point type (<code class="inline">sfix16_8</code> / <code class="inline">ufix32_16</code>).</p>
     </div>
     <div class="build-note" id="types-status"></div>
   </div>
@@ -2980,7 +2980,7 @@ diagramHostEl.addEventListener("drop", async ev => {
 function promptForParam(opId, kind) {
   switch (kind) {
     case "value": return prompt("constant value (e.g. 2, 2.5, true):", "0");
-    case "type": return prompt("numeric_cast target type (int8…int64, uint8…uint64, float32, float64):", "int32");
+    case "type": return prompt("numeric_cast target type (int8…int64, uint8…uint64, float32, float64, or fixed sfix16_8 / ufix32_16):", "int32");
     case "n": return prompt("to_nth_power: exponent n (2–8):", "2");
     case "field": return prompt("field name to read:", "value");
     case "index": return prompt("array index (constant):", "0");
