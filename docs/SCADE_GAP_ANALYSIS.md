@@ -9,6 +9,13 @@ is the industry-accepted, DO-178C-qualified original. This document is honest ab
 which gaps are **bridgeable engineering work** and which are **structural** (you
 cannot code your way to a qualification certificate), and prioritizes the former.
 
+**Deliberate non-goals (not gaps).** OpenLustre Studio generates **C-Lite only** —
+**Ada generation and MISRA-C-styled output are explicit non-goals**, the
+product intentionally diverging from KCG there: the scope is graphical Lustre →
+*directional* C-Lite to be built with a real-time/embedded OS and target
+hardware. Items omitted from this document's gap tables on purpose: Ada/MISRA
+codegen, and the SCADE Architect/Display companion products.
+
 ## 0. Status snapshot — resume here
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
@@ -153,7 +160,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
-| Build & codegen | KCG qualified C/Ada (TQL-1), multiple target integrations | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing, **target/OS build profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional cross-build Makefile + `INTEGRATION.md` per target) |
+| Build & codegen | KCG qualified C/Ada (TQL-1), multiple target integrations | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing, **target/OS build profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional cross-build Makefile + `INTEGRATION.md` per target). **By design the only codegen target is C-Lite** — Ada and MISRA-C-styled output are a deliberate non-goal, *not* a gap (the product is graphical Lustre → directional C-Lite for an RTOS/embedded target). |
 | Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage **and unique-cause MC/DC** with uncovered reporting |
 | Deployment | Commercial installer suite | Inno Setup Windows installer, Start Menu/Desktop shortcuts, embedded stdlib, Linux install script, CI release workflow |
 | Qualification | DO-178C/DO-330 qualification kits, 20+ years of certification credit | None (see §4) |
@@ -233,6 +240,31 @@ verification burden the qualified tool would otherwise discharge.
 | Emulated target testing (QEMU + Docker) | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — effectively a *third* equivalence backend | P3 roadmap (the target profiles landed 2026-06-18 are the foundation; `INTEGRATION.md` flags it) |
 
 ## 6. What closed recently
+
+### 2026-06-18 — integration entry skeleton; empty new workspaces; C-Lite-only scope
+
+Three follow-ups to the target-codegen work.
+
+* **Generated integration entry point.** Compiling for a target now also emits
+  `integration.c` — a *compilable* periodic-`_step` skeleton in the target's
+  idiom (`ol_clite_emit::harness::emit_integration_main` + `IntegrationStyle`):
+  a portable `main()` super-loop (host/Linux), a `taskSpawn`-able
+  `<entry>_task` (VxWorks), or a `<entry>_tick()` for a timer ISR with static
+  state (bare-metal). It declares the real API (`<entry>_init` / `<entry>_step`
+  / the `_Input`/`_Output`/`_State` structs), `memset`s inputs to zero so it
+  builds as-is, and marks the I/O stubs. `driver.c` stays the CSV test harness;
+  `INTEGRATION.md` now points at `integration.c` (and the earlier doc's wrong
+  `_reset`/`_state` names are gone — the file uses the emitter's real API).
+  Verified: the host `integration.c` + generated `.c` compile cleanly with
+  MSVC; unit tests pin each style in `harness.rs`.
+* **New workspaces are empty.** File ▸ New Workspace (`/api/workspace/new`) no
+  longer seeds the starter `Heartbeat` operator — a new workspace opens blank
+  (`main: null`, no user operators); the engineer adds their own. (The CLI
+  `new`/welcome demo still seed a starter.) Test strengthened to assert it.
+* **C-Lite-only is a deliberate scope, not a gap.** The intro now states that
+  Ada generation and MISRA-C-styled output are explicit non-goals — the product
+  intentionally diverges from KCG and targets graphical Lustre → directional
+  C-Lite only. The gap tables omit them on purpose.
 
 ### 2026-06-18 — target / OS build profiles (directional codegen)
 

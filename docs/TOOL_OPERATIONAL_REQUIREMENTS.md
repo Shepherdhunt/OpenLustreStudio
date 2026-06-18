@@ -121,7 +121,7 @@ simulation or code generation. Each diagnostic carries a stable code and a
 | TOR-407 | The tool SHALL lower float intrinsics to the double `<math.h>` functions, add `#include <math.h>`, and link `-lm` on every compile path. | T | `tests/numeric_cast_and_operations.rs` (generated-C string check + equivalence) |
 | TOR-408 | The tool SHALL lower state machines (including nested regions) to flat data-flow C, emitting one state enum per region. | T | `tests/state_machine_codegen.rs` |
 | TOR-409 | The tool SHALL compile the generated sources from the GUI to a chosen directory with an auto-detected or selected compiler. | T | `tests/scenario_harness.rs`; `scenario::compile_in_dir` |
-| TOR-410 | The tool SHALL generate target-tuned build files (a toolchain/flag-specific `Makefile` and an `INTEGRATION.md`) for a selected target OS/board (host, embedded Linux-ARM, VxWorks, bare-metal-ARM); the host target compiles locally, a cross target is emitted for its own toolchain and built on the target. | T | `crates/ol_cli/src/target.rs` unit tests (`makefile_uses_the_target_toolchain`, `integration_readme_*`); `/api/targets`, `/api/clite/compile` |
+| TOR-410 | The tool SHALL generate target-tuned build files (a toolchain/flag-specific `Makefile`, an `INTEGRATION.md`, and a compilable `integration.c` periodic-`_step` entry skeleton in the target's idiom) for a selected target OS/board (host, embedded Linux-ARM, VxWorks, bare-metal-ARM); the host target compiles locally, a cross target is emitted for its own toolchain and built on the target. | T | `crates/ol_cli/src/target.rs` + `ol_clite_emit::harness` unit tests (`makefile_uses_the_target_toolchain`, `loop_style_is_a_periodic_main_using_the_real_api`, …); `/api/targets`, `/api/clite/compile` |
 
 ---
 
