@@ -165,6 +165,13 @@
   .watch-val { width: 110px; font-family: Consolas, monospace; }
   .watch-val.invalid { border: 1.5px solid #d11a1a; background: #fdeeee; }
   .watch-computed { font-family: Consolas, monospace; color: #2b579a; }
+  /* Simulation scope: stacked auto-scaled trace lanes */
+  .sim-scope { margin: 6px 0; }
+  .sim-scope svg { display: block; }
+  .sim-scope svg text { fill: #444; font-family: Consolas, monospace; }
+  .scope-legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 4px; font-size: 11px; font-family: Consolas, monospace; }
+  .scope-leg { cursor: pointer; user-select: none; display: inline-flex; align-items: center; gap: 4px; }
+  .scope-leg > i { width: 11px; height: 4px; border-radius: 2px; display: inline-block; }
   /* Build pipeline: four gated steps */
   .pipeline { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: 4px 0 8px; }
   .pstep { display: flex; align-items: center; gap: 8px; }
@@ -419,6 +426,7 @@
         <button onclick="simStop()">Stop / Reset</button>
         <span class="build-note">cycle <span id="step-cycle">0</span></span>
       </div>
+      <details open style="margin-top:6px"><summary class="build-note">scope</summary><div id="sim-scope" class="sim-scope"></div></details>
       <details style="margin-top:6px"><summary class="build-note">trace history</summary><div id="step-trace"></div></details>
     </div>
     <div class="dock-pane" id="dock-tests" style="display:none">
@@ -691,6 +699,7 @@
       <button onclick="runSim(false)">Simulate (outputs)</button>
       <button onclick="runSim(true)">Simulate (all items)</button>
     </div>
+    <div id="sim-scope-csv" class="sim-scope"></div>
     <pre id="sim-output"></pre>
   </div>
 
@@ -729,7 +738,7 @@
 "use strict";
 
 const state = {
-  inspect: null, selectedNode: null, stepHistory: "",
+  inspect: null, selectedNode: null, stepHistory: "", scopeHidden: {},
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
   // Canvas view: zoom multiplier (the SVG is drawn at W*zoom × H*zoom over a
@@ -1418,6 +1427,7 @@ function simRun() {
   state.sim.running = true;
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
+  renderScope(document.getElementById("sim-scope"), "");
   document.getElementById("step-cycle").textContent = "0";
   buildWatchTable();
   setMenuEnabled("mi-sim-step", true);
@@ -1440,6 +1450,7 @@ function simStop() {
   state.sim.running = false;
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
+  renderScope(document.getElementById("sim-scope"), "");
   document.getElementById("step-cycle").textContent = "0";
   // Reset the computed cells; keep the sticky input values for the next run.
   document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
@@ -1451,7 +1462,9 @@ function simStop() {
 async function runSim(full) {
   const body = document.getElementById("sim-input").value;
   const r = await fetch("/api/simulate" + (full ? "?full=1" : ""), { method: "POST", body });
-  document.getElementById("sim-output").textContent = await r.text();
+  const text = await r.text();
+  document.getElementById("sim-output").textContent = text;
+  renderScope(document.getElementById("sim-scope-csv"), r.ok ? text : "");
 }
 
 // --- The SCADE build pipeline: Build → Simulate → Generate → Compile&Run ------
@@ -4334,10 +4347,97 @@ function renderStepTrace(csv) {
   }
   html += "</tbody></table>";
   document.getElementById("step-trace").innerHTML = html;
+  renderScope(document.getElementById("sim-scope"), csv);
 }
 
 function escapeHTML(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// --- Simulation scope: a trace CSV plotted as stacked auto-scaled lanes --------
+// SCADE-style scope. Each signal gets its own lane, auto-scaled to its range
+// (bool -> 0/1, enum/state -> category levels), drawn as a synchronous step
+// line over cycles. No server data needed — it plots the same trace CSV the
+// watch-table and batch sim already return.
+const SCOPE_COLORS = ["#0a7a4f", "#1565c0", "#c1440e", "#8e24aa", "#00838f", "#b8860b", "#5e35b1", "#2e7d32"];
+
+function parseTraceCsv(csv) {
+  const lines = (csv || "").trim().split("\n").filter(l => l.trim());
+  if (lines.length < 2) return null;
+  return {
+    header: lines[0].split(",").map(s => s.trim()),
+    rows: lines.slice(1).map(l => l.split(",").map(s => s.trim())),
+  };
+}
+
+// Generated internals (`__sm_*` state, `__sig_*` signals, …) are hidden by
+// default but listed in the legend; an explicit toggle overrides.
+function scopeIsHidden(name) {
+  const h = (state.scopeHidden || {})[name];
+  return h === undefined ? name.startsWith("__") : h;
+}
+
+function renderScope(container, csv) {
+  if (!container) return;
+  container.__csv = csv;
+  const data = parseTraceCsv(csv);
+  if (!data) { container.innerHTML = '<span class="build-note">no trace to plot yet</span>'; return; }
+  const { header, rows } = data;
+  const n = rows.length;
+  const cols = header.map((name, ci) => {
+    const raw = rows.map(r => (r[ci] != null ? r[ci] : ""));
+    const isBool = raw.every(v => v === "true" || v === "false");
+    const nums = raw.map(v => (v === "true" ? 1 : v === "false" ? 0 : Number(v)));
+    const numeric = nums.every(v => Number.isFinite(v));
+    let values, min, max;
+    if (numeric) {
+      values = nums;
+      min = isBool ? 0 : Math.min(...nums);
+      max = isBool ? 1 : Math.max(...nums);
+    } else {
+      const uniq = [...new Set(raw)];
+      values = raw.map(v => uniq.indexOf(v));
+      min = 0; max = Math.max(1, uniq.length - 1);
+    }
+    return { name, ci, raw, values, min, max };
+  });
+  const shown = cols.filter(c => !scopeIsHidden(c.name));
+  const W = 640, labelW = 104, padR = 54, laneH = 30, gap = 9, top = 4;
+  const plotW = W - labelW - padR;
+  const xAt = i => labelW + (n <= 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const H = Math.max(laneH + top, top + shown.length * (laneH + gap));
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="max-height:${H}px">`;
+  shown.forEach((c, li) => {
+    const y0 = top + li * (laneH + gap), yBase = y0 + laneH;
+    const span = (c.max - c.min) || 1;
+    const yAt = v => yBase - ((v - c.min) / span) * (laneH - 6) - 3;
+    const color = SCOPE_COLORS[c.ci % SCOPE_COLORS.length];
+    svg += `<rect x="${labelW}" y="${y0}" width="${plotW}" height="${laneH}" fill="rgba(120,130,150,0.08)"/>`;
+    svg += `<text x="0" y="${(y0 + laneH / 2 + 3).toFixed(0)}" font-size="10">${escapeHTML(c.name)}</text>`;
+    let d = "", dots = "";
+    for (let i = 0; i < n; i++) {
+      const x = xAt(i), y = yAt(c.values[i]);
+      d += i === 0 ? `M${x.toFixed(1)} ${y.toFixed(1)}`
+                   : `L${x.toFixed(1)} ${yAt(c.values[i - 1]).toFixed(1)}L${x.toFixed(1)} ${y.toFixed(1)}`;
+      dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="1.4" fill="${color}"/>`;
+    }
+    svg += `<path d="${d}" fill="none" stroke="${color}" stroke-width="1.4"/>${dots}`;
+    svg += `<text x="${W - padR + 5}" y="${(yBase - 2).toFixed(0)}" font-size="10" fill="${color}">${escapeHTML(c.raw[n - 1])}</text>`;
+  });
+  if (!shown.length) svg += `<text x="${labelW}" y="18" font-size="10">all traces hidden — click a name below</text>`;
+  svg += "</svg>";
+  const legend = cols.map(c => {
+    const color = SCOPE_COLORS[c.ci % SCOPE_COLORS.length];
+    const style = scopeIsHidden(c.name) ? "opacity:0.4" : "";
+    return `<span class="scope-leg" style="${style}" onclick='toggleScope(${JSON.stringify(c.name)})'><i style="background:${color}"></i>${escapeHTML(c.name)}</span>`;
+  }).join("");
+  container.innerHTML = `<div class="scope-legend">${legend}</div>${svg}`;
+}
+
+function toggleScope(name) {
+  state.scopeHidden = state.scopeHidden || {};
+  state.scopeHidden[name] = !scopeIsHidden(name);
+  document.querySelectorAll(".sim-scope").forEach(el => { if (el.__csv != null) renderScope(el, el.__csv); });
 }
 
 // --- Tests: golden-trace scenarios, run against IR sim AND compiled C ------------------

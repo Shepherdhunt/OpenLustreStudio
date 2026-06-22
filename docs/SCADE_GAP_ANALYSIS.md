@@ -173,7 +173,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 | Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), **per-family gate silhouettes** (D-shape AND, pointed-OR, mux trapezoid, delay register), **orthogonal (Manhattan) wire routing**, draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, **marquee select + copy/paste of blocks**, multi-select + right-click menu + Delete, red invalid-link coding |
 | Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
-| Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
+| Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, **a stacked auto-scaled scope** (per-signal trace lanes — bool/enum/numeric, generated internals toggleable), CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
 | Build & codegen | KCG qualified C/Ada (TQL-1), multiple target integrations | **Build pipeline** with a build-any-operator selector (the chosen operator becomes the root): per-operator validity check on its slice → its own `<operator>.lus` (blank stub on create, filled on build) → C-Lite → debug run in a terminal, C-Lite emitter + contract monitors + CSV driver + Makefile + **log-message probes**, selected-root slicing, **target/OS build profiles** (host / embedded Linux-ARM / VxWorks / bare-metal — directional cross-build Makefile + `INTEGRATION.md` per target). **By design the only codegen target is C-Lite** — Ada and MISRA-C-styled output are a deliberate non-goal, *not* a gap (the product is graphical Lustre → directional C-Lite for an RTOS/embedded target). |
 | Testing | SCADE Test: harness, MTC, MC/DC on model | Scenario harness: golden traces against IR simulator **and** compiled C; decision coverage **and unique-cause MC/DC** with uncovered reporting |
@@ -255,6 +255,20 @@ verification burden the qualified tool would otherwise discharge.
 | ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests). `--system` adds **full-system arm64** (`qemu-system-aarch64 -M virt` + a busybox initramfs, kernel supplied as input) — generation tested; first boot needs a Docker host. RTOS full-system (VxWorks under `qemu-system-*`) remains (no freely-distributable image). |
 
 ## 6. What closed recently
+
+### 2026-06-22 — simulation scope (graphical trace plot)
+
+The simulator was watch-table-only; SCADE shows **plots/scopes**. The Studio now
+renders the simulation trace as a **scope** — stacked, auto-scaled lanes, one per
+signal, each a synchronous step line over cycles with the latest value labelled.
+A bool plots as a 0/1 lane, an enum (e.g. a state-machine state) as category
+levels, a numeric signal auto-scaled to its own range; the legend toggles signals
+on/off and generated internals (`__sm_*`, `__sig_*`) are hidden by default. It
+needs **no new server data** — it plots the same trace CSV the watch-table and the
+batch sim already return (`renderScope` in `studio_ui.html`), live as you Step and
+under the batch-CSV dialog. Verified live in the freshly-built Studio: a real
+`Doubler` step trace draws `cycle` / `x` / `constant1` / `y` lanes that track the
+inputs.
 
 ### 2026-06-22 — signals: within-cycle broadcast across automata
 
