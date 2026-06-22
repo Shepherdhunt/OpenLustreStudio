@@ -71,6 +71,7 @@ fn cruise_project() -> Project {
         }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let on = StateDef {
         name: "On".into(),
@@ -87,6 +88,7 @@ fn cruise_project() -> Project {
         ],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
 
     let sm = StateMachineDef {
@@ -98,6 +100,7 @@ fn cruise_project() -> Project {
         states: vec![off, on],
         contract: None,
         owner: Some("CruiseControl".into()),
+        signals: vec![],
     };
 
     Project {

@@ -34,6 +34,7 @@ fn traffic_light_project() -> Project {
         ],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -54,6 +55,7 @@ fn traffic_light_project() -> Project {
         ],
         contract: None,
         owner: None,
+        signals: vec![],
     };
     Project {
         name: "tl".into(),
@@ -177,6 +179,7 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let hi = StateDef {
         name: "Hi".into(),
@@ -184,6 +187,7 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -194,6 +198,7 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let active = StateDef {
         name: "Active".into(),
@@ -201,6 +206,7 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
         regions: vec![Region { initial_state: "Lo".into(), states: vec![lo, hi], history: false }],
         refines: None,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "Mode".into(),
@@ -218,6 +224,7 @@ fn mode_project() -> Project {
         states: vec![idle, active],
         contract: None,
         owner: None,
+        signals: vec![],
     };
     Project {
         name: "mode".into(),
@@ -309,4 +316,136 @@ fn make_tempdir() -> PathBuf {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_sm_{stamp}"));
     std::fs::create_dir_all(&p).unwrap();
     p
+}
+
+// --- Signals through the back end (real toolchain equivalence) ---------------
+
+/// `SignalDemo`: one top state `Run` with two parallel regions. The producer
+/// (`Lo <-tick-> Hi`) emits a valued signal `level` (1 / 2) and, in `Hi`, a pure
+/// signal `pulse`; the consumer (`Off --pulse?--> On`) mirrors `level`, reflects
+/// `pulse?`, and reports `acted` while in `On`. Returned un-lowered — the CLI's
+/// model loader lowers it, exactly as a build does.
+fn signal_demo_project() -> Project {
+    let level_val = || Expr::var(ol_ir::signal_value_local("level"));
+    let pulse_present = || Expr::var(ol_ir::signal_present_local("pulse"));
+    let lo = StateDef {
+        name: "Lo".into(),
+        equations: vec![Equation { lhs: vec!["count".into()], rhs: Expr::int_lit(0) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![ol_ir::Emit { signal: "level".into(), value: Some(Expr::int_lit(1)), guard: None }],
+    };
+    let hi = StateDef {
+        name: "Hi".into(),
+        equations: vec![Equation { lhs: vec!["count".into()], rhs: Expr::int_lit(1) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![
+            ol_ir::Emit { signal: "level".into(), value: Some(Expr::int_lit(2)), guard: None },
+            ol_ir::Emit { signal: "pulse".into(), value: None, guard: None },
+        ],
+    };
+    let consumer = |name: &str, acted: bool, target: &str, guard: Expr| StateDef {
+        name: name.into(),
+        equations: vec![
+            Equation { lhs: vec!["mirror".into()], rhs: level_val() },
+            Equation { lhs: vec!["beat".into()], rhs: pulse_present() },
+            Equation { lhs: vec!["acted".into()], rhs: Expr::bool_lit(acted) },
+        ],
+        transitions: vec![Transition { guard, target: target.into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![],
+    };
+    let run = StateDef {
+        name: "Run".into(),
+        equations: vec![],
+        transitions: vec![],
+        regions: vec![
+            Region { initial_state: "Lo".into(), states: vec![lo, hi], history: false },
+            Region {
+                initial_state: "Off".into(),
+                states: vec![
+                    consumer("Off", false, "On", pulse_present()),
+                    consumer("On", true, "Off", Expr::bool_lit(true)),
+                ],
+                history: false,
+            },
+        ],
+        refines: None,
+        emits: vec![],
+    };
+    let sm = StateMachineDef {
+        name: "SignalDemo".into(),
+        inputs: vec![Port { name: "tick".into(), ty: Type::Bool }],
+        outputs: vec![
+            Port { name: "count".into(), ty: Type::Int32 },
+            Port { name: "mirror".into(), ty: Type::Int32 },
+            Port { name: "beat".into(), ty: Type::Bool },
+            Port { name: "acted".into(), ty: Type::Bool },
+        ],
+        locals: vec![],
+        initial_state: "Run".into(),
+        states: vec![run],
+        signals: vec![
+            ol_ir::SignalDef { name: "level".into(), ty: Some(Type::Int32) },
+            ol_ir::SignalDef { name: "pulse".into(), ty: None },
+        ],
+        contract: None,
+        owner: None,
+    };
+    Project {
+        name: "sig".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![sm], ..Default::default() }],
+        main: Some("SignalDemo".into()),
+        ..Default::default()
+    }
+}
+
+/// Signals lower to plain dataflow, so the generated C must reproduce the IR
+/// trace cell-for-cell. Drive the machine through the scenario harness against
+/// *both* backends (IR simulator and compiled C-Lite) and require both to pass.
+/// Uses the project's C toolchain (MSVC here, `cc` in CI).
+#[test]
+fn signals_ir_sim_and_generated_c_agree() {
+    let tmp = make_tempdir();
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&signal_demo_project()).unwrap()).unwrap();
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    std::fs::write(scen.join("beat.csv"), "tick\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\ntrue\n").unwrap();
+
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO"))
+            .args(["run", "-q", "-p", "ol_cli", "--"])
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let (ok, out) =
+        run(&["test", "record", model.to_str().unwrap(), "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record: {out}");
+    let (ok, out) = run(&[
+        "test",
+        "run",
+        model.to_str().unwrap(),
+        "--scenarios",
+        scen.to_str().unwrap(),
+        "--backend",
+        "both",
+    ]);
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert!(ok, "run: {out}");
+    assert!(out.contains("[PASS] beat (ir)"), "{out}");
+    assert!(out.contains("[PASS] beat (c )"), "signals C backend diverged: {out}");
 }

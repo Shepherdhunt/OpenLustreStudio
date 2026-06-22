@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 
 use ol_ir::{
-    Equation, Expr, NodeKind, Package, Port, Project, Region, StateDef, StateMachineDef,
-    Transition, Type,
+    Emit, Equation, Expr, NodeKind, Package, Port, Project, Region, SignalDef, StateDef,
+    StateMachineDef, Transition, Type,
 };
 use ol_sim::{Sim, Value};
 
@@ -32,6 +32,7 @@ fn toggle_machine() -> StateMachineDef {
                 }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
             StateDef {
                 name: "ON".into(),
@@ -45,10 +46,12 @@ fn toggle_machine() -> StateMachineDef {
                 }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
         ],
         contract: None,
         owner: None,
+        signals: vec![],
     }
 }
 
@@ -212,6 +215,7 @@ fn three_state_traffic_light_simulates_correctly() {
         ],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -226,6 +230,7 @@ fn three_state_traffic_light_simulates_correctly() {
         ],
         contract: None,
         owner: None,
+        signals: vec![],
     };
     let mut project = Project {
         name: "tl".into(),
@@ -287,6 +292,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let hi = StateDef {
         name: "Hi".into(),
@@ -294,6 +300,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -304,6 +311,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
         refines: None,
+        emits: vec![],
     };
     let active = StateDef {
         name: "Active".into(),
@@ -316,6 +324,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
             history: false,
         }],
         refines: None,
+        emits: vec![],
     };
     StateMachineDef {
         name: "Mode".into(),
@@ -333,6 +342,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         states: vec![idle, active],
         contract: None,
         owner: None,
+        signals: vec![],
     }
 }
 
@@ -373,6 +383,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
             StateDef {
                 name: "Hi".into(),
@@ -380,10 +391,12 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
         ],
         contract: None,
         owner: None,
+        signals: vec![],
     };
     let refmode = StateMachineDef {
         name: "RefMode".into(),
@@ -408,6 +421,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
             StateDef {
                 name: "Active".into(),
@@ -415,10 +429,12 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
                 regions: vec![],
                 refines: Some("Spin".into()), // delegate to the Spin machine
+                emits: vec![],
             },
         ],
         contract: None,
         owner: None,
+        signals: vec![],
     };
     vec![spin, refmode]
 }
@@ -487,6 +503,7 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
                 transitions: vec![Transition { guard: Expr::var("press"), target: "On".into() }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
             StateDef {
                 name: "On".into(),
@@ -494,10 +511,12 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
                 transitions: vec![Transition { guard: Expr::var("press"), target: "Off".into() }],
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             },
         ],
         contract: None,
         owner: Some("Lamp".into()), // operator-owned: merge into Lamp's body
+        signals: vec![],
     };
     let mut project = Project {
         name: "owned".into(),
@@ -587,4 +606,167 @@ fn hierarchical_machine_simulates_with_restart_on_entry() {
         (true, 1),  // c6 Active re-entered -> nested restarts at Lo
     ];
     assert_eq!(trace, expected);
+}
+
+// --- Signals: within-cycle broadcast across parallel regions -----------------
+
+/// `SignalDemo(tick)` — one top state `Run` holding two parallel regions:
+///   - producer: `Lo <-tick-> Hi`; `Lo` emits the valued signal `level = 1`,
+///     `Hi` emits `level = 2` and the pure signal `pulse`. `count` = 0 / 1.
+///   - consumer: `Off --pulse?--> On --true--> Off`; it mirrors the valued
+///     signal (`mirror = level`), reflects presence (`beat = pulse?`), and is in
+///     `On` (output `acted`) the cycle after a pulse — so the *pure signal drives
+///     a transition in a parallel region*, and the valued signal is *read* there.
+fn signal_demo_machine() -> StateMachineDef {
+    let level_val = || Expr::var(ol_ir::signal_value_local("level"));
+    let pulse_present = || Expr::var(ol_ir::signal_present_local("pulse"));
+
+    let lo = StateDef {
+        name: "Lo".into(),
+        equations: vec![Equation { lhs: vec!["count".into()], rhs: Expr::int_lit(0) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![Emit { signal: "level".into(), value: Some(Expr::int_lit(1)), guard: None }],
+    };
+    let hi = StateDef {
+        name: "Hi".into(),
+        equations: vec![Equation { lhs: vec!["count".into()], rhs: Expr::int_lit(1) }],
+        transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![
+            Emit { signal: "level".into(), value: Some(Expr::int_lit(2)), guard: None },
+            Emit { signal: "pulse".into(), value: None, guard: None },
+        ],
+    };
+    let consumer_state = |name: &str, acted: bool, target: &str, guard: Expr| StateDef {
+        name: name.into(),
+        equations: vec![
+            Equation { lhs: vec!["mirror".into()], rhs: level_val() },
+            Equation { lhs: vec!["beat".into()], rhs: pulse_present() },
+            Equation { lhs: vec!["acted".into()], rhs: Expr::bool_lit(acted) },
+        ],
+        transitions: vec![Transition { guard, target: target.into() }],
+        regions: vec![],
+        refines: None,
+        emits: vec![],
+    };
+    let off = consumer_state("Off", false, "On", pulse_present());
+    let on = consumer_state("On", true, "Off", Expr::bool_lit(true));
+    let run = StateDef {
+        name: "Run".into(),
+        equations: vec![],
+        transitions: vec![],
+        regions: vec![
+            Region { initial_state: "Lo".into(), states: vec![lo, hi], history: false },
+            Region { initial_state: "Off".into(), states: vec![off, on], history: false },
+        ],
+        refines: None,
+        emits: vec![],
+    };
+    StateMachineDef {
+        name: "SignalDemo".into(),
+        inputs: vec![Port { name: "tick".into(), ty: Type::Bool }],
+        outputs: vec![
+            Port { name: "count".into(), ty: Type::Int32 },
+            Port { name: "mirror".into(), ty: Type::Int32 },
+            Port { name: "beat".into(), ty: Type::Bool },
+            Port { name: "acted".into(), ty: Type::Bool },
+        ],
+        locals: vec![],
+        initial_state: "Run".into(),
+        states: vec![run],
+        signals: vec![
+            SignalDef { name: "level".into(), ty: Some(Type::Int32) },
+            SignalDef { name: "pulse".into(), ty: None },
+        ],
+        contract: None,
+        owner: None,
+    }
+}
+
+fn signal_demo_project() -> Project {
+    Project {
+        name: "sig".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            state_machines: vec![signal_demo_machine()],
+            ..Default::default()
+        }],
+        main: Some("SignalDemo".into()),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn signals_broadcast_across_parallel_regions() {
+    let mut project = signal_demo_project();
+    project.lower_state_machines().expect("signals lower cleanly");
+    let report = ol_typecheck::check_project(&project);
+    assert!(
+        !report.has_errors(),
+        "typecheck errors: {:?}",
+        report.errors().map(|d| d.render()).collect::<Vec<_>>()
+    );
+
+    // Signals lower to ordinary dataflow locals.
+    let node = project.find_node("SignalDemo").unwrap();
+    assert!(node.locals.iter().any(|l| l.name == ol_ir::signal_present_local("pulse")));
+    assert!(node.locals.iter().any(|l| l.name == ol_ir::signal_value_local("level")));
+
+    let mut sim = Sim::new(&project, "SignalDemo").unwrap();
+    let (mut counts, mut mirrors, mut beats, mut acteds) = (vec![], vec![], vec![], vec![]);
+    for _ in 0..7 {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("tick".into(), Value::Bool(true));
+        let out = sim.step(&inputs).unwrap();
+        counts.push(out["count"].as_int().unwrap());
+        mirrors.push(out["mirror"].as_int().unwrap());
+        beats.push(out["beat"].as_bool().unwrap());
+        acteds.push(out["acted"].as_bool().unwrap());
+    }
+    // producer toggles Lo/Hi each cycle (tick high):
+    assert_eq!(counts, vec![0, 1, 0, 1, 0, 1, 0]);
+    // valued signal value, read in the *consumer* region the same cycle:
+    assert_eq!(mirrors, vec![1, 2, 1, 2, 1, 2, 1]);
+    // pure signal presence (emitted only in Hi), read cross-region:
+    assert_eq!(beats, vec![false, true, false, true, false, true, false]);
+    // pulse drove the consumer's Off->On transition (On is one cycle after Hi):
+    assert_eq!(acteds, vec![false, false, true, false, true, false, true]);
+}
+
+#[test]
+fn lowering_rejects_emit_of_undeclared_signal() {
+    let mut m = signal_demo_machine();
+    // Producer's `Lo` emits a signal that was never declared.
+    m.states[0].regions[0].states[0]
+        .emits
+        .push(Emit { signal: "ghost".into(), value: None, guard: None });
+    let mut project = signal_demo_project();
+    project.packages[0].state_machines = vec![m];
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::UnknownSignal(_, _, _)), "{errs:?}");
+}
+
+#[test]
+fn lowering_rejects_value_on_a_pure_signal() {
+    let mut m = signal_demo_machine();
+    // `pulse` is pure; give its emission a value.
+    m.states[0].regions[0].states[1].emits[1].value = Some(Expr::int_lit(5));
+    let mut project = signal_demo_project();
+    project.packages[0].state_machines = vec![m];
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::ValueOnPureSignal(_, _, _)), "{errs:?}");
+}
+
+#[test]
+fn lowering_rejects_valued_signal_emitted_without_a_value() {
+    let mut m = signal_demo_machine();
+    // `level` is valued; drop the value from `Lo`'s emission.
+    m.states[0].regions[0].states[0].emits[0].value = None;
+    let mut project = signal_demo_project();
+    project.packages[0].state_machines = vec![m];
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::MissingSignalValue(_, _, _)), "{errs:?}");
 }

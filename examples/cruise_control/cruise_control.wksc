@@ -152,7 +152,8 @@
                 }
               ],
               "regions": [],
-              "refines": null
+              "refines": null,
+              "emits": []
             },
             {
               "name": "On",
@@ -231,9 +232,11 @@
                 }
               ],
               "regions": [],
-              "refines": null
+              "refines": null,
+              "emits": []
             }
           ],
+          "signals": [],
           "contract": null,
           "owner": "CruiseControl"
         }

@@ -1752,12 +1752,37 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let mut emits = Vec::new();
+        for em in st.get("emits").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            let signal = em
+                .get("signal")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| format!("state `{sname}` emit missing `signal`"))?
+                .trim()
+                .to_string();
+            let value = match em.get("value").and_then(|v| v.as_str()).map(str::trim) {
+                Some(s) if !s.is_empty() => Some(
+                    ol_stdlib::parse_expr(s)
+                        .map_err(|e| format!("state `{sname}` emit `{signal}` value: {e}"))?,
+                ),
+                _ => None,
+            };
+            let guard = match em.get("guard").and_then(|v| v.as_str()).map(str::trim) {
+                Some(s) if !s.is_empty() => Some(
+                    ol_stdlib::parse_expr(s)
+                        .map_err(|e| format!("state `{sname}` emit `{signal}` guard: {e}"))?,
+                ),
+                _ => None,
+            };
+            emits.push(ol_ir::Emit { signal, value, guard });
+        }
         states.push(ol_ir::StateDef {
             name: sname.to_string(),
             equations,
             transitions,
             regions,
             refines,
+            emits,
         });
     }
     Ok(states)
@@ -1805,6 +1830,25 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         .map(|s| s.to_string())
         .filter(|s| !s.is_empty());
 
+    // Signals declared on the machine: `{name, type?}` (no `type` = a pure,
+    // presence-only signal; a `type` makes it valued).
+    let mut signals = Vec::new();
+    for item in req.get("signals").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        let sname = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or("signals: signal missing name")?
+            .trim()
+            .to_string();
+        let ty = match item.get("type").and_then(|v| v.as_str()).map(str::trim) {
+            Some(t) if !t.is_empty() => {
+                Some(ol_stdlib::parse_type(t).map_err(|e| format!("signal `{sname}`: {e}"))?)
+            }
+            _ => None,
+        };
+        signals.push(ol_ir::SignalDef { name: sname, ty });
+    }
+
     let machine = ol_ir::StateMachineDef {
         name: name.to_string(),
         inputs,
@@ -1812,6 +1856,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         locals: vec![],
         initial_state,
         states,
+        signals,
         contract: None,
         owner,
     };

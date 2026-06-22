@@ -49,6 +49,40 @@ pub struct Transition {
     pub target: String,
 }
 
+/// A signal declared on a state machine — a within-cycle broadcast. A signal is
+/// **present** in a cycle iff some currently-active state [`Emit`]s it that
+/// cycle; a guard or equation elsewhere in the machine (including a parallel
+/// region) sees that presence the same cycle. A *pure* signal (`ty: None`)
+/// carries only presence; a *valued* signal (`ty: Some(T)`) also carries a value
+/// while present.
+///
+/// Signals lower to ordinary dataflow locals — `__sig_<name>_present: bool` and,
+/// for valued signals, `__sig_<name>_value: T` — so typecheck, the simulator and
+/// the C emitter need no knowledge of them. The authoring surface references a
+/// signal as `s?` (presence) and `s` (value); that translation happens at the
+/// editor boundary, leaving the stored guards/equations as plain references to
+/// the generated locals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SignalDef {
+    pub name: String,
+    /// `None` for a pure (presence-only) signal; `Some(T)` for a valued signal.
+    #[serde(default)]
+    pub ty: Option<Type>,
+}
+
+/// An emission of a signal while a state is active. `value` carries the payload
+/// for a valued signal (`None` for a pure one); `guard`, when present, restricts
+/// the emission to cycles where it holds (otherwise the signal is emitted on
+/// every cycle the state is active).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Emit {
+    pub signal: String,
+    #[serde(default)]
+    pub value: Option<Expr>,
+    #[serde(default)]
+    pub guard: Option<Expr>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateDef {
     pub name: String,
@@ -70,6 +104,9 @@ pub struct StateDef {
     /// that does not delegate.
     #[serde(default)]
     pub refines: Option<String>,
+    /// Signals emitted while this state is active (see [`Emit`] / [`SignalDef`]).
+    #[serde(default)]
+    pub emits: Vec<Emit>,
 }
 
 /// A nested automaton inside a state: its own initial state and states (each of
@@ -93,6 +130,11 @@ pub struct StateMachineDef {
     pub locals: Vec<Local>,
     pub initial_state: String,
     pub states: Vec<StateDef>,
+    /// Signals broadcast within this machine (presence-only or valued). Emitted
+    /// by states via [`StateDef::emits`]; tested in guards/equations as `s?`
+    /// (presence) and `s` (value). Empty for a machine that uses no signals.
+    #[serde(default)]
+    pub signals: Vec<SignalDef>,
     #[serde(default)]
     pub contract: Option<String>,
     /// The operator this machine belongs to. `Some(op)` machines are
@@ -131,6 +173,14 @@ pub enum LowerError {
     RefineCycle(String, String),
     #[error("machine `{0}` is owned by operator `{1}`, which does not exist")]
     UnknownOwner(String, String),
+    #[error("machine `{0}`: signal `{1}` is declared more than once")]
+    DuplicateSignal(String, String),
+    #[error("machine `{0}`: state `{1}` emits unknown signal `{2}` (declare it with `signal {2}`)")]
+    UnknownSignal(String, String, String),
+    #[error("machine `{0}`: state `{1}` emits `{2}` with a value, but `{2}` is a pure (typeless) signal")]
+    ValueOnPureSignal(String, String, String),
+    #[error("machine `{0}`: state `{1}` emits valued signal `{2}` without a value")]
+    MissingSignalValue(String, String, String),
 }
 
 /// Resolve every `refines` reference in `sm` into an inlined nested [`Region`]
@@ -173,6 +223,7 @@ fn prefix_states(states: Vec<StateDef>, prefix: &str) -> Vec<StateDef> {
                 })
                 .collect(),
             refines: None,
+            emits: s.emits,
         })
         .collect()
 }
@@ -220,6 +271,7 @@ fn resolve_states(
             transitions: st.transitions.clone(),
             regions,
             refines: None,
+            emits: st.emits.clone(),
         });
     }
     Ok(out)
@@ -247,6 +299,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
     for out in &sm.outputs {
         require_cover(sm, &out.name, &sm.states)?;
     }
+    validate_signals(sm)?;
 
     let mut lo = Lower {
         machine: sm,
@@ -254,12 +307,14 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         locals: sm.locals.clone(),
         equations: Vec::new(),
         next_id: 0,
+        emitters: Vec::new(),
     };
     let top = lo.emit_region(&sm.initial_state, &sm.states, Expr::bool_lit(true), false);
     for out in &sm.outputs {
         let rhs = lo.value_of(&out.name, &top, &out.ty);
         lo.equations.push(Equation { lhs: vec![out.name.clone()], rhs });
     }
+    lo.emit_signal_equations(sm);
 
     let node = NodeDef {
         name: sm.name.clone(),
@@ -293,12 +348,24 @@ struct StateNode<'a> {
     nested: Vec<(&'a Region, RegionInfo<'a>)>,
 }
 
+/// One place a signal is emitted: the condition under which it is present this
+/// cycle (`active-and-in-state [and emit guard]`) and, for a valued signal, the
+/// value broadcast there.
+struct EmitSite {
+    signal: String,
+    present_cond: Expr,
+    value: Option<Expr>,
+}
+
 struct Lower<'a> {
     machine: &'a StateMachineDef,
     enums: Vec<TypeDef>,
     locals: Vec<Local>,
     equations: Vec<Equation>,
     next_id: usize,
+    /// Signal emissions discovered while walking the region tree, in
+    /// declaration/traversal order (earlier sites win a valued conflict).
+    emitters: Vec<EmitSite>,
 }
 
 impl<'a> Lower<'a> {
@@ -385,17 +452,32 @@ impl<'a> Lower<'a> {
 
         let mut nodes = Vec::with_capacity(states.len());
         for st in states {
+            // The condition under which this state is the active one this cycle:
+            // `parent-active and state = S` (just `state = S` for the top region).
+            let in_state = Expr::bin(BinOp::Eq, Expr::var(&state_var), Expr::var(&st.name));
+            let act_state = match &active_var {
+                Some(av) => Expr::and(Expr::var(av), in_state),
+                None => in_state,
+            };
+            // Record this state's signal emissions: present while the state is
+            // active (optionally further restricted by the emit guard).
+            for em in &st.emits {
+                let present_cond = match &em.guard {
+                    Some(g) => Expr::and(act_state.clone(), g.clone()),
+                    None => act_state.clone(),
+                };
+                self.emitters.push(EmitSite {
+                    signal: em.signal.clone(),
+                    present_cond,
+                    value: em.value.clone(),
+                });
+            }
             let mut nested = Vec::new();
             for region in &st.regions {
-                let in_state = Expr::bin(BinOp::Eq, Expr::var(&state_var), Expr::var(&st.name));
-                let nested_active = match &active_var {
-                    Some(av) => Expr::and(Expr::var(av), in_state),
-                    None => in_state,
-                };
                 let info = self.emit_region(
                     &region.initial_state,
                     &region.states,
-                    nested_active,
+                    act_state.clone(),
                     region.history,
                 );
                 nested.push((region, info));
@@ -436,6 +518,96 @@ impl<'a> Lower<'a> {
             .map(|e| e.rhs.clone())
             .unwrap_or_else(|| default_expr_for_type(ty))
     }
+
+    /// Emit the dataflow definition of every declared signal from the emissions
+    /// gathered while walking the region tree. A signal's presence is the OR of
+    /// its emit conditions (`false` when never emitted — a legal, always-absent
+    /// signal); a valued signal's value is a priority chain over the same
+    /// conditions (earlier emitters win), defaulting to the type's zero when
+    /// absent. These are ordinary `bool` / `T` locals, so every downstream stage
+    /// treats a signal as a plain variable.
+    fn emit_signal_equations(&mut self, sm: &StateMachineDef) {
+        let sites = std::mem::take(&mut self.emitters);
+        for sig in &sm.signals {
+            let present = sites
+                .iter()
+                .filter(|s| s.signal == sig.name)
+                .map(|s| s.present_cond.clone())
+                .reduce(Expr::or)
+                .unwrap_or_else(|| Expr::bool_lit(false));
+            let present_local = signal_present_local(&sig.name);
+            self.locals.push(Local { name: present_local.clone(), ty: Type::Bool });
+            self.equations.push(Equation { lhs: vec![present_local], rhs: present });
+
+            if let Some(ty) = &sig.ty {
+                let mut chain = default_expr_for_type(ty);
+                for site in sites.iter().filter(|s| s.signal == sig.name).rev() {
+                    let v = site.value.clone().unwrap_or_else(|| default_expr_for_type(ty));
+                    chain = Expr::if_then_else(site.present_cond.clone(), v, chain);
+                }
+                let value_local = signal_value_local(&sig.name);
+                self.locals.push(Local { name: value_local.clone(), ty: ty.clone() });
+                self.equations.push(Equation { lhs: vec![value_local], rhs: chain });
+            }
+        }
+    }
+}
+
+/// The dataflow local a signal's presence lowers to.
+pub fn signal_present_local(signal: &str) -> String {
+    format!("__sig_{signal}_present")
+}
+
+/// The dataflow local a valued signal's value lowers to.
+pub fn signal_value_local(signal: &str) -> String {
+    format!("__sig_{signal}_value")
+}
+
+/// Validate signal declarations and emissions before lowering: unique names, and
+/// every emission names a declared signal with a value iff the signal is valued.
+fn validate_signals(sm: &StateMachineDef) -> Result<(), LowerError> {
+    let mut by_name: std::collections::HashMap<&str, &SignalDef> = std::collections::HashMap::new();
+    for sig in &sm.signals {
+        if by_name.insert(sig.name.as_str(), sig).is_some() {
+            return Err(LowerError::DuplicateSignal(sm.name.clone(), sig.name.clone()));
+        }
+    }
+    validate_emits(sm, &sm.states, &by_name)
+}
+
+fn validate_emits(
+    sm: &StateMachineDef,
+    states: &[StateDef],
+    signals: &std::collections::HashMap<&str, &SignalDef>,
+) -> Result<(), LowerError> {
+    for st in states {
+        for em in &st.emits {
+            let sig = signals.get(em.signal.as_str()).ok_or_else(|| {
+                LowerError::UnknownSignal(sm.name.clone(), st.name.clone(), em.signal.clone())
+            })?;
+            match (sig.ty.is_some(), em.value.is_some()) {
+                (false, true) => {
+                    return Err(LowerError::ValueOnPureSignal(
+                        sm.name.clone(),
+                        st.name.clone(),
+                        em.signal.clone(),
+                    ))
+                }
+                (true, false) => {
+                    return Err(LowerError::MissingSignalValue(
+                        sm.name.clone(),
+                        st.name.clone(),
+                        em.signal.clone(),
+                    ))
+                }
+                _ => {}
+            }
+        }
+        for r in &st.regions {
+            validate_emits(sm, &r.states, signals)?;
+        }
+    }
+    Ok(())
 }
 
 /// The next-state chain for one region's states, keyed off `state_var`.

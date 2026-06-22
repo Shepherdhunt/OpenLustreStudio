@@ -246,6 +246,7 @@ impl LibBlock {
                 transitions,
                 regions: vec![],
                 refines: None,
+                emits: vec![],
             });
         }
 
@@ -258,6 +259,7 @@ impl LibBlock {
             locals,
             initial_state,
             states,
+            signals: vec![],
             contract: contract.as_ref().map(|_| self.contract_name()),
             owner: None,
         };
