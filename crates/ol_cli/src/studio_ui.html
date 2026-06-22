@@ -645,7 +645,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry. Or nest a region inline with a <code class="inline">{ … }</code> block: <code class="inline">Active: drive=1 { initial Lo; history; Lo: level=0; Hi: level=1; Lo -&gt; Hi when up; Hi -&gt; Lo when down }</code>. The sub-automaton runs while the state is active; add <code class="inline">history</code> to resume the held sub-state on re-entry instead of restarting.</p>
+    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry. Or nest a region inline with a <code class="inline">{ … }</code> block: <code class="inline">Active: drive=1 { initial Lo; history; Lo: level=0; Hi: level=1; Lo -&gt; Hi when up; Hi -&gt; Lo when down }</code>. The sub-automaton runs while the state is active; add <code class="inline">history</code> to resume the held sub-state on re-entry instead of restarting. <strong>Signals:</strong> declare broadcast signals in the <em>signals</em> field — <code class="inline">pulse</code> is a pure (presence-only) signal, <code class="inline">level: int32</code> a valued one. A state emits one with <code class="inline">emit pulse</code> or <code class="inline">emit level = 2</code> (optionally <code class="inline">… when cond</code>); anywhere else — including a parallel region — test presence with <code class="inline">pulse?</code> and read a valued signal with <code class="inline">level</code>. A signal is present the same cycle it is emitted, so it is how two parallel automata talk.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -663,6 +663,9 @@
       </div>
       <div class="row">
         <label>outputs</label><input id="fsm-outputs" style="flex:1" readonly title="the owning operator's outputs — the machine drives these" placeholder="(from the operator)">
+      </div>
+      <div class="row">
+        <label>signals</label><input id="fsm-signals" style="flex:1" oninput="fsmPreview()" title="broadcast signals: `pulse` (pure) or `level: int32` (valued); emit with `emit s`, test with `s?`" placeholder="optional — e.g. pulse; level: int32">
       </div>
       <div class="row" style="align-items:flex-start">
         <label>states</label>
@@ -3696,6 +3699,15 @@ function parsePortsSpec(text) {
   });
 }
 
+// "pulse; level: int32" -> [{name} | {name, type}]. No type = a pure
+// (presence-only) signal; a type makes it valued.
+function parseSignalsSpec(text) {
+  return (text || "").split(/[;,]/).map(s => s.trim()).filter(Boolean).map(s => {
+    const ci = s.indexOf(":");
+    return ci < 0 ? { name: s } : { name: s.slice(0, ci).trim(), type: s.slice(ci + 1).trim() };
+  });
+}
+
 // Parse the textual editor into the structured payload, or null on a syntax
 // error (with a status message). Shared by create and update.
 const TRANS_RE = /^(\w+)\s*->\s*(\w+)\s+when\s+(.+)$/;
@@ -3726,18 +3738,35 @@ function splitStateEntries(text) {
   return entries;
 }
 
-// Parse `lhs = expr; …; refine Machine` segments into {equations, refines}.
+// Parse `lhs = expr`, `emit s [= value] [when guard]`, and `refine Machine`
+// segments into {equations, emits, refines}.
 function parseStateSegs(name, segText) {
   const eqs = [];
+  const emits = [];
   let refines = null;
   for (const seg of segText.split(";").map(x => x.trim()).filter(Boolean)) {
     const rm = seg.match(/^refine\s+(\w+)$/);
     if (rm) { refines = rm[1]; continue; }
+    const emm = seg.match(/^emit\s+(.+)$/);
+    if (emm) {
+      let rest = emm[1].trim(), guard = null, value = null, signal;
+      const wm = rest.match(/^(.*?)\s+when\s+(.+)$/);
+      if (wm) { rest = wm[1].trim(); guard = wm[2].trim(); }
+      const eqi = rest.indexOf("=");
+      if (eqi >= 0) { signal = rest.slice(0, eqi).trim(); value = rest.slice(eqi + 1).trim(); }
+      else { signal = rest.trim(); }
+      if (!/^\w+$/.test(signal)) return { error: "state `" + name + "`: `emit` needs a signal name — got: " + seg };
+      const e = { signal };
+      if (value) e.value = value;
+      if (guard) e.guard = guard;
+      emits.push(e);
+      continue;
+    }
     const ei = seg.indexOf("=");
-    if (ei < 0) return { error: "state `" + name + "`: each part is `lhs = expr` or `refine Machine` — got: " + seg };
+    if (ei < 0) return { error: "state `" + name + "`: each part is `lhs = expr`, `emit signal [= value] [when g]`, or `refine Machine` — got: " + seg };
     eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
   }
-  return { equations: eqs, refines };
+  return { equations: eqs, emits, refines };
 }
 
 // Parse a region block body into {initial_state, history, states[]} — the
@@ -3762,6 +3791,7 @@ function parseRegionBlock(parentName, blockText) {
     if (parsed.error) return parsed;
     const sd = { name: sn, equations: parsed.equations, transitions: [] };
     if (parsed.refines) sd.refines = parsed.refines;
+    if (parsed.emits.length) sd.emits = parsed.emits;
     subStates[sn] = sd; subOrder.push(sn);
   }
   if (!subOrder.length) return { error: "state `" + parentName + "`: the region has no sub-states" };
@@ -3789,6 +3819,7 @@ function fsmBuildPayload() {
     if (parsed.error) { setFsmStatus(false, parsed.error); return null; }
     const st = { name, equations: parsed.equations, transitions: [] };
     if (parsed.refines) st.refines = parsed.refines;
+    if (parsed.emits.length) st.emits = parsed.emits;
     if (ent.block != null) {
       const rb = parseRegionBlock(name, ent.block);
       if (rb.error) { setFsmStatus(false, rb.error); return null; }
@@ -3812,6 +3843,7 @@ function fsmBuildPayload() {
     initial_state: document.getElementById("fsm-initial").value.trim(),
     inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
     outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
+    signals: parseSignalsSpec(document.getElementById("fsm-signals").value),
     states: order.map(n => states[n]),
   };
 }
@@ -3907,11 +3939,15 @@ function fsmLoadIntoForm(m) {
   const ports = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
   document.getElementById("fsm-inputs").value = ports(m.inputs);
   document.getElementById("fsm-outputs").value = ports(m.outputs);
+  document.getElementById("fsm-signals").value = (m.signals || [])
+    .map(s => s.type ? s.name + ": " + typeName(s.type) : s.name).join("; ");
+  const emitSeg = e => "emit " + e.signal + (e.value ? " = " + e.value : "") + (e.guard ? " when " + e.guard : "");
   document.getElementById("fsm-states").value = (m.states || [])
     .map(s => {
       const parts = [];
       if (s.refines) parts.push("refine " + s.refines);
       for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
+      for (const e of (s.emits || [])) parts.push(emitSeg(e));
       let line = s.name + ": " + parts.join("; ");
       // A nested region round-trips as a `{ … }` block (one level in v1).
       if (s.regions && s.regions.length) {
@@ -3922,6 +3958,7 @@ function fsmLoadIntoForm(m) {
           const sp = [];
           if (ss.refines) sp.push("refine " + ss.refines);
           for (const e of (ss.equations || [])) sp.push(e.lhs + " = " + e.body);
+          for (const e of (ss.emits || [])) sp.push(emitSeg(e));
           inner.push("  " + ss.name + ": " + sp.join("; "));
         }
         for (const ss of (r.states || [])) {
@@ -3950,6 +3987,7 @@ function fsmTemplate(reset) {
   if (reset || !name.value.trim()) name.value = "Lights";
   document.getElementById("fsm-operator").disabled = false;
   document.getElementById("fsm-initial").value = "Red";
+  document.getElementById("fsm-signals").value = "";
   // inputs/outputs are derived from the owning operator (fsmOperatorChanged).
   document.getElementById("fsm-states").value =
     "Red: go = false; warn = false\n" +
@@ -3972,9 +4010,10 @@ function colourSegs(segText) {
     seg = seg.trim();
     if (!seg) return "";
     const rm = seg.match(/^refine\s+(\w+)$/);
-    return rm
-      ? '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>'
-      : escapeHTML(seg);
+    if (rm) return '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>';
+    const em = seg.match(/^emit\s+(.+)$/);
+    if (em) return '<span class="kw">emit</span> ' + escapeHTML(em[1]).replace(/\bwhen\b/, '<span class="kw">when</span>');
+    return escapeHTML(seg);
   }).filter(Boolean).join("; ");
 }
 function colourTransition(s) {

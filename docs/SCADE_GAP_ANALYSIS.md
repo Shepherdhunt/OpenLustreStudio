@@ -1,6 +1,6 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-18.*
+*Updated 2026-06-22.*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove
@@ -26,7 +26,16 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Tool Operational Requirements document.**
+**Landed recently (newest first):** **Signals.** A state machine declares pure
+(presence-only) or valued **signals**; a state `emit`s one (optionally guarded)
+and a guard or equation anywhere in the machine — including a parallel region —
+tests presence with `s?` or reads a valued signal's value with `s`, observed the
+**same cycle** it is emitted. Signals lower to ordinary dataflow locals
+(`__sig_<s>_present` / `__sig_<s>_value`), so typecheck, the simulator and the C
+emitter are unchanged; the `s?` / `s` surface syntax is translated at the editor
+boundary. A dual-backend (MSVC) equivalence test confirms the IR simulator and
+the generated C agree cell-for-cell (§6). Before that: **Tool Operational
+Requirements document.**
 `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` states every operation the tool claims as
 a numbered requirement (TOR-001 … TOR-702) bound to its test evidence — the fourth
 and last pillar of verification-by-equivalence (§4). Before that: **Float
@@ -145,10 +154,14 @@ symbols; typed wire labels.
    (`clite-emulate` — the third equivalence backend, §6) shipped (§5, §6).
    Remaining: full-system board/RTOS emulation (under `qemu-system-*`), code
    signing (P2), winget/MSIX.
-6. **Automata depth** (P2) — **history + inline nested-region authoring landed
-   2026-06-18** (§6); remaining: **signals** (a new cross-stack IR construct —
-   the next real automata feature) and richer parallel composition beyond
-   instantiating several machines in one operator.
+6. *(Landed 2026-06-22)* ~~**Signals**~~ — a machine declares pure or **valued
+   signals**, a state `emit`s them (optionally guarded), and a guard or equation
+   anywhere in the machine — including a *parallel region* — tests presence
+   (`s?`) or reads the value (`s`) the **same cycle**, the SCADE/Esterel
+   broadcast two parallel automata talk through. They lower to dataflow
+   present/value locals, so typecheck/sim/C are untouched; a dual-backend
+   (MSVC) equivalence test pins it (§6). Remaining automata depth (P2): richer
+   parallel composition beyond instantiating several machines in one operator.
 
 Everything ships across all stages — IR → typecheck → sim → generated C →
 dual-backend equivalence test — or it isn't done. The §6 log records each slice.
@@ -194,7 +207,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned**; a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6); the editor now authors a **nested region inline** with a `{ … }` block including the **`history`** flag (§6). Remaining: signals, and richer parallel composition beyond instantiating several machines in one operator | P2 |
+| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned**; a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6); the editor authors a **nested region inline** with a `{ … }` block including the **`history`** flag (§6); **signals** — pure/valued within-cycle broadcast, emitted by a state and tested `s?` / read `s` anywhere including a parallel region, lowered to dataflow present/value locals (§6, landed 2026-06-22). Remaining: richer parallel composition beyond instantiating several machines in one operator | P2 |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
@@ -242,6 +255,38 @@ verification burden the qualified tool would otherwise discharge.
 | ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests). `--system` adds **full-system arm64** (`qemu-system-aarch64 -M virt` + a busybox initramfs, kernel supplied as input) — generation tested; first boot needs a Docker host. RTOS full-system (VxWorks under `qemu-system-*`) remains (no freely-distributable image). |
 
 ## 6. What closed recently
+
+### 2026-06-22 — signals: within-cycle broadcast across automata
+
+State machines gained **signals** — the SCADE/Esterel construct two parallel
+automata communicate through. A machine declares signals, **pure** (presence
+only) or **valued** (`level: int32`); a state `emit`s one while active
+(optionally `emit s when cond`); and a guard or equation **anywhere in the
+machine — including a parallel region — observes it the same cycle**: presence
+as `s?`, a valued signal's value as `s`.
+
+The lowering keeps the rest of the stack untouched: a signal becomes ordinary
+dataflow locals `__sig_<s>_present: bool` and (valued) `__sig_<s>_value: T`,
+where presence is the OR of the signal's emit conditions and the value is a
+priority chain over them (earlier emitters win a simultaneous conflict),
+defaulting to the type's zero when absent. So typecheck, the simulator and the
+C-Lite emitter need no changes, and causality (a combinational `emit`↔`test`
+loop) is caught by the existing checker. The `s?` / `s` surface syntax is
+translated to/from the generated locals at the editor boundary
+(`rewrite_signal_refs` / `display_signal_refs` in `studio_server.rs`), so stored
+guards/equations are plain references and round-trip back into the editor.
+
+IR in `crates/ol_ir/src/state_machine.rs` (`SignalDef`, `StateDef.emits`,
+`StateMachineDef.signals`); emissions are gathered while walking the region tree
+(each with its activation condition) and lowered after the outputs. Validation
+rejects a duplicate signal, an emit of an undeclared signal, a value on a pure
+signal, and a valued signal emitted without a value. The Studio FSM editor adds
+a *signals* field and `emit …` lines in the states box, documented in the dialog
+intro. Verified across every stage: `signals_broadcast_across_parallel_regions`
+(sim) drives a producer/consumer machine; `signals_ir_sim_and_generated_c_agree`
+proves the IR simulator and the MSVC-compiled C-Lite traces match cell-for-cell;
+`state_machine_with_signals_authors_round_trips_and_builds` covers the editor
+path. Remaining automata depth: richer parallel composition (§3).
 
 ### 2026-06-18 — Open/Save/New workspace browse dialogs
 

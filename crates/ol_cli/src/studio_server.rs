@@ -516,6 +516,10 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
                         "name": m.name,
                         "owner": m.owner,
                         "states": m.states.iter().map(|s| &s.name).collect::<Vec<_>>(),
+                        "signals": m.signals.iter().map(|s| serde_json::json!({
+                            "name": s.name,
+                            "valued": s.ty.is_some(),
+                        })).collect::<Vec<_>>(),
                         "initial": m.initial_state,
                     })
                 })
@@ -1641,21 +1645,27 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
 
 /// Serialize a state (recursively, including nested regions) for the editor,
 /// with expressions rendered back to text.
-fn sm_state_json(st: &ol_ir::StateDef) -> serde_json::Value {
+fn sm_state_json(st: &ol_ir::StateDef, signals: &[ol_ir::SignalDef]) -> serde_json::Value {
+    let disp = |e: &ol_ir::Expr| display_signal_refs(&ol_lustre_emit::format_expr(e), signals);
     serde_json::json!({
         "name": st.name,
         "equations": st.equations.iter().map(|eq| serde_json::json!({
             "lhs": eq.lhs.join(", "),
-            "body": ol_lustre_emit::format_expr(&eq.rhs),
+            "body": disp(&eq.rhs),
         })).collect::<Vec<_>>(),
         "transitions": st.transitions.iter().map(|t| serde_json::json!({
-            "guard": ol_lustre_emit::format_expr(&t.guard),
+            "guard": disp(&t.guard),
             "target": t.target,
+        })).collect::<Vec<_>>(),
+        "emits": st.emits.iter().map(|e| serde_json::json!({
+            "signal": e.signal,
+            "value": e.value.as_ref().map(|v| disp(v)),
+            "guard": e.guard.as_ref().map(|g| disp(g)),
         })).collect::<Vec<_>>(),
         "regions": st.regions.iter().map(|r| serde_json::json!({
             "initial_state": r.initial_state,
             "history": r.history,
-            "states": r.states.iter().map(sm_state_json).collect::<Vec<_>>(),
+            "states": r.states.iter().map(|s| sm_state_json(s, signals)).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "refines": st.refines,
     })
@@ -1682,7 +1692,7 @@ fn fsm_get(
                 for m in &pkg.state_machines {
                     if &m.name == name {
                         let states: Vec<serde_json::Value> =
-                            m.states.iter().map(sm_state_json).collect();
+                            m.states.iter().map(|s| sm_state_json(s, &m.signals)).collect();
                         let value = serde_json::json!({
                             "schema_version": 1,
                             "name": m.name,
@@ -1692,6 +1702,9 @@ fn fsm_get(
                             })).collect::<Vec<_>>(),
                             "outputs": m.outputs.iter().map(|p| serde_json::json!({
                                 "name": p.name, "type": p.ty,
+                            })).collect::<Vec<_>>(),
+                            "signals": m.signals.iter().map(|s| serde_json::json!({
+                                "name": s.name, "type": s.ty,
                             })).collect::<Vec<_>>(),
                             "initial_state": m.initial_state,
                             "states": states,
@@ -1705,13 +1718,98 @@ fn fsm_get(
     }
 }
 
+/// Rewrite a textual machine expression's signal references into the dataflow
+/// locals they lower to: `s?` -> `__sig_s_present`, and a bare valued-signal
+/// `s` -> `__sig_s_value` (a pure signal's bare `s` also means presence, so it
+/// maps to `__sig_s_present`). Only whole-word identifiers that name a declared
+/// signal are touched; string/char literals are passed through verbatim. This
+/// runs at the authoring boundary so the stored guards/equations are plain
+/// references to the generated locals and the rest of the stack never sees a
+/// signal. [`display_signal_refs`] is the inverse for the editor.
+fn rewrite_signal_refs(src: &str, signals: &[ol_ir::SignalDef]) -> String {
+    if signals.is_empty() {
+        return src.to_string();
+    }
+    let valued: std::collections::HashMap<&str, bool> =
+        signals.iter().map(|s| (s.name.as_str(), s.ty.is_some())).collect();
+    let chars: Vec<char> = src.chars().collect();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' || c == '\'' {
+            out.push(c);
+            i += 1;
+            while i < chars.len() {
+                out.push(chars[i]);
+                if chars[i] == '\\' && i + 1 < chars.len() {
+                    i += 1;
+                    out.push(chars[i]);
+                    i += 1;
+                    continue;
+                }
+                let closed = chars[i] == c;
+                i += 1;
+                if closed {
+                    break;
+                }
+            }
+            continue;
+        }
+        if c == '_' || c.is_ascii_alphabetic() {
+            let start = i;
+            while i < chars.len() && (chars[i] == '_' || chars[i].is_ascii_alphanumeric()) {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            if let Some(&is_valued) = valued.get(ident.as_str()) {
+                let mut j = i;
+                while j < chars.len() && chars[j] == ' ' {
+                    j += 1;
+                }
+                if j < chars.len() && chars[j] == '?' {
+                    out.push_str(&ol_ir::signal_present_local(&ident));
+                    i = j + 1;
+                } else if is_valued {
+                    out.push_str(&ol_ir::signal_value_local(&ident));
+                } else {
+                    out.push_str(&ol_ir::signal_present_local(&ident));
+                }
+            } else {
+                out.push_str(&ident);
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Inverse of [`rewrite_signal_refs`] for the editor: turn the generated signal
+/// locals in a formatted expression back into the `s?` / `s` surface syntax.
+/// Longer signal names first so one name is not a prefix of another.
+fn display_signal_refs(formatted: &str, signals: &[ol_ir::SignalDef]) -> String {
+    let mut names: Vec<&ol_ir::SignalDef> = signals.iter().collect();
+    names.sort_by_key(|s| std::cmp::Reverse(s.name.len()));
+    let mut s = formatted.to_string();
+    for sig in names {
+        s = s.replace(&ol_ir::signal_value_local(&sig.name), &sig.name);
+        s = s.replace(&ol_ir::signal_present_local(&sig.name), &format!("{}?", sig.name));
+    }
+    s
+}
+
 /// Create a state machine from the structured editor payload. The machine is
 /// validated by lowering it once before the file is saved, so malformed
 /// machines (unknown initial state, unassigned outputs, ...) are rejected
 /// with the lowering error and the file stays untouched.
 /// Parse a `states` array (recursively, so a state's nested `regions` parse
 /// too) into `StateDef`s. A region is `{initial_state, states[], history?}`.
-fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir::StateDef>, String> {
+fn parse_sm_states(
+    states_json: Option<&serde_json::Value>,
+    signals: &[ol_ir::SignalDef],
+) -> Result<Vec<ol_ir::StateDef>, String> {
     let empty: Vec<serde_json::Value> = vec![];
     let mut states = Vec::new();
     for st in states_json.and_then(|v| v.as_array()).unwrap_or(&empty) {
@@ -1725,14 +1823,15 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
                 .map(|x| x.trim().to_string())
                 .filter(|x| !x.is_empty())
                 .collect();
-            let rhs = ol_stdlib::parse_expr(body).map_err(|e| format!("state `{sname}` equation: {e}"))?;
+            let rhs = ol_stdlib::parse_expr(&rewrite_signal_refs(body, signals))
+                .map_err(|e| format!("state `{sname}` equation: {e}"))?;
             equations.push(ol_ir::Equation { lhs, rhs });
         }
         let mut transitions = Vec::new();
         for t in st.get("transitions").and_then(|v| v.as_array()).unwrap_or(&empty) {
             let guard_str = t.get("guard").and_then(|v| v.as_str()).ok_or("transition missing guard")?;
             let target = t.get("target").and_then(|v| v.as_str()).ok_or("transition missing target")?;
-            let guard = ol_stdlib::parse_expr(guard_str)
+            let guard = ol_stdlib::parse_expr(&rewrite_signal_refs(guard_str, signals))
                 .map_err(|e| format!("state `{sname}` transition guard: {e}"))?;
             transitions.push(ol_ir::Transition { guard, target: target.to_string() });
         }
@@ -1744,7 +1843,7 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
                 .ok_or_else(|| format!("state `{sname}` region missing `initial_state`"))?
                 .to_string();
             let history = r.get("history").and_then(|v| v.as_bool()).unwrap_or(false);
-            let rstates = parse_sm_states(r.get("states"))?;
+            let rstates = parse_sm_states(r.get("states"), signals)?;
             regions.push(ol_ir::Region { initial_state, states: rstates, history });
         }
         let refines = st
@@ -1762,14 +1861,14 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
                 .to_string();
             let value = match em.get("value").and_then(|v| v.as_str()).map(str::trim) {
                 Some(s) if !s.is_empty() => Some(
-                    ol_stdlib::parse_expr(s)
+                    ol_stdlib::parse_expr(&rewrite_signal_refs(s, signals))
                         .map_err(|e| format!("state `{sname}` emit `{signal}` value: {e}"))?,
                 ),
                 _ => None,
             };
             let guard = match em.get("guard").and_then(|v| v.as_str()).map(str::trim) {
                 Some(s) if !s.is_empty() => Some(
-                    ol_stdlib::parse_expr(s)
+                    ol_stdlib::parse_expr(&rewrite_signal_refs(s, signals))
                         .map_err(|e| format!("state `{sname}` emit `{signal}` guard: {e}"))?,
                 ),
                 _ => None,
@@ -1821,17 +1920,9 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         .ok_or("missing string field `initial_state`")?
         .to_string();
 
-    let states = parse_sm_states(req.get("states"))?;
-    // The operator this machine belongs to (operator-owned model). The editor
-    // sends it; a machine always belongs to exactly one operator.
-    let owner = req
-        .get("operator")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty());
-
     // Signals declared on the machine: `{name, type?}` (no `type` = a pure,
-    // presence-only signal; a `type` makes it valued).
+    // presence-only signal; a `type` makes it valued). Parsed before the states
+    // so guards/equations/emits can rewrite `s?` / `s` into the lowered locals.
     let mut signals = Vec::new();
     for item in req.get("signals").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
         let sname = item
@@ -1848,6 +1939,15 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         };
         signals.push(ol_ir::SignalDef { name: sname, ty });
     }
+
+    let states = parse_sm_states(req.get("states"), &signals)?;
+    // The operator this machine belongs to (operator-owned model). The editor
+    // sends it; a machine always belongs to exactly one operator.
+    let owner = req
+        .get("operator")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty());
 
     let machine = ol_ir::StateMachineDef {
         name: name.to_string(),

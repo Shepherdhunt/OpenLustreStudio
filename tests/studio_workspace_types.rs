@@ -548,6 +548,68 @@ fn state_machine_owned_by_operator_create_edit_build_remove() {
     assert!(gone, "Toggle removed");
 }
 
+/// Author a machine that declares signals and uses them: a pure `ping` (emitted
+/// when `tick`, tested as `ping?` in a transition) and a valued `level` (emitted
+/// `= 7`, read back as `level` in an equation). The editor's `s?` / `s` surface
+/// syntax is rewritten to the lowered dataflow locals on save, the machine
+/// validates and its operator builds, and `/api/fsm` reverses the locals back to
+/// `ping?` / `level` for round-trip editing.
+#[test]
+fn state_machine_with_signals_authors_round_trips_and_builds() {
+    let g = start_server_on_workspace("ws_sm_signals");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Beacon","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"input","name":"tick","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"output","name":"on","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"output","name":"lvl","type":"int32"}"#);
+
+    let idle = r#"{"name":"Idle",
+        "equations":[{"lhs":"on","body":"false"},{"lhs":"lvl","body":"level"}],
+        "emits":[{"signal":"ping","guard":"tick"},{"signal":"level","value":"7"}],
+        "transitions":[{"guard":"ping?","target":"Lit"}]}"#;
+    let lit = r#"{"name":"Lit",
+        "equations":[{"lhs":"on","body":"true"},{"lhs":"lvl","body":"level"}],
+        "transitions":[{"guard":"tick","target":"Idle"}]}"#;
+    let machine = format!(
+        r#"{{"name":"BeaconSM","operator":"Beacon","initial_state":"Idle",
+             "inputs":[{{"name":"tick","type":"bool"}}],
+             "outputs":[{{"name":"on","type":"bool"}},{{"name":"lvl","type":"int32"}}],
+             "signals":[{{"name":"ping"}},{{"name":"level","type":"int32"}}],
+             "states":[{idle},{lit}]}}"#
+    );
+    // Accepted: the `s?` / `s` rewrite type-checks against the operator.
+    post_ok(port, "/api/edit/add_state_machine", &machine);
+
+    // Round-trip: signals come back, and the lowered locals are shown as the
+    // `ping?` / `level` surface syntax again.
+    let m = get_json(port, "/api/fsm?name=BeaconSM");
+    let sigs = m["signals"].as_array().unwrap();
+    assert!(sigs.iter().any(|s| s["name"] == "ping" && s["type"].is_null()), "pure ping: {m}");
+    assert!(sigs.iter().any(|s| s["name"] == "level" && !s["type"].is_null()), "valued level: {m}");
+    let idle_state = m["states"].as_array().unwrap().iter()
+        .find(|s| s["name"] == "Idle").cloned().expect("Idle present");
+    assert_eq!(idle_state["transitions"][0]["guard"], "ping?", "guard reverses to `ping?`: {idle_state}");
+    let lvl_eq = idle_state["equations"].as_array().unwrap().iter()
+        .find(|e| e["lhs"] == "lvl").cloned().expect("lvl equation");
+    assert_eq!(lvl_eq["body"], "level", "valued read reverses to `level`: {lvl_eq}");
+    let emits = idle_state["emits"].as_array().unwrap();
+    assert!(emits.iter().any(|e| e["signal"] == "ping" && e["guard"] == "tick"), "ping emit guard: {idle_state}");
+    assert!(emits.iter().any(|e| e["signal"] == "level" && e["value"] == "7"), "level emit value: {idle_state}");
+
+    // The owning operator builds — the merged automaton + its signals drive it.
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Beacon"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "operator with signals should build: {bd}");
+
+    // An emit of an undeclared signal is rejected (not saved). `ping` stays
+    // declared (its `ping?` guard remains valid); only the `ghost` emit is bad.
+    let bad = machine.replace(r#"{"signal":"ping","guard":"tick"}"#, r#"{"signal":"ghost"}"#);
+    let (sbad, _) = request(port, "POST", "/api/edit/update_state_machine", &bad).expect("bad emit");
+    assert_eq!(sbad, 400, "emitting an undeclared signal must be rejected");
+}
+
 /// A state machine that would not translate cleanly (a per-state output
 /// assigned a value of the wrong type) is REJECTED at create time — before it
 /// is ever saved — so the model never holds a machine that fails to lower to
