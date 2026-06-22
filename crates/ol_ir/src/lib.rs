@@ -21,6 +21,7 @@ pub mod order;
 pub mod project;
 pub mod slice;
 pub mod state_machine;
+pub mod mono;
 pub mod diag;
 pub mod loader;
 pub mod clocks;
@@ -30,7 +31,11 @@ pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, FieldInit, FloatFn, IterKind, Literal, UnaryOp};
 pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe};
 pub use order::evaluation_order;
-pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
+pub use project::{
+    ConstDef, EnumDef, GenericInst, GenericNode, Package, Project, RecordField, TypeArg, TypeBody,
+    TypeDef,
+};
+pub use mono::MonoError;
 pub use slice::slice_for_root;
 pub use state_machine::{
     lower as lower_state_machine, resolve_refines, signal_present_local, signal_value_local, Emit,

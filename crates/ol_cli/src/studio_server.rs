@@ -2014,6 +2014,9 @@ fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachin
     candidate
         .lower_state_machines()
         .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    candidate
+        .monomorphize()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
 
     // The machine merges into its owning operator; check that operator's slice.
     let to_check = match machine.owner.as_deref() {

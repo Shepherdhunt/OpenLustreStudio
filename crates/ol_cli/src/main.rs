@@ -458,6 +458,13 @@ pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
     }
+    // Expand generic node templates into concrete nodes (after lowering, since a
+    // lowered machine may call a generic), so downstream tools see only concrete
+    // nodes.
+    if let Err(errs) = project.monomorphize() {
+        let joined = errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        anyhow::bail!("generic instantiation failed:\n{joined}");
+    }
     Ok(project)
 }
 
@@ -1169,6 +1176,10 @@ pub(crate) fn load_for_studio(
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
+    }
+    if let Err(errs) = project.monomorphize() {
+        let joined = errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("\n");
+        anyhow::bail!("generic instantiation failed:\n{joined}");
     }
     Ok(project)
 }

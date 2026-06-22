@@ -47,6 +47,34 @@ pub struct ConstDef {
     pub value: Expr,
 }
 
+/// Declares an existing [`NodeDef`] to be a *generic template*: its
+/// port/local/cast types may reference the type parameters in `params` as
+/// `Type::Named { name }` placeholders. A template is never built directly — it
+/// is expanded into concrete nodes (one per [`GenericInst`]) and dropped by
+/// [`Project::monomorphize`], so downstream tools only ever see concrete nodes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenericNode {
+    pub node: String,
+    pub params: Vec<String>,
+}
+
+/// One type-parameter binding of a [`GenericInst`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypeArg {
+    pub param: String,
+    pub ty: Type,
+}
+
+/// An explicit (Ada-style) instantiation of a generic template: build a concrete
+/// node named `name` by copying generic `generic` and substituting each type
+/// parameter with the given argument. Calls reference `name` like any node.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GenericInst {
+    pub name: String,
+    pub generic: String,
+    pub args: Vec<TypeArg>,
+}
+
 /// A package groups types, constants, nodes, contracts, and imported
 /// operators. Contracts are stored as plain JSON values here so that the IR
 /// crate does not depend on `ol_contract_ir` (the contract crate depends on
@@ -71,6 +99,14 @@ pub struct Package {
     /// before any downstream tool runs.
     #[serde(default)]
     pub state_machines: Vec<StateMachineDef>,
+    /// Generic node templates (which of `nodes` are polymorphic, and over what
+    /// type parameters). Expanded away by [`Project::monomorphize`].
+    #[serde(default)]
+    pub generics: Vec<GenericNode>,
+    /// Explicit instantiations of the templates in `generics`. Each becomes a
+    /// concrete node by [`Project::monomorphize`].
+    #[serde(default)]
+    pub instantiations: Vec<GenericInst>,
 }
 
 impl Package {
@@ -125,6 +161,8 @@ impl Project {
                 dst_pkg.contracts.extend(src_pkg.contracts);
                 dst_pkg.imported_operators.extend(src_pkg.imported_operators);
                 dst_pkg.state_machines.extend(src_pkg.state_machines);
+                dst_pkg.generics.extend(src_pkg.generics);
+                dst_pkg.instantiations.extend(src_pkg.instantiations);
             } else {
                 self.packages.push(src_pkg);
             }

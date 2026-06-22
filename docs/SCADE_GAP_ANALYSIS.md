@@ -26,8 +26,18 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Signals.** A state machine declares pure
-(presence-only) or valued **signals**; a state `emit`s one (optionally guarded)
+**Landed recently (newest first):** **Generic nodes (engine).** A node can be
+written once over a type parameter and instantiated at concrete types: a generic
+template (ports/locals using a `Named` type parameter) plus explicit, Ada-style
+instantiations that `Project::monomorphize` expands into concrete nodes before
+any downstream tool — so typecheck / sim / C see only concrete nodes (no new
+`Type`/`Expr` variant). A dual-backend equivalence test pins a `Pick<T>` used at
+`int32` and `bool` (§6). Implicit call-site instantiation, generic array sizes,
+and Studio authoring are follow-ups. Before that: **Simulation scope.** The
+simulator's trace renders as a SCADE-style **scope** — stacked auto-scaled lanes
+per signal (bool/enum/numeric), live as you Step and in the batch dialog, plotted
+from the trace CSV with no new server data (§6). Before that: **Signals.** A
+state machine declares pure (presence-only) or valued **signals**; a state `emit`s one (optionally guarded)
 and a guard or equation anywhere in the machine — including a parallel region —
 tests presence with `s?` or reads a valued signal's value with `s`, observed the
 **same cycle** it is emitted. Signals lower to ordinary dataflow locals
@@ -171,7 +181,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
 | Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), **per-family gate silhouettes** (D-shape AND, pointed-OR, mux trapezoid, delay register), **orthogonal (Manhattan) wire routing**, draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, **zoom/pan (Ctrl+wheel, middle/Space-drag, fit-to-window)**, **marquee select + copy/paste of blocks**, multi-select + right-click menu + Delete, red invalid-link coding |
-| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
+| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)** + **float intrinsics (`sqrt`/`sin`/`cos`/`abs`/`min`/`max`/…)** + **signals** (within-cycle broadcast) + **generic nodes** (type-parameterized, monomorphized): dataflow, `pre`/`->`, records/enums/arrays, constants, flat/hierarchical FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, **a stacked auto-scaled scope** (per-signal trace lanes — bool/enum/numeric, generated internals toggleable), CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
@@ -255,6 +265,35 @@ verification burden the qualified tool would otherwise discharge.
 | ~~Emulated target testing (QEMU + Docker)~~ | Build → run the generated C on an emulated board in a container, against the same scenario suite as the IR/host backends — a *third* equivalence backend | **Landed 2026-06-18**: `openlustre clite-emulate` (`crates/ol_cli/src/emulate.rs`) emits a self-contained Docker context (cross-toolchain + `qemu-user-static`, static armhf link, `qemu-arm-static` entrypoint) and, where Docker is present, builds + runs it and checks the trace against the IR sim cell-for-cell. Live run is Docker-host-gated (like the cc-gated dual-backend tests). `--system` adds **full-system arm64** (`qemu-system-aarch64 -M virt` + a busybox initramfs, kernel supplied as input) — generation tested; first boot needs a Docker host. RTOS full-system (VxWorks under `qemu-system-*`) remains (no freely-distributable image). |
 
 ## 6. What closed recently
+
+### 2026-06-22 — generic (polymorphic) nodes, engine
+
+A node can now be written **once over a type parameter** and reused at many
+concrete types — the genericity SCADE/KCG has. A *generic template* is an
+ordinary node whose port / local / cast types name a parameter (e.g.
+`Type::Named { name: "T" }`); the package records it in a `generics` list, and an
+explicit, **Ada-style instantiation** (`instantiations`: "build `PickInt` from
+`Pick` with `T = int32`") specialises it. `Project::monomorphize` — a new pass
+that runs after state-machine lowering and before any downstream tool — replaces
+each instantiation with a concrete copy of its template (parameters substituted
+throughout the ports, locals and cast targets) and drops the templates, so
+typecheck, the simulator and the C-Lite emitter only ever see concrete nodes and
+need **no awareness of genericity** (the same strategy state machines and signals
+use). This deliberately reuses the existing `Named` type and the `Package`
+lists, so it adds **no** `Type` / `Expr` / `NodeDef` variant.
+
+`crates/ol_ir/src/mono.rs` (`monomorphize`, `subst_type` / `subst_expr`,
+`MonoError`); `GenericNode` / `GenericInst` / `TypeArg` and the two `Package`
+lists in `project.rs`; wired into both `load` paths (`main.rs`) and the
+state-machine validation. Verified across every stage:
+`monomorphize_expands_templates_and_typechecks` (templates dropped, `T`
+substituted per instance, typechecks), `generic_pick_simulates_at_each_type`
+(a `Pick<T>` runs at `int32` and `bool`), and
+`generic_ir_sim_and_generated_c_agree` (IR simulator vs MSVC-compiled C-Lite,
+cell-for-cell), plus unknown-generic / unbound-parameter rejection. **Engine
+only** — implicit call-site instantiation (inferring `T` from arguments),
+size/const genericity (generic array lengths), and Studio authoring are the
+follow-ups.
 
 ### 2026-06-22 — simulation scope (graphical trace plot)
 

@@ -258,6 +258,9 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
             contracts,
             imported_operators,
             state_machines,
+            // Slicing runs after monomorphization, so no generics remain.
+            generics: vec![],
+            instantiations: vec![],
         });
     }
 

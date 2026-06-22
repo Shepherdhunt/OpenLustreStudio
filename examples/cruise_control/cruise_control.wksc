@@ -240,7 +240,9 @@
           "contract": null,
           "owner": "CruiseControl"
         }
-      ]
+      ],
+      "generics": [],
+      "instantiations": []
     }
   ],
   "main": "CruiseControl",
