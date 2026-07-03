@@ -125,9 +125,10 @@ symbols; typed wire labels.
 2. ~~Float intrinsics~~ — **landed 2026-07-03** (see §6); float32-native
    variants (`sqrtf` & friends) remain conscious roadmap — today float32
    casts through float64 explicitly.
-3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
-   the last piece of the verification-by-equivalence story (§4); pure docs, the
-   test suite already being the verification evidence.
+3. ~~Tool Operational Requirements document~~ — **landed 2026-07-03**:
+   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` (TOR-1…12, each claim mapped to
+   its verification tests; usage constraints; documented exclusions). The
+   verification-by-equivalence story (§4) is complete.
 4. **Editor polish** (P1/P2) — distinct per-family gate silhouettes remain
    (§2); orthogonal wire routing, zoom/pan, marquee select, and copy/paste
    landed 2026-07-03.
@@ -203,10 +204,12 @@ qualification-by-pedigree**, and it is already half-built:
 3. **Coverage evidence** — decision coverage **and unique-cause MC/DC** (the DO-178C
    Level A metric) measured on the IR backend and reported per condition (done 2026-06-12;
    masking MC/DC for coupled conditions remains roadmap).
-4. **Tool Operational Requirements document** — enumerate what the tool claims to do,
-   with the test suite as verification cases (not started; pure documentation work,
-   P1 if certification-adjacent use is a goal). With MC/DC landed, this is now the
-   single remaining piece of the verification-by-equivalence story.
+4. **Tool Operational Requirements document** — **done 2026-07-03**:
+   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` enumerates the tool's claims
+   (TOR-1…12) with each mapped to its verification evidence in the test
+   suite, plus usage constraints and documented exclusions. The
+   verification-by-equivalence story is complete: dual-backend execution,
+   formal contract proofs, coverage evidence, and now the TOR document.
 
 That story positions the tool as: *generated code you independently verify*, which
 is a legitimate (if more laborious) DO-178C path where the applicant carries the
