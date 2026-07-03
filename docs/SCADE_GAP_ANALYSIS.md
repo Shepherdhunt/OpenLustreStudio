@@ -19,7 +19,10 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Editor polish (2026-07-03):** canvas
+**Landed recently (newest first):** **Manhattan wires (2026-07-03):**
+orthogonal wire routing by default (mid-channel verticals, staggered
+parallels, feedback hooks; View-menu toggle back to Béziers). Before that:
+**Editor polish (2026-07-03):** canvas
 zoom (Ctrl+wheel / View menu / status-bar %), middle-button pan, marquee
 multi-select, and Ctrl+C/Ctrl+V copy/paste of block sub-diagrams
 (server-side `duplicate_equations`: fresh `_copy` locals, internal wiring
@@ -125,9 +128,9 @@ symbols; typed wire labels.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing and
-   distinct per-family gate silhouettes remain (§2); zoom/pan, marquee
-   select, and copy/paste landed 2026-07-03.
+4. **Editor polish** (P1/P2) — distinct per-family gate silhouettes remain
+   (§2); orthogonal wire routing, zoom/pan, marquee select, and copy/paste
+   landed 2026-07-03.
 5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 6. **Automata depth** (P2) — history / signals UI, and richer parallel
@@ -165,7 +168,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P0 — Pin-to-pin wire drawing~~ | Drag from an output pin to an input pin creates a connection | **Landed 2026-06-13**: operation blocks render as SCADE gates with one input pin per operand on the left edge (red when unbound) and an output pin on the right; dragging a source pin onto a specific input pin binds that operand. AND/OR/etc. drop with their minimum two pins and grow to twelve. See §6 | done |
 | ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
-| **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
+| ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-07-03**: wires route orthogonally by default (horizontal out, one mid-channel vertical, horizontal in; feedback wires hook around below; parallel wires stagger a few px so channels don't collapse); View ▸ "orthogonal wires" toggles back to Béziers. Junction dots at fan-outs remain cosmetic roadmap | done |
 | ~~P1 — Zoom/pan, copy/paste~~ | Standard | **Landed 2026-07-03**: viewBox zoom (Ctrl+wheel around the cursor, View-menu items, Ctrl+= / − / 0, status-bar %), middle-button pan, marquee multi-select on empty canvas, and Ctrl+C/Ctrl+V duplicating the selected blocks as one journaled edit (`/api/edit/duplicate_equations` — fresh `_copy` locals, internal wiring rewritten, external reads kept) | done |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
 | **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
@@ -220,6 +223,18 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 (wires) — orthogonal (Manhattan) routing
+
+Wires draw SCADE-style right angles instead of cubic Béziers: horizontal out
+of the source pin, one vertical mid-channel (snapped between the boxes, with
+a per-wire stagger so parallel wires don't collapse onto one line),
+horizontal into the target pin — which for gates is still the exact operand
+pin. A backward (feedback) wire hooks around: a stub out, down to a channel
+below both boxes, back left, and in. Wire labels sit on the channel segment.
+View ▸ "orthogonal wires" (default on) switches back to the old Béziers.
+Verified in Chromium: every rendered wire is M/L-only, multi-segment routes
+present, and the toggle restores curves.
 
 ### 2026-07-03 (editor) — zoom/pan, marquee select, copy/paste
 

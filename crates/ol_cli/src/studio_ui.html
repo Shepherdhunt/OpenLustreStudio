@@ -310,6 +310,7 @@
       <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="wire-orth" checked onchange="renderDiagram()"> orthogonal wires</label></div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="setZoom((state.zoom||1)*1.2)">Zoom In <span class="shortcut">Ctrl+=</span></div>
       <div class="mi" onclick="setZoom((state.zoom||1)/1.2)">Zoom Out <span class="shortcut">Ctrl+-</span></div>
@@ -1930,6 +1931,8 @@ function renderDiagram() {
     svg += '<rect width="' + W + '" height="' + H + '" fill="url(#grid-major)" pointer-events="none"/>';
   }
   const showLabels = document.getElementById("wire-labels").checked;
+  const orth = document.getElementById("wire-orth").checked;
+  let wireIdx = 0;
   for (const w of d.wires) {
     // A collapsed result local has no box; its outgoing wires start at the gate
     // that produces it (the gate→own-local wire is dropped — pos[local] is gone).
@@ -1943,15 +1946,20 @@ function renderDiagram() {
     const y2 = (w.to_port != null && /^eq\d+$/.test(w.to))
       ? inputPinY(w.to, w.to_port)
       : b.y + (b.h || DIAG.BOXH) / 2;
-    const mx = (x1 + x2) / 2;
     const cls = w.invalid ? "wire invalid" : "wire";
-    svg += '<path class="' + cls + '" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '">' +
+    // SCADE-style orthogonal (Manhattan) routing by default; the classic
+    // Bézier stays available in the View menu.
+    const r = orth ? orthWirePath(x1, y1, x2, y2, wireIdx++)
+      : { d: 'M ' + x1 + ' ' + y1 + ' C ' + ((x1 + x2) / 2) + ' ' + y1 + ', ' +
+            ((x1 + x2) / 2) + ' ' + y2 + ', ' + x2 + ' ' + y2,
+          lx: (x1 + x2) / 2, ly: (y1 + y2) / 2 - 4 };
+    svg += '<path class="' + cls + '" d="' + r.d + '">' +
       (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
     if (showLabels) {
       // The SCADE wire annotation: the carried variable and its type.
       const v = /^eq\d+$/.test(w.from) ? w.to : w.from;
       const t = typeOf[v] || "?";
-      svg += '<text class="wire-label" x="' + mx + '" y="' + ((y1 + y2) / 2 - 4) +
+      svg += '<text class="wire-label" x="' + r.lx + '" y="' + r.ly +
         '" text-anchor="middle">' + escapeHTML(v + ": " + t) + '</text>';
     }
   }
@@ -2051,6 +2059,34 @@ function boxCls(base, p) {
   if (p.invalid) return base + " invalid";
   if (p.warn) return base + " warn";
   return base;
+}
+
+/// Manhattan-route one wire: horizontal out of the source pin, one vertical
+/// channel, horizontal into the target pin. A backward (feedback) wire hooks
+/// around through a channel below both boxes. `idx` staggers parallel wires
+/// a few pixels apart so shared channels don't collapse onto one line.
+/// Returns the path and the label anchor (the vertical segment's middle).
+function orthWirePath(x1, y1, x2, y2, idx) {
+  const p = (x, y) => x + " " + y;
+  if (x2 - x1 >= 16) {
+    if (Math.abs(y1 - y2) < 0.5) {
+      return { d: "M " + p(x1, y1) + " L " + p(x2, y2), lx: (x1 + x2) / 2, ly: y1 - 4 };
+    }
+    let mx = (x1 + x2) / 2 + ((idx % 5) - 2) * 4;
+    mx = Math.max(x1 + 8, Math.min(x2 - 8, mx));
+    return {
+      d: "M " + p(x1, y1) + " L " + p(mx, y1) + " L " + p(mx, y2) + " L " + p(x2, y2),
+      lx: mx, ly: (y1 + y2) / 2 - 4,
+    };
+  }
+  // Feedback: out right, down to a channel under both boxes, back left, in.
+  const stub = 12 + (idx % 4) * 4;
+  const yc = Math.max(y1, y2) + 26 + (idx % 5) * 6;
+  return {
+    d: "M " + p(x1, y1) + " L " + p(x1 + stub, y1) + " L " + p(x1 + stub, yc) +
+       " L " + p(x2 - stub, yc) + " L " + p(x2 - stub, y2) + " L " + p(x2, y2),
+    lx: (x1 + x2) / 2, ly: yc - 4,
+  };
 }
 
 function svgPoint(ev) {
