@@ -189,6 +189,7 @@ impl LibBlock {
             contract: contract.as_ref().map(|_| self.contract_name()),
             diagram: Default::default(),
             probes: Vec::new(),
+            requirements: Vec::new(),
         };
 
         Ok(LoweredBlock {

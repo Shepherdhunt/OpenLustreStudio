@@ -46,6 +46,7 @@ fn watchdog_trips_after_limit_cycles_without_a_feed() {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     let project = build_with(node, "Sentinel");
     assert!(!ol_typecheck::check_project(&project).has_errors());
@@ -83,6 +84,7 @@ fn timer_elapses_at_the_limit_and_resets_when_asked() {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     let project = build_with(node, "Driver");
     assert!(!ol_typecheck::check_project(&project).has_errors());
@@ -125,6 +127,7 @@ fn range_check_is_stateless_and_correct() {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     let project = build_with(node, "InBand");
     assert!(!ol_typecheck::check_project(&project).has_errors());
@@ -166,6 +169,7 @@ fn rate_monitor_returns_x_on_first_cycle_then_first_difference() {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     let project = build_with(node, "Rate");
     assert!(!ol_typecheck::check_project(&project).has_errors());
@@ -210,6 +214,7 @@ fn assert_and_assume_pass_their_input_through() {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     let project = build_with(node, "Witness");
     assert!(!ol_typecheck::check_project(&project).has_errors());

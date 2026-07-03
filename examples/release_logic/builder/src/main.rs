@@ -64,6 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         contract: Some("ReleaseLogic_contract".into()),
         diagram: Default::default(),
         probes: vec![],
+        requirements: vec![],
     };
 
     // Pure helper to show off the function/operator distinction.
@@ -80,6 +81,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         contract: None,
         diagram: Default::default(),
         probes: vec![],
+        requirements: vec![],
     };
 
     let contract = serde_json::json!({

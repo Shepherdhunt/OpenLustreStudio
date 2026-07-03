@@ -112,6 +112,10 @@ pub struct NodeDef {
     /// Debug log probes — printed by a debug run, ignored by normal codegen.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub probes: Vec<Probe>,
+    /// Requirement IDs this operator implements (e.g. "SRS-042") — the
+    /// traceability annotations `openlustre trace` compiles into a matrix.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 impl NodeDef {

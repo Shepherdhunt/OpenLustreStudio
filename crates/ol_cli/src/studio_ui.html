@@ -1132,6 +1132,11 @@ async function refresh() {
     const det = mkDetails("op:" + n.name, false);
     const sum = document.createElement("summary");
     sum.innerHTML = '<span class="kind">' + escapeHTML(n.kind[0]) + "</span> " + escapeHTML(n.name);
+    // Traceability at a glance: hover shows the requirement IDs this
+    // operator implements (right-click ▸ Requirements… edits them).
+    if (n.requirements && n.requirements.length) {
+      sum.title = "requirements: " + n.requirements.join(", ");
+    }
     sum.onclick = () => { selectNode(n); state.diagramStack = []; loadDiagram(n.name); };
     if (editable) sum.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
     // Drag an operator from the tree onto another operator's canvas to
@@ -3035,10 +3040,27 @@ function operatorTreeMenu(ev, name) {
   item("Add Output…", () => openPortDialog("output"));
   item("Add Local…", () => openPortDialog("local"));
   sep();
+  item("Requirements…", () => editRequirements(name));
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";
   m.style.top = ev.clientY + "px";
   m.style.display = "block";
+}
+
+/// Edit an operator's requirement annotations (traceability IDs) as a
+/// comma-separated list; `openlustre trace` compiles them into the matrix.
+async function editRequirements(name) {
+  const node = findNode(name);
+  const cur = (node && node.requirements) ? node.requirements.join(", ") : "";
+  const raw = prompt(
+    "Requirement IDs implemented by `" + name + "` (comma-separated, e.g. SRS-042, SRS-107):",
+    cur
+  );
+  if (raw === null) return;
+  const ids = raw.split(",").map(s => s.trim()).filter(Boolean);
+  await postEdit("/api/edit/set_requirements", { node: name, requirements: ids });
+  document.getElementById("diagram-status").textContent =
+    ids.length ? name + " traces to " + ids.join(", ") : name + " has no requirement annotations";
 }
 
 /// Build a specific operator (the right-click "Build" path): make it the build

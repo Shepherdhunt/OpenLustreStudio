@@ -120,6 +120,7 @@ fn parse_node_decl(input: &str) -> Result<(NodeDef, &str), String> {
             contract: None,
             diagram: Default::default(),
             probes: vec![],
+            requirements: vec![],
         },
         rest,
     ))

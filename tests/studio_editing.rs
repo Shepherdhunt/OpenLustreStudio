@@ -531,3 +531,69 @@ fn duplicate_equations_pastes_a_rewired_sub_diagram() {
         r#"{"node":"Chain","indices":[]}"#).unwrap();
     assert_eq!(s, 400);
 }
+
+/// Requirements traceability: annotate operators with requirement IDs in the
+/// Studio, read them back from the inspect, and compile the matrix with
+/// `openlustre trace` (untraced operators reported; --strict turns them into
+/// a failure).
+#[test]
+fn requirements_annotations_round_trip_and_trace_emits_the_matrix() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+
+    post("/api/edit/add_node", r#"{"name":"Interlock","kind":"operator"}"#);
+    post("/api/edit/set_requirements",
+        r#"{"node":"Interlock","requirements":[" SRS-042 ","SRS-107","SRS-042"]}"#);
+
+    // Trimmed, deduplicated, and visible in the inspect tree data.
+    let (s, b) = request(port, "GET", "/api/inspect", "").unwrap();
+    assert_eq!(s, 200);
+    let ins: serde_json::Value = serde_json::from_str(&b).unwrap();
+    let node = ins["project"]["packages"].as_array().unwrap().iter()
+        .flat_map(|p| p["nodes"].as_array().unwrap())
+        .find(|n| n["name"] == "Interlock").expect("Interlock in inspect");
+    assert_eq!(node["requirements"], serde_json::json!(["SRS-042", "SRS-107"]));
+
+    // Empty IDs are loud; unknown nodes are loud.
+    let (s, _) = request(port, "POST", "/api/edit/set_requirements",
+        r#"{"node":"Interlock","requirements":["  "]}"#).unwrap();
+    assert_eq!(s, 400);
+    let (s, _) = request(port, "POST", "/api/edit/set_requirements",
+        r#"{"node":"Nope","requirements":["SRS-1"]}"#).unwrap();
+    assert_eq!(s, 400);
+
+    // The annotation persists in the model file (serde default keeps old
+    // models loading; empty lists don't serialize).
+    let on_disk = std::fs::read_to_string(g.tmp.join("model.json")).unwrap();
+    assert!(on_disk.contains("SRS-107"), "requirements not saved");
+
+    // `openlustre trace` compiles the matrix and reports untraced operators.
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "trace"])
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("requirement,operator"), "{text}");
+    assert!(text.contains("SRS-042,Interlock"), "{text}");
+    assert!(text.contains("SRS-107,Interlock"), "{text}");
+    // The release-logic model's own operators carry no annotations yet.
+    assert!(text.contains("untraced operator(s):"), "{text}");
+
+    // --strict gates on full coverage.
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "trace", "--strict"])
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "--strict must fail with untraced operators");
+}

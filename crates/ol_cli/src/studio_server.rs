@@ -356,6 +356,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
         ("POST", "/api/edit/add_probe") => apply_edit_response(ctx, body, edit_add_probe),
+        ("POST", "/api/edit/set_requirements") => {
+            apply_edit_response(ctx, body, edit_set_requirements)
+        }
         ("POST", "/api/edit/remove_probe") => apply_edit_response(ctx, body, edit_remove_probe),
         ("POST", "/api/edit/undo") => history_response(ctx, true),
         ("POST", "/api/edit/redo") => history_response(ctx, false),
@@ -1199,6 +1202,7 @@ fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
         contract: None,
         diagram: Default::default(),
         probes: vec![],
+        requirements: vec![],
     };
     if project.packages.is_empty() {
         project.packages.push(ol_ir::Package {
@@ -3733,6 +3737,37 @@ fn edit_set_operation_inputs(
 
 /// Add a debug log probe (`{node, var, label}`): logs `<label>: <var value>`
 /// in a debug run. `var` must be a name in the node.
+/// Replace an operator's requirement annotations (traceability IDs like
+/// "SRS-042"). The full list is replaced in one journaled edit; IDs are
+/// trimmed, deduplicated, and must be non-empty.
+fn edit_set_requirements(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let raw = req
+        .get("requirements")
+        .and_then(|v| v.as_array())
+        .ok_or("missing array field `requirements`")?;
+    let mut ids: Vec<String> = Vec::new();
+    for v in raw {
+        let s = v
+            .as_str()
+            .ok_or("`requirements` must be an array of strings")?
+            .trim()
+            .to_string();
+        if s.is_empty() {
+            return Err("a requirement ID cannot be empty".into());
+        }
+        if !ids.contains(&s) {
+            ids.push(s);
+        }
+    }
+    let node = find_node_mut(project, &node_name)?;
+    node.requirements = ids;
+    Ok(())
+}
+
 fn edit_add_probe(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
     let node_name = req_str(req, "node")?.to_string();
     let var = req_str(req, "var")?.to_string();

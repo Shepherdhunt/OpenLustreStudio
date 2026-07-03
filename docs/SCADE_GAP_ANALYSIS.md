@@ -19,7 +19,12 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Gate silhouettes (2026-07-03):**
+**Landed recently (newest first):** **Requirements traceability
+(2026-07-03):** operators carry requirement IDs (`NodeDef.requirements`),
+edited via right-click ▸ Requirements… and journaled like any edit;
+`openlustre trace [--strict] [-o matrix.csv]` compiles the
+requirement↔operator matrix with an untraced-operators report. Before that:
+**Gate silhouettes (2026-07-03):**
 AND/OR/XOR/NOT draw as true IEC/SCADE shapes (same bounding box, pins and
 wires unchanged). Before that: **Manhattan wires (2026-07-03):**
 orthogonal wire routing by default (mid-channel verticals, staggered
@@ -187,7 +192,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
-| Requirements traceability | Annotate nodes/contracts with requirement IDs; emit a trace matrix (CSV/ReqIF) | P2 |
+| ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace and ReqIF export remain roadmap | done (node-level) |
 | Documentation generator | Render IR + diagrams + contracts to a design-document HTML/PDF | P2 |
 | FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
 
@@ -229,6 +234,22 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 (traceability) — requirement IDs on operators + `openlustre trace`
+
+The SCADE-LifeCycle-shaped story, node-level v1. `NodeDef.requirements:
+Vec<String>` (serde-default — old models load unchanged, empty lists don't
+serialize) carries the requirement IDs an operator implements. Edited in the
+Studio (right-click operator ▸ Requirements…, comma-separated; a journaled
+`/api/edit/set_requirements` that trims/dedups and rejects empty IDs), shown
+on hover in the tree, and carried by the inspect JSON. `openlustre trace
+<model> [-o matrix.csv] [--strict]` emits one CSV row per (requirement,
+operator) link, sorted and deduplicated, plus a summary and an
+untraced-operators report; `--strict` exits nonzero when any user operator
+carries no annotation (the CI gate; stdlib excluded). Test:
+`requirements_annotations_round_trip_and_trace_emits_the_matrix`
+(tests/studio_editing.rs). Contract-clause-level links and ReqIF export are
+conscious roadmap.
 
 ### 2026-07-03 (gates) — per-family silhouettes
 

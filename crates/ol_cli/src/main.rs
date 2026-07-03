@@ -117,6 +117,21 @@ enum Cmd {
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
     },
+    /// Emit the requirements traceability matrix: one CSV row per
+    /// (requirement, operator) link, from the `requirements` annotations on
+    /// each operator, plus an untraced-operators report on stdout.
+    Trace {
+        model: PathBuf,
+        /// Write the matrix CSV here instead of stdout.
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Fail (exit nonzero) if any user operator carries no requirement —
+        /// the CI gate for a fully traced model.
+        #[arg(long)]
+        strict: bool,
+    },
     /// Load the standard block library and type/contract-check every block.
     LibCheck {
         /// Directory of library YAML files (e.g. `libraries`).
@@ -315,6 +330,9 @@ fn main() -> Result<()> {
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
         }
+        Cmd::Trace { model, out, with_stdlib, strict } => {
+            cmd_trace(&model, out.as_deref(), with_stdlib.as_deref(), strict)
+        }
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
         Cmd::Studio { cmd } => match cmd {
             StudioCmd::Inspect {
@@ -439,6 +457,52 @@ fn cmd_check(
         anyhow::bail!("check failed");
     }
     println!("check: OK ({} nodes)", project.all_nodes().count());
+    Ok(())
+}
+
+/// The requirements traceability matrix. Rows are (requirement, operator)
+/// links sorted by requirement then operator; library (`stdlib`) and lowered
+/// state-machine plumbing don't count — traceability is about the user's
+/// operators. `--strict` turns untraced operators into a failure, so CI can
+/// gate on "every operator names the requirement it implements".
+fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, strict: bool) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let mut rows: Vec<(String, String)> = Vec::new();
+    let mut untraced: Vec<String> = Vec::new();
+    for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+        for n in &pkg.nodes {
+            if n.requirements.is_empty() {
+                untraced.push(n.name.clone());
+            }
+            for r in &n.requirements {
+                rows.push((r.clone(), n.name.clone()));
+            }
+        }
+    }
+    rows.sort();
+    rows.dedup();
+    let mut csv = String::from("requirement,operator\n");
+    for (req, node) in &rows {
+        // Commas in a requirement ID would corrupt the matrix; quote them out.
+        let field = if req.contains(',') { format!("\"{}\"", req.replace('"', "\"\"")) } else { req.clone() };
+        csv.push_str(&format!("{field},{node}\n"));
+    }
+    match out {
+        Some(p) => {
+            std::fs::write(p, &csv).with_context(|| format!("writing {}", p.display()))?;
+            println!("trace matrix written to {}", p.display());
+        }
+        None => print!("{csv}"),
+    }
+    let req_count = rows.iter().map(|(r, _)| r).collect::<std::collections::BTreeSet<_>>().len();
+    println!("-- {} requirement(s), {} link(s)", req_count, rows.len());
+    if !untraced.is_empty() {
+        untraced.sort();
+        println!("-- untraced operator(s): {}", untraced.join(", "));
+        if strict {
+            anyhow::bail!("{} operator(s) carry no requirement annotation", untraced.len());
+        }
+    }
     Ok(())
 }
 
@@ -570,6 +634,7 @@ pub(crate) fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
                 })).collect::<Vec<_>>(),
                 "equation_count": n.equations.len(),
                 "contract": n.contract,
+                "requirements": n.requirements,
             })
         })
         .collect();
@@ -1065,6 +1130,7 @@ fn starter_project() -> ol_ir::Project {
         contract: None,
         diagram: Default::default(),
         probes: vec![],
+        requirements: vec![],
     };
     Project {
         name: "welcome".into(),

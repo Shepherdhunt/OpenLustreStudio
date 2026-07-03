@@ -57,6 +57,7 @@ fn gate_project() -> Project {
         contract: None,
         diagram: Default::default(),
             probes: vec![],
+        requirements: vec![],
     };
     Project {
         name: "gate".into(),

@@ -271,6 +271,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         contract: sm.contract.clone(),
         diagram: Default::default(),
         probes: Vec::new(),
+        requirements: Vec::new(),
     };
     Ok(LoweredMachine {
         state_types: lo.enums,

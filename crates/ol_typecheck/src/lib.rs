@@ -168,6 +168,7 @@ fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagno
         contract: None,
         diagram: Default::default(),
         probes: Vec::new(),
+        requirements: Vec::new(),
     };
     let empty_env: BTreeMap<String, Type> = BTreeMap::new();
     let empty_sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
