@@ -342,6 +342,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             operations_catalog().to_string().into_bytes(),
         ),
         ("POST", "/api/edit/add_operation") => add_operation_response(ctx, body),
+        ("POST", "/api/edit/duplicate_equations") => duplicate_equations_response(ctx, body),
         ("POST", "/api/edit/add_type_op") => add_type_op_response(ctx, body),
         ("POST", "/api/edit/add_expression") => add_expression_response(ctx, body),
         ("GET", "/api/workspace/list") => match workspace_list(ctx, &parse_query(query)) {
@@ -3065,6 +3066,142 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         node.diagram
             .positions
             .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y, ..Default::default() });
+    }
+    if let Err(e) = save_raw(ctx, &project) {
+        return (500, "application/json", json_error(&e).into_bytes());
+    }
+    record_edit(ctx, before);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Paste (duplicate) a set of a node's equations, SCADE copy/paste style:
+/// each copied equation gets fresh `_copy`-suffixed result names (new locals
+/// typed like the originals — an output lhs pastes as a local of its type),
+/// references *among the copied set* are rewritten so the pasted sub-diagram
+/// stays internally wired, reads of anything outside the set keep pointing
+/// at the originals, and every pasted box lands offset by (dx, dy). One
+/// journaled edit — a single Ctrl+Z removes the whole paste.
+fn duplicate_equations_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |msg: &str| (400, "application/json", json_error(msg).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let host_name = match req.get("node").and_then(|v| v.as_str()) {
+        Some(n) => n.to_string(),
+        None => return bad("missing string field `node`"),
+    };
+    let mut indices: Vec<usize> = match req.get("indices").and_then(|v| v.as_array()) {
+        Some(a) => a.iter().filter_map(|v| v.as_u64()).map(|n| n as usize).collect(),
+        None => return bad("missing array field `indices`"),
+    };
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.is_empty() {
+        return bad("nothing to paste: `indices` is empty");
+    }
+    let dx = req.get("dx").and_then(|v| v.as_f64()).unwrap_or(16.0);
+    let dy = req.get("dy").and_then(|v| v.as_f64()).unwrap_or(16.0);
+
+    let before = take_snapshot(ctx);
+    let mut project = match load_raw(ctx) {
+        Ok(p) => p,
+        Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
+    };
+    {
+        let node = match find_node_mut(&mut project, &host_name) {
+            Ok(n) => n,
+            Err(e) => return bad(&e),
+        };
+        if let Some(&i) = indices.iter().find(|&&i| i >= node.equations.len()) {
+            return bad(&format!(
+                "equation index {i} out of range (node has {})",
+                node.equations.len()
+            ));
+        }
+        let mut known: std::collections::HashSet<String> = node
+            .inputs
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(node.outputs.iter().map(|p| p.name.clone()))
+            .chain(node.locals.iter().map(|l| l.name.clone()))
+            .collect();
+        // Fresh names for every result the copied set defines. The originals
+        // are all in `known`, so no fresh name can collide with (or chain
+        // onto) another rename's source.
+        let mut renames: Vec<(String, String)> = Vec::new();
+        for &i in &indices {
+            for l in &node.equations[i].lhs {
+                let base = format!("{l}_copy");
+                let mut name = base.clone();
+                let mut n = 2;
+                while known.contains(&name) {
+                    name = format!("{base}{n}");
+                    n += 1;
+                }
+                known.insert(name.clone());
+                renames.push((l.clone(), name));
+            }
+        }
+        // The pasted result is a local typed like its source (an output lhs
+        // pastes as a local — two blocks cannot drive one output). An lhs
+        // with no declaration stays undeclared: the paste is as red as the
+        // original, never silently different.
+        for (from, to) in &renames {
+            let ty = node
+                .locals
+                .iter()
+                .map(|l| (&l.name, &l.ty))
+                .chain(node.outputs.iter().map(|p| (&p.name, &p.ty)))
+                .find(|(n, _)| *n == from)
+                .map(|(_, t)| t.clone());
+            if let Some(ty) = ty {
+                node.locals.push(ol_ir::Local { name: to.clone(), ty });
+            }
+        }
+        let start = node.equations.len();
+        for (k, &i) in indices.iter().enumerate() {
+            let src = node.equations[i].clone();
+            let mut rhs = src.rhs.clone();
+            for (from, to) in &renames {
+                rhs.rename_var(from, to);
+            }
+            let lhs: Vec<String> = src
+                .lhs
+                .iter()
+                .map(|l| {
+                    renames
+                        .iter()
+                        .find(|(from, _)| from == l)
+                        .map(|(_, to)| to.clone())
+                        .unwrap_or_else(|| l.clone())
+                })
+                .collect();
+            node.equations.push(ol_ir::Equation { lhs, rhs });
+            let (sx, sy) = node
+                .diagram
+                .positions
+                .get(&format!("eq{i}"))
+                .map(|p| (p.x, p.y))
+                .unwrap_or((40.0, 40.0));
+            node.diagram.positions.insert(
+                format!("eq{}", start + k),
+                ol_ir::NodePos { x: sx + dx, y: sy + dy, ..Default::default() },
+            );
+        }
+        // Pasted locals land next to their sources (when the source box had a
+        // saved spot).
+        for (from, to) in &renames {
+            if let Some(p) = node.diagram.positions.get(from).cloned() {
+                node.diagram.positions.insert(
+                    to.clone(),
+                    ol_ir::NodePos { x: p.x + dx, y: p.y + dy, ..p },
+                );
+            }
+        }
     }
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());

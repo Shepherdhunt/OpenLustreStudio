@@ -19,7 +19,12 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Float intrinsics (2026-07-03).** The
+**Landed recently (newest first):** **Editor polish (2026-07-03):** canvas
+zoom (Ctrl+wheel / View menu / status-bar %), middle-button pan, marquee
+multi-select, and Ctrl+C/Ctrl+V copy/paste of block sub-diagrams
+(server-side `duplicate_equations`: fresh `_copy` locals, internal wiring
+rewritten, one journaled edit) — browser-verified. Before that:
+**Float intrinsics (2026-07-03).** The
 `<math.h>` double family is first-class: `sqrt sin cos tan asin acos atan
 atan2 exp log log10 pow floor ceil round abs min max` as
 `Expr::FloatIntrinsic`, float64-only (explicit `float64(x)` casts in/out —
@@ -120,8 +125,9 @@ symbols; typed wire labels.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
-4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing, zoom/pan,
-   copy/paste, distinct per-family gate silhouettes (§2).
+4. **Editor polish** (P1/P2) — orthogonal (Manhattan) wire routing and
+   distinct per-family gate silhouettes remain (§2); zoom/pan, marquee
+   select, and copy/paste landed 2026-07-03.
 5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 6. **Automata depth** (P2) — history / signals UI, and richer parallel
@@ -160,7 +166,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
 | **P1 — Orthogonal wire routing** | Manhattan-routed wires with junctions | Replace cubic Béziers with channel routing | Medium |
-| **P1 — Zoom/pan, copy/paste** | Standard | SVG viewBox transforms + selection-rectangle marquee + clipboard | Medium |
+| ~~P1 — Zoom/pan, copy/paste~~ | Standard | **Landed 2026-07-03**: viewBox zoom (Ctrl+wheel around the cursor, View-menu items, Ctrl+= / − / 0, status-bar %), middle-button pan, marquee multi-select on empty canvas, and Ctrl+C/Ctrl+V duplicating the selected blocks as one journaled edit (`/api/edit/duplicate_equations` — fresh `_copy` locals, internal wiring rewritten, external reads kept) | done |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
 | **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
 
@@ -214,6 +220,39 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 (editor) — zoom/pan, marquee select, copy/paste
+
+The three "standard editor" gaps from §2, verified end to end in a real
+browser (Playwright/Chromium driving the served Studio):
+
+* **Zoom** is a viewBox transform: the svg element scales, model coordinates
+  stay 1:1 (`svgPoint` divides by the zoom, so dragging/wiring/dropping all
+  keep working at any zoom). Ctrl+wheel zooms around the cursor, the View
+  menu has Zoom In / Out / 100% (Ctrl+= / Ctrl+- / Ctrl+0), the status bar
+  shows the current percentage, clamped 25–300 %.
+* **Pan** is middle-button drag (the canvas is the host's scroll area, so
+  panning is scrolling). **Marquee**: left-drag on empty canvas rubber-bands
+  a rectangle; boxes it touches become the selection (additive with
+  ctrl/shift); a click that never grows into a drag still clears. Both
+  gestures are tracked at the *document* level — the svg is rebuilt by every
+  render, so element-level listeners would drop the pointerup the moment the
+  cursor left the canvas (found live, fixed, retested).
+* **Copy/paste**: Ctrl+C copies the selected equation blocks (Ctrl+C with
+  text selected keeps native copying — the handler only acts on a collapsed
+  selection); Ctrl+V posts `/api/edit/duplicate_equations`, which clones the
+  set server-side as **one journaled edit**: every result gets a fresh
+  `_copy`-suffixed local typed like its source (an output lhs pastes as a
+  local — two blocks can't drive one output), references *within* the copied
+  set are rewritten onto the fresh names so the pasted sub-diagram stays
+  internally wired, reads of anything outside the set keep pointing at the
+  originals, and each pasted box lands offset from its source. One Ctrl+Z
+  removes the whole paste. Edit menu carries Copy/Paste; a cross-operator
+  paste is refused with a message.
+* Tests: `duplicate_equations_pastes_a_rewired_sub_diagram`
+  (tests/studio_editing.rs) covers the rewiring, typing, offsets, `_copy2`
+  suffixing, single-undo, and the loud 400s; the browser smoke drive
+  verified zoom/wheel/marquee/paste/pan against the live page.
 
 ### 2026-07-03 — float intrinsics: the `<math.h>` double family, end to end
 

@@ -275,6 +275,9 @@
     <div class="dropdown">
       <div class="mi disabled" id="mi-undo" onclick="editUndo()">Undo <span class="shortcut">Ctrl+Z</span></div>
       <div class="mi disabled" id="mi-redo" onclick="editRedo()">Redo <span class="shortcut">Ctrl+Y</span></div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="copySelection()">Copy <span class="shortcut">Ctrl+C</span></div>
+      <div class="mi" onclick="pasteClipboard()">Paste <span class="shortcut">Ctrl+V</span></div>
     </div>
   </div>
   <div class="menu" data-menu="insert">
@@ -307,6 +310,10 @@
       <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="setZoom((state.zoom||1)*1.2)">Zoom In <span class="shortcut">Ctrl+=</span></div>
+      <div class="mi" onclick="setZoom((state.zoom||1)/1.2)">Zoom Out <span class="shortcut">Ctrl+-</span></div>
+      <div class="mi" onclick="setZoom(1)">Zoom 100% <span class="shortcut">Ctrl+0</span></div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="setSidePane('lustre')">Lustre Text Pane</div>
       <div class="mi" onclick="setSidePane('c')">Generated C Pane</div>
@@ -463,6 +470,7 @@
   <span class="err" id="err-count">0 errors</span>
   <span class="warn" id="warn-count">0 warnings</span>
   <span id="status-grid"></span>
+  <span id="status-zoom"></span>
   <span class="simstate" id="status-sim"></span>
   <span id="diagram-status"></span>
   <span style="margin-left:auto">/api/inspect every 5 s</span>
@@ -707,6 +715,9 @@ const state = {
   inspect: null, selectedNode: null, stepHistory: "",
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
+  // Canvas zoom (1 = 100%); panning is the host's scroll, so a middle-button
+  // drag just scrolls. The copied sub-diagram is a set of equation indices.
+  zoom: 1, pan: null, clipboard: null,
   sim: { built: false, running: false, values: {} },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
@@ -1328,6 +1339,15 @@ document.addEventListener("keydown", ev => {
     const k = ev.key.toLowerCase();
     if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
     else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
+    // Ctrl+C only acts when no text is selected, so copying from the code
+    // panes keeps its native behavior.
+    else if (k === "c" && window.getSelection().isCollapsed) {
+      ev.preventDefault(); copySelection();
+    }
+    else if (k === "v") { ev.preventDefault(); pasteClipboard(); }
+    else if (k === "=" || k === "+") { ev.preventDefault(); setZoom((state.zoom || 1) * 1.2); }
+    else if (k === "-") { ev.preventDefault(); setZoom((state.zoom || 1) / 1.2); }
+    else if (k === "0") { ev.preventDefault(); setZoom(1); }
   }
 });
 // Any click outside the menu dismisses it.
@@ -1893,7 +1913,11 @@ function renderDiagram() {
   d.locals.forEach(l => typeOf[l.name] = typeName(l.type));
 
   const g = gridPitch();
-  let svg = '<svg id="diagram-svg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  // Zoom via viewBox: element size scales, model coordinates stay 1:1 —
+  // svgPoint() divides client offsets by the zoom to get back to them.
+  const z = state.zoom || 1;
+  let svg = '<svg id="diagram-svg" width="' + (W * z) + '" height="' + (H * z) +
+    '" viewBox="0 0 ' + W + ' ' + H + '" xmlns="http://www.w3.org/2000/svg">';
   if (document.getElementById("grid-show").checked) {
     // Engineering grid: minor lines every pitch, major every 5 pitches.
     svg += '<defs>' +
@@ -1998,6 +2022,20 @@ function renderDiagram() {
         (a.x + a.w) + ' ' + (a.y + (a.h || DIAG.BOXH) / 2) + ' L ' + state.wireDrag.x + ' ' + state.wireDrag.y + '"/>';
     }
   }
+  // Marquee rectangle while rubber-band selecting.
+  if (state.marquee && state.marquee.moved) {
+    const m = state.marquee;
+    svg += '<rect x="' + Math.min(m.x0, m.x1) + '" y="' + Math.min(m.y0, m.y1) +
+      '" width="' + Math.abs(m.x1 - m.x0) + '" height="' + Math.abs(m.y1 - m.y0) +
+      '" fill="rgba(43,87,154,0.08)" stroke="#2b579a" stroke-dasharray="4 3" pointer-events="none"/>';
+  }
+  // The boxes actually on screen this render, for marquee hit-testing.
+  state.renderedRects = items
+    .filter(it => pos[it.id])
+    .map(it => {
+      const p = pos[it.id];
+      return { id: it.id, x: p.x, y: p.y, w: p.w, h: p.h || DIAG.BOXH };
+    });
   svg += "</svg>";
   const host = document.getElementById("diagram-host");
   host.innerHTML = svg;
@@ -2017,11 +2055,22 @@ function boxCls(base, p) {
 
 function svgPoint(ev) {
   const r = document.getElementById("diagram-svg").getBoundingClientRect();
-  return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  const z = state.zoom || 1;
+  return { x: (ev.clientX - r.left) / z, y: (ev.clientY - r.top) / z };
 }
 
 function diagPointerDown(ev) {
   hideCtxMenu();
+  // Middle button pans: the canvas is the host's scroll area, so panning is
+  // just scrolling it while the button is held. Tracked on the document —
+  // the svg is rebuilt on every render, so its own listeners can't follow
+  // a gesture that outlives one frame or leaves the canvas.
+  if (ev.button === 1) {
+    const host = document.getElementById("diagram-host");
+    state.pan = { x: ev.clientX, y: ev.clientY, sl: host.scrollLeft, st: host.scrollTop };
+    ev.preventDefault();
+    return;
+  }
   // Grabbing a pin starts a wire, not a move.
   if (ev.target.classList && ev.target.classList.contains("pin")) {
     const pt = svgPoint(ev);
@@ -2042,8 +2091,13 @@ function diagPointerDown(ev) {
   }
   const g = ev.target.closest("g.diag-item");
   if (!g) {
-    // Clicking empty canvas clears the selection.
-    if (ev.button === 0) setSelection(null);
+    // Left-down on empty canvas starts a marquee (tracked on the document,
+    // like panning); a click that never grows into one clears the selection
+    // on pointerup instead.
+    if (ev.button === 0) {
+      const pt = svgPoint(ev);
+      state.marquee = { x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y, moved: false };
+    }
     return;
   }
   const id = g.dataset.id;
@@ -2056,7 +2110,48 @@ function diagPointerDown(ev) {
   ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
 }
 
+// Pan and marquee gestures live on the document: the svg is torn down and
+// rebuilt by every renderDiagram(), and both gestures routinely leave the
+// canvas, so element-level listeners would drop their pointerup.
+document.addEventListener("pointermove", ev => {
+  if (state.pan) {
+    const host = document.getElementById("diagram-host");
+    host.scrollLeft = state.pan.sl - (ev.clientX - state.pan.x);
+    host.scrollTop = state.pan.st - (ev.clientY - state.pan.y);
+    return;
+  }
+  if (state.marquee && document.getElementById("diagram-svg")) {
+    const pt = svgPoint(ev);
+    state.marquee.x1 = pt.x;
+    state.marquee.y1 = pt.y;
+    if (Math.abs(pt.x - state.marquee.x0) + Math.abs(pt.y - state.marquee.y0) > 4) {
+      state.marquee.moved = true;
+    }
+    if (state.marquee.moved) renderDiagram();
+  }
+});
+document.addEventListener("pointerup", ev => {
+  if (state.pan) { state.pan = null; return; }
+  if (!state.marquee) return;
+  const m = state.marquee;
+  state.marquee = null;
+  if (!m.moved) { setSelection(null); return; }
+  // Select every box the rectangle touches (additive with ctrl/shift).
+  const x0 = Math.min(m.x0, m.x1), x1 = Math.max(m.x0, m.x1);
+  const y0 = Math.min(m.y0, m.y1), y1 = Math.max(m.y0, m.y1);
+  const hit = (state.renderedRects || [])
+    .filter(r => r.x < x1 && r.x + r.w > x0 && r.y < y1 && r.y + r.h > y0)
+    .map(r => r.id);
+  const additive = ev.shiftKey || ev.ctrlKey || ev.metaKey;
+  state.selected = additive ? [...new Set([...state.selected, ...hit])] : hit;
+  state.selection = state.selected[state.selected.length - 1] || null;
+  renderDiagram();
+  renderProps();
+  wireStatus(hit.length ? hit.length + " item(s) selected" : "");
+});
+
 function diagPointerMove(ev) {
+  if (state.pan || state.marquee) return; // handled at the document level
   if (state.wireDrag) {
     const pt = svgPoint(ev);
     state.wireDrag.x = pt.x;
@@ -2088,6 +2183,7 @@ function diagPointerMove(ev) {
 }
 
 async function diagPointerUp(ev) {
+  if (state.pan || state.marquee) return; // handled at the document level
   if (state.resize) { state.resize = null; saveLayout(); return; }
   if (state.wireDrag) {
     const wd = state.wireDrag;
@@ -2239,6 +2335,60 @@ function gridChanged() {
   document.getElementById("status-grid").textContent = "grid: " + gridPitch() + " px";
   renderDiagram();
   saveLayout();
+}
+
+// --- Zoom (viewBox scale; panning is the host's scroll) ------------------------
+
+function setZoom(next, ev) {
+  const host = document.getElementById("diagram-host");
+  const z0 = state.zoom || 1;
+  const z = Math.min(3, Math.max(0.25, next));
+  if (Math.abs(z - z0) < 0.001) return;
+  // Keep the point under the cursor (or the viewport centre) stationary.
+  const r = host.getBoundingClientRect();
+  const px = ev ? ev.clientX - r.left : r.width / 2;
+  const py = ev ? ev.clientY - r.top : r.height / 2;
+  const cx = (host.scrollLeft + px) / z0, cy = (host.scrollTop + py) / z0;
+  state.zoom = z;
+  renderDiagram();
+  host.scrollLeft = cx * z - px;
+  host.scrollTop = cy * z - py;
+  document.getElementById("status-zoom").textContent = "zoom: " + Math.round(z * 100) + "%";
+}
+
+// --- Copy/paste: duplicate the selected blocks as one journaled edit ------------
+
+function copySelection() {
+  if (!state.diagramData) return;
+  const idx = state.selected
+    .map(id => /^eq(\d+)$/.exec(id))
+    .filter(Boolean)
+    .map(m => +m[1]);
+  if (!idx.length) {
+    wireStatus("select block(s) first — equations copy; inputs/outputs don't duplicate");
+    return;
+  }
+  state.clipboard = { node: state.diagramData.node, indices: idx };
+  wireStatus("copied " + idx.length + " block(s) — Ctrl+V pastes");
+}
+
+async function pasteClipboard() {
+  if (!state.clipboard || !state.diagramData) return;
+  if (state.clipboard.node !== state.diagramData.node) {
+    wireStatus("clipboard holds blocks from `" + state.clipboard.node +
+      "` — paste on that operator's canvas");
+    return;
+  }
+  const g = gridPitch();
+  const ok = await propsFetch("/api/edit/duplicate_equations", {
+    node: state.clipboard.node,
+    indices: state.clipboard.indices,
+    dx: 2 * g, dy: 2 * g,
+  });
+  if (ok) {
+    wireStatus("pasted " + state.clipboard.indices.length + " block(s) — Ctrl+Z to undo");
+    await propsReload();
+  }
 }
 
 // --- Operations toolbox (right dock) -------------------------------------------
@@ -2557,6 +2707,12 @@ async function switchedWorkspace(note) {
 }
 
 const diagramHostEl = document.getElementById("diagram-host");
+// Ctrl+wheel zooms around the cursor (plain wheel keeps scrolling).
+diagramHostEl.addEventListener("wheel", ev => {
+  if (!ev.ctrlKey) return;
+  ev.preventDefault();
+  setZoom((state.zoom || 1) * (ev.deltaY < 0 ? 1.2 : 1 / 1.2), ev);
+}, { passive: false });
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
   ev.preventDefault();
@@ -2567,8 +2723,9 @@ diagramHostEl.addEventListener("drop", async ev => {
   if (data === "sm:new") { openStateMachineForCurrent(); return; }
   const svgEl = document.getElementById("diagram-svg");
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
-  const x = snap(Math.max(0, ev.clientX - r.left));
-  const y = snap(Math.max(0, ev.clientY - r.top));
+  const z = state.zoom || 1;
+  const x = snap(Math.max(0, (ev.clientX - r.left) / z));
+  const y = snap(Math.max(0, (ev.clientY - r.top) / z));
 
   // A type dropped from the Types section opens a kind-specific action menu
   // (MAKE/FLATTEN/SLICE for arrays, MAKE/FLATTEN for records, variant/compare/

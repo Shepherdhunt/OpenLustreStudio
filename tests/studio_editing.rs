@@ -460,3 +460,74 @@ fn bad_equation_body_is_rejected_with_400() {
     let on_disk = std::fs::read_to_string(g.tmp.join("model.json")).unwrap();
     assert!(!on_disk.contains("if then else"));
 }
+
+/// SCADE-style copy/paste: duplicating a wired sub-diagram keeps its internal
+/// wiring (renamed onto fresh `_copy` locals), keeps external reads pointing
+/// at the originals, offsets the pasted boxes, and undoes as ONE edit.
+#[test]
+fn duplicate_equations_pastes_a_rewired_sub_diagram() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+    let diagram = |node: &str| -> serde_json::Value {
+        let (s, b) = request(port, "GET", &format!("/api/diagram?node={node}"), "").expect("diagram");
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+
+    post("/api/edit/add_node", r#"{"name":"Chain","kind":"operator"}"#);
+    post("/api/edit/add_port", r#"{"node":"Chain","side":"input","name":"a","type":"int32"}"#);
+    post("/api/edit/add_port", r#"{"node":"Chain","side":"input","name":"b","type":"int32"}"#);
+    // eq0: sum = a + b (a local), eq1: twice = sum * 2 — a two-gate chain.
+    post("/api/edit/add_local", r#"{"node":"Chain","name":"sum","type":"int32"}"#);
+    post("/api/edit/add_local", r#"{"node":"Chain","name":"twice","type":"int32"}"#);
+    post("/api/edit/add_equation", r#"{"node":"Chain","lhs":"sum","body":"a + b"}"#);
+    post("/api/edit/add_equation", r#"{"node":"Chain","lhs":"twice","body":"sum * 2"}"#);
+    post("/api/edit/set_layout",
+        r#"{"node":"Chain","positions":{"eq0":{"x":100,"y":40},"eq1":{"x":300,"y":40}},"grid":8}"#);
+
+    // Paste both.
+    post("/api/edit/duplicate_equations", r#"{"node":"Chain","indices":[0,1],"dx":16,"dy":48}"#);
+    let d = diagram("Chain");
+    let eqs = d["equations"].as_array().unwrap();
+    assert_eq!(eqs.len(), 4, "{eqs:?}");
+    // The pasted pair is internally rewired: the copy of eq1 reads the COPY
+    // of sum; the reads of a/b (outside the copied set) stay on the originals.
+    assert_eq!(eqs[2]["lhs"][0], "sum_copy");
+    assert_eq!(eqs[2]["body"], "a + b");
+    assert_eq!(eqs[3]["lhs"][0], "twice_copy");
+    assert_eq!(eqs[3]["body"], "sum_copy * 2");
+    // The fresh locals exist and are typed like their sources.
+    let locals = d["locals"].as_array().unwrap();
+    for name in ["sum_copy", "twice_copy"] {
+        let l = locals.iter().find(|l| l["name"] == name).expect(name);
+        assert_eq!(l["type"]["kind"], "Int32", "{l}");
+    }
+    // Pasted boxes land offset from their sources.
+    assert_eq!(d["positions"]["eq2"]["x"], 116.0);
+    assert_eq!(d["positions"]["eq2"]["y"], 88.0);
+    assert_eq!(d["positions"]["eq3"]["x"], 316.0);
+
+    // Pasting again suffixes past the first copies.
+    post("/api/edit/duplicate_equations", r#"{"node":"Chain","indices":[0],"dx":16,"dy":16}"#);
+    let d = diagram("Chain");
+    assert_eq!(d["equations"][4]["lhs"][0], "sum_copy2");
+
+    // The whole paste is ONE journal entry: a single undo removes the pair.
+    post("/api/edit/undo", "{}");
+    post("/api/edit/undo", "{}");
+    let d = diagram("Chain");
+    assert_eq!(d["equations"].as_array().unwrap().len(), 2, "both pastes undone");
+    assert!(!d["locals"].as_array().unwrap().iter().any(|l| l["name"] == "sum_copy"));
+
+    // Out-of-range and empty index sets are loud 400s.
+    let (s, m) = request(port, "POST", "/api/edit/duplicate_equations",
+        r#"{"node":"Chain","indices":[9]}"#).unwrap();
+    assert_eq!(s, 400, "{m}");
+    let (s, _) = request(port, "POST", "/api/edit/duplicate_equations",
+        r#"{"node":"Chain","indices":[]}"#).unwrap();
+    assert_eq!(s, 400);
+}
