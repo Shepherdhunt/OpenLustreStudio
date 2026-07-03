@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod lustre_import;
+mod model_diff;
 mod scenario;
 mod studio_server;
 
@@ -116,6 +117,16 @@ enum Cmd {
         model: PathBuf,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+    },
+    /// Semantic diff of two model files: design changes (nodes, ports,
+    /// equations, types, constants, state machines, contracts,
+    /// requirements), never layout. Exits nonzero when the models differ,
+    /// so it can gate a review.
+    Diff {
+        /// The baseline model.
+        old: PathBuf,
+        /// The changed model.
+        new: PathBuf,
     },
     /// Emit the requirements traceability matrix: one CSV row per
     /// (requirement, operator) link, from the `requirements` annotations on
@@ -330,6 +341,7 @@ fn main() -> Result<()> {
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
         }
+        Cmd::Diff { old, new } => cmd_diff(&old, &new),
         Cmd::Trace { model, out, with_stdlib, strict } => {
             cmd_trace(&model, out.as_deref(), with_stdlib.as_deref(), strict)
         }
@@ -458,6 +470,23 @@ fn cmd_check(
     }
     println!("check: OK ({} nodes)", project.all_nodes().count());
     Ok(())
+}
+
+/// Semantic model diff. Models are loaded with includes resolved but state
+/// machines NOT lowered, so an automaton edit reads as a state-machine
+/// change, not as generated-plumbing noise; diagram layout never appears.
+fn cmd_diff(old: &Path, new: &Path) -> Result<()> {
+    let a = load(old)?;
+    let b = load(new)?;
+    let changes = model_diff::diff_projects(&a, &b);
+    if changes.is_empty() {
+        println!("models are semantically identical");
+        return Ok(());
+    }
+    for line in &changes {
+        println!("{line}");
+    }
+    anyhow::bail!("models differ ({} change{})", changes.len(), if changes.len() == 1 { "" } else { "s" });
 }
 
 /// The requirements traceability matrix. Rows are (requirement, operator)

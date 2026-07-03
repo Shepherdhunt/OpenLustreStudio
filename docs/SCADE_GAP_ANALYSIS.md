@@ -19,7 +19,11 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Requirements traceability
+**Landed recently (newest first):** **Semantic model diff (2026-07-03):**
+`openlustre diff <old> <new>` — design changes only (nodes/ports/equations/
+types/constants/machines/contracts/requirements), layout invisible, nonzero
+exit on differences (`crates/ol_cli/src/model_diff.rs`). Before that:
+**Requirements traceability
 (2026-07-03):** operators carry requirement IDs (`NodeDef.requirements`),
 edited via right-click ▸ Requirements… and journaled like any edit;
 `openlustre trace [--strict] [-o matrix.csv]` compiles the
@@ -191,7 +195,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: signals, and richer parallel/history UI (a state's inline nested-region authoring beyond `refine`) | P2 |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
-| Model diff (`openlustre diff`) | Semantic, not textual, diff of two model files — config management story | P2 |
+| ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace and ReqIF export remain roadmap | done (node-level) |
 | Documentation generator | Render IR + diagrams + contracts to a design-document HTML/PDF | P2 |
 | FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
@@ -234,6 +238,22 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 (diff) — `openlustre diff`: semantic model comparison
+
+The configuration-management story: what changed in the *design*, not in
+the JSON. `openlustre diff <old> <new>` loads both models (includes
+resolved, state machines NOT lowered — an automaton edit reads as a
+state-machine change, not generated-plumbing noise) and prints one
+`+`/`-`/`~` line per change: nodes added/removed; per-node kind, ports
+(added/removed/retyped), equations keyed by their lhs and compared by
+formatted surface text, contract reference, and requirement annotations;
+types, constants (type + value), and state machines (owner/initial/states)
+as named elements. Diagram layout is deliberately invisible — moving every
+box produces an empty diff (unit-tested). Exit code: 0 when semantically
+identical, nonzero with the change count otherwise, so a review pipeline
+can gate on it. `crates/ol_cli/src/model_diff.rs`, with unit tests and a
+live CLI verification against the release-logic example.
 
 ### 2026-07-03 (traceability) — requirement IDs on operators + `openlustre trace`
 
