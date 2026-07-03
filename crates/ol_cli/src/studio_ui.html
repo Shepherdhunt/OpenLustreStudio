@@ -1873,6 +1873,8 @@ function renderDiagram() {
     // the full equation text stays one hover away.
     label: e.symbol ? e.symbol.text : e.text,
     sym: !!e.symbol,
+    // Logic gates get true SCADE silhouettes (curved AND, shield OR, …).
+    symText: e.symbol && e.symbol.kind === "op" ? e.symbol.text : null,
     cls: (e.invalid ? "box eq invalid" : "box eq") + (e.symbol && e.symbol.kind === "const" ? " const" : ""),
     reason: (e.reason ? e.reason + " — " : "") + e.text,
     calls: e.calls || [],
@@ -1972,19 +1974,30 @@ function renderDiagram() {
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
-    svg += '<rect class="' + it.cls + (selected ? ' selected' : '') + '" x="' + p.x + '" y="' + p.y +
-      '" width="' + p.w + '" height="' + h + '" rx="2"/>';
+    // Logic gates draw their SCADE silhouette; everything else stays a box.
+    const shape = it.symText ? gateSilhouette(it.symText, p.x, p.y, p.w, h) : null;
+    const boxCls2 = it.cls + (selected ? " selected" : "");
+    if (shape) {
+      svg += '<path class="' + boxCls2 + '" d="' + shape.d + '"/>' + (shape.extra || "");
+    } else {
+      svg += '<rect class="' + boxCls2 + '" x="' + p.x + '" y="' + p.y +
+        '" width="' + p.w + '" height="' + h + '" rx="2"/>';
+    }
     // Label: a single (truncated) line, or — when text-wrap is on for this box —
     // several lines via <tspan>, centered for symbol gates, left for text boxes.
-    const lines = p.wrap ? boxLabelLines(it, p)
+    // A silhouetted gate needs no text: the shape IS the operator.
+    const lines = shape ? []
+      : p.wrap ? boxLabelLines(it, p)
       : [it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label];
     const tx = it.sym ? (p.x + p.w / 2) : (p.x + 8);
     const firstY = p.y + h / 2 + (it.sym ? 5 : 4) - (lines.length - 1) * WRAP_LINEH / 2;
-    svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
-    lines.forEach((ln, li) => {
-      svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
-    });
-    svg += '</text>';
+    if (lines.length) {
+      svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
+      lines.forEach((ln, li) => {
+        svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
+      });
+      svg += '</text>';
+    }
     if (divable) {
       svg += '<text class="label" x="' + (p.x + p.w - 12) + '" y="' + (p.y + 10) + '">▸</text>';
     }
@@ -2059,6 +2072,41 @@ function boxCls(base, p) {
   if (p.invalid) return base + " invalid";
   if (p.warn) return base + " warn";
   return base;
+}
+
+/// The classic IEC/SCADE logic-gate silhouettes, fitted to the box (x, y,
+/// w, h) so pins, wires, and the resize grip keep using the same bounding
+/// box. Returns null for operators that stay rectangular; `extra` carries
+/// stroke-only decorations (XOR's second back arc, NOT's bubble).
+function gateSilhouette(sym, x, y, w, h) {
+  const p = (px, py) => px + " " + py;
+  if (sym === "AND") {
+    // Flat back, semicircular nose.
+    const mx = x + w * 0.45;
+    return { d: "M " + p(x, y) + " L " + p(mx, y) +
+                " A " + (w - (mx - x)) + " " + (h / 2) + " 0 0 1 " + p(mx, y + h) +
+                " L " + p(x, y + h) + " Z" };
+  }
+  if (sym === "OR" || sym === "XOR") {
+    const back = "M " + p(x, y) +
+      " Q " + p(x + w * 0.62, y) + " " + p(x + w, y + h / 2) +
+      " Q " + p(x + w * 0.62, y + h) + " " + p(x, y + h) +
+      " Q " + p(x + w * 0.22, y + h / 2) + " " + p(x, y) + " Z";
+    if (sym === "OR") return { d: back };
+    // XOR: a second, detached back arc.
+    return {
+      d: back,
+      extra: '<path style="fill:none" class="box eq" d="M ' + p(x - 5, y) +
+        ' Q ' + p(x + w * 0.22 - 5, y + h / 2) + ' ' + p(x - 5, y + h) + '"/>',
+    };
+  }
+  if (sym === "NOT") {
+    return {
+      d: "M " + p(x, y) + " L " + p(x + w - 9, y + h / 2) + " L " + p(x, y + h) + " Z",
+      extra: '<circle class="box eq" cx="' + (x + w - 4.5) + '" cy="' + (y + h / 2) + '" r="4"/>',
+    };
+  }
+  return null;
 }
 
 /// Manhattan-route one wire: horizontal out of the source pin, one vertical

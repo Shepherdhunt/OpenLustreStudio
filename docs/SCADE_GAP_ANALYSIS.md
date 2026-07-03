@@ -19,7 +19,9 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Manhattan wires (2026-07-03):**
+**Landed recently (newest first):** **Gate silhouettes (2026-07-03):**
+AND/OR/XOR/NOT draw as true IEC/SCADE shapes (same bounding box, pins and
+wires unchanged). Before that: **Manhattan wires (2026-07-03):**
 orthogonal wire routing by default (mid-channel verticals, staggered
 parallels, feedback hooks; View-menu toggle back to Béziers). Before that:
 **Editor polish (2026-07-03):** canvas
@@ -129,9 +131,10 @@ symbols; typed wire labels.
    `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` (TOR-1…12, each claim mapped to
    its verification tests; usage constraints; documented exclusions). The
    verification-by-equivalence story (§4) is complete.
-4. **Editor polish** (P1/P2) — distinct per-family gate silhouettes remain
-   (§2); orthogonal wire routing, zoom/pan, marquee select, and copy/paste
-   landed 2026-07-03.
+4. ~~Editor polish~~ — **all landed 2026-07-03**: orthogonal wire routing,
+   zoom/pan, marquee select, copy/paste, and per-family gate silhouettes
+   (§2). Remaining §2 items are P2 multi-sheet diagrams and cosmetic
+   junction dots.
 5. **Deployment** (§5) — `.lus`/`.ols` file association + app icon (P1,
    cosmetic), then code signing (P2, cost not code).
 6. **Automata depth** (P2) — history / signals UI, and richer parallel
@@ -172,7 +175,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-07-03**: wires route orthogonally by default (horizontal out, one mid-channel vertical, horizontal in; feedback wires hook around below; parallel wires stagger a few px so channels don't collapse); View ▸ "orthogonal wires" toggles back to Béziers. Junction dots at fan-outs remain cosmetic roadmap | done |
 | ~~P1 — Zoom/pan, copy/paste~~ | Standard | **Landed 2026-07-03**: viewBox zoom (Ctrl+wheel around the cursor, View-menu items, Ctrl+= / − / 0, status-bar %), middle-button pan, marquee multi-select on empty canvas, and Ctrl+C/Ctrl+V duplicating the selected blocks as one journaled edit (`/api/edit/duplicate_equations` — fresh `_copy` locals, internal wiring rewritten, external reads kept) | done |
 | **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
-| **P2 — Per-family gate silhouettes** | Distinct shapes per operator family (gates, delays, switches) | Gates now render as blocks with pins; SCADE's curved-AND / D-shaped-OR silhouettes are still a flat box — a symbol library keyed by operator id | Small, cosmetic |
+| ~~P2 — Per-family gate silhouettes~~ | Distinct shapes per operator family (gates, delays, switches) | **Landed 2026-07-03**: AND (flat back, round nose), OR (shield), XOR (second back arc), NOT (triangle + bubble) draw as true IEC/SCADE silhouettes fitted to the same bounding box (pins/labels/resize unchanged); everything else keeps its compact symbol box | done |
 
 ## 3. Language and toolchain gaps
 
@@ -226,6 +229,19 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 (gates) — per-family silhouettes
+
+The logic family draws its classic IEC/SCADE shapes instead of labeled
+boxes: **AND** flat back + semicircular nose, **OR** a shield (curved back,
+pointed nose), **XOR** the shield plus a detached second back arc, **NOT** a
+triangle with the inversion bubble. Each silhouette is fitted to the same
+bounding box the rect used, so input pins, the output pin, wires, marquee
+hit-testing, and the resize grip all keep working; the symbol text drops
+(the shape *is* the operator) while the full equation stays on hover.
+Arithmetic/comparison/temporal blocks keep their compact symbol boxes —
+SCADE's own convention. Verified in Chromium (silhouette paths + decorations
+present, `+` still a labeled rect; screenshot-checked).
 
 ### 2026-07-03 (wires) — orthogonal (Manhattan) routing
 
