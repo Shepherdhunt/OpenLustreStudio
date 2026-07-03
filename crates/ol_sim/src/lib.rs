@@ -864,6 +864,55 @@ fn eval(
             let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             cast_value(to, v)
         }
+        // Float intrinsics compute in f64 — the same double-precision libm
+        // functions the generated C calls, so both backends agree.
+        Expr::FloatIntrinsic { op, args } => {
+            let mut vals = Vec::with_capacity(args.len());
+            for a in args {
+                match eval(a, env, state, call_states, project, site_clocks, cov)? {
+                    Value::Float(f) => vals.push(f),
+                    other => {
+                        return Err(SimError::EvalError(format!(
+                            "`{}` requires float operands, got {other:?}",
+                            op.name()
+                        )))
+                    }
+                }
+            }
+            if vals.len() != op.arity() {
+                return Err(SimError::EvalError(format!(
+                    "`{}` takes {} arguments, got {}",
+                    op.name(),
+                    op.arity(),
+                    vals.len()
+                )));
+            }
+            use ol_ir::FloatOp;
+            let x = vals[0];
+            let r = match op {
+                FloatOp::Sqrt => x.sqrt(),
+                FloatOp::Sin => x.sin(),
+                FloatOp::Cos => x.cos(),
+                FloatOp::Tan => x.tan(),
+                FloatOp::Asin => x.asin(),
+                FloatOp::Acos => x.acos(),
+                FloatOp::Atan => x.atan(),
+                FloatOp::Atan2 => x.atan2(vals[1]),
+                FloatOp::Exp => x.exp(),
+                FloatOp::Log => x.ln(),
+                FloatOp::Log10 => x.log10(),
+                FloatOp::Pow => x.powf(vals[1]),
+                FloatOp::Floor => x.floor(),
+                FloatOp::Ceil => x.ceil(),
+                // f64::round rounds half away from zero, exactly like C round().
+                FloatOp::Round => x.round(),
+                FloatOp::Abs => x.abs(),
+                // f64::min/max return the non-NaN operand, like C fmin/fmax.
+                FloatOp::Min => x.min(vals[1]),
+                FloatOp::Max => x.max(vals[1]),
+            };
+            Ok(Value::Float(r))
+        }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, site_clocks, cov),
         Expr::Field { base, field } => {
             let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;

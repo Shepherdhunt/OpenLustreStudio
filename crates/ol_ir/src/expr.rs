@@ -179,6 +179,110 @@ pub enum Expr {
         /// The array operands (one for `fold`, one or more for `map`).
         arrays: Vec<Expr>,
     },
+    /// A float math intrinsic — the SCADE libmath family. Surface syntax is
+    /// function-style (`sqrt(x)`, `atan2(y, x)`). Operands and result are
+    /// `float64` only: `float32` streams cast in and out explicitly
+    /// (`sqrt(float64(x))`), so the IR simulator, the generated C (`<math.h>`
+    /// double functions), and the Kind 2 view all compute the same thing.
+    FloatIntrinsic {
+        op: FloatOp,
+        args: Vec<Expr>,
+    },
+}
+
+/// Which math function an [`Expr::FloatIntrinsic`] applies. Names mirror
+/// C's `<math.h>` double family, which is also the generated-code target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FloatOp {
+    Sqrt,
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Exp,
+    Log,
+    Log10,
+    Pow,
+    Floor,
+    Ceil,
+    Round,
+    Abs,
+    Min,
+    Max,
+}
+
+impl FloatOp {
+    pub const ALL: [FloatOp; 18] = [
+        FloatOp::Sqrt,
+        FloatOp::Sin,
+        FloatOp::Cos,
+        FloatOp::Tan,
+        FloatOp::Asin,
+        FloatOp::Acos,
+        FloatOp::Atan,
+        FloatOp::Atan2,
+        FloatOp::Exp,
+        FloatOp::Log,
+        FloatOp::Log10,
+        FloatOp::Pow,
+        FloatOp::Floor,
+        FloatOp::Ceil,
+        FloatOp::Round,
+        FloatOp::Abs,
+        FloatOp::Min,
+        FloatOp::Max,
+    ];
+
+    /// The surface-syntax (and Lustre-view) function name.
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatOp::Sqrt => "sqrt",
+            FloatOp::Sin => "sin",
+            FloatOp::Cos => "cos",
+            FloatOp::Tan => "tan",
+            FloatOp::Asin => "asin",
+            FloatOp::Acos => "acos",
+            FloatOp::Atan => "atan",
+            FloatOp::Atan2 => "atan2",
+            FloatOp::Exp => "exp",
+            FloatOp::Log => "log",
+            FloatOp::Log10 => "log10",
+            FloatOp::Pow => "pow",
+            FloatOp::Floor => "floor",
+            FloatOp::Ceil => "ceil",
+            FloatOp::Round => "round",
+            FloatOp::Abs => "abs",
+            FloatOp::Min => "min",
+            FloatOp::Max => "max",
+        }
+    }
+
+    /// The `<math.h>` double-precision function the C emitter calls.
+    pub fn c_name(self) -> &'static str {
+        match self {
+            FloatOp::Abs => "fabs",
+            FloatOp::Min => "fmin",
+            FloatOp::Max => "fmax",
+            other => other.name(),
+        }
+    }
+
+    /// How many arguments the intrinsic takes.
+    pub fn arity(self) -> usize {
+        match self {
+            FloatOp::Atan2 | FloatOp::Pow | FloatOp::Min | FloatOp::Max => 2,
+            _ => 1,
+        }
+    }
+
+    /// Resolve a surface name (`"sqrt"`) to its intrinsic, reserving these
+    /// names in call position.
+    pub fn from_name(name: &str) -> Option<FloatOp> {
+        FloatOp::ALL.iter().copied().find(|op| op.name() == name)
+    }
 }
 
 /// Which array iterator an [`Expr::Iterate`] is.
@@ -273,6 +377,9 @@ impl Expr {
             arrays: vec![array],
         }
     }
+    pub fn float_intrinsic(op: FloatOp, args: Vec<Expr>) -> Self {
+        Expr::FloatIntrinsic { op, args }
+    }
     pub fn array(items: Vec<Expr>) -> Self {
         Expr::Array { items }
     }
@@ -358,6 +465,11 @@ impl Expr {
                         walk(i, f);
                     }
                     for a in arrays {
+                        walk(a, f);
+                    }
+                }
+                Expr::FloatIntrinsic { args, .. } => {
+                    for a in args {
                         walk(a, f);
                     }
                 }
@@ -453,6 +565,11 @@ impl Expr {
                     i.rename_var(from, to);
                 }
                 for a in arrays {
+                    a.rename_var(from, to);
+                }
+            }
+            Expr::FloatIntrinsic { args, .. } => {
+                for a in args {
                     a.rename_var(from, to);
                 }
             }

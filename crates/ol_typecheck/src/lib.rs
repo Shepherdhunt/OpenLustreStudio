@@ -570,6 +570,11 @@ fn check_pre_initialization(
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
         }
+        Expr::FloatIntrinsic { args, .. } => {
+            for a in args {
+                check_pre_initialization(a, under_arrow_body, diags, ctx);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -635,6 +640,52 @@ pub fn infer_expr_type(
                 return None;
             }
             Some(to.clone())
+        }
+        Expr::FloatIntrinsic { op, args } => {
+            if args.len() != op.arity() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0160",
+                        format!(
+                            "`{}` takes {} argument{}, got {}",
+                            op.name(),
+                            op.arity(),
+                            if op.arity() == 1 { "" } else { "s" },
+                            args.len()
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            let mut ok = true;
+            for a in args {
+                let t = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, Some(&Type::Float64));
+                match t {
+                    Some(t) if tctx.resolve(&t) == Type::Float64 => {}
+                    Some(t) => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0161",
+                                format!(
+                                    "`{}` requires float64 operands, got {t:?} — cast \
+                                     explicitly, e.g. `{}(float64(x))`",
+                                    op.name(),
+                                    op.name()
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        ok = false;
+                    }
+                    None => ok = false,
+                }
+            }
+            if ok {
+                Some(Type::Float64)
+            } else {
+                None
+            }
         }
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
@@ -1438,7 +1489,7 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         }
         Expr::Pre { .. } => {}
         Expr::Arrow { init, .. } => collect_immediate_deps(init, out),
-        Expr::Call { args, .. } => {
+        Expr::Call { args, .. } | Expr::FloatIntrinsic { args, .. } => {
             for a in args {
                 collect_immediate_deps(a, out);
             }

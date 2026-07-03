@@ -40,7 +40,7 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
             same_cycle_reads(then_branch, out);
             same_cycle_reads(else_branch, out);
         }
-        Expr::Call { args, .. } => {
+        Expr::Call { args, .. } | Expr::FloatIntrinsic { args, .. } => {
             for a in args {
                 same_cycle_reads(a, out);
             }

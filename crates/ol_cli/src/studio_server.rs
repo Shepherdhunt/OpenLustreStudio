@@ -769,6 +769,7 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
             "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
+        Expr::FloatIntrinsic { op: fop, .. } => op(fop.name()),
         Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
         _ => serde_json::Value::Null,
     }
@@ -2617,7 +2618,10 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "plus" | "minus" | "multiply" | "divide" | "modulo" | "squared" | "cubed"
         | "to_nth_power" => (n("number"), "number"),
         "numeric_cast" => (vec!["number"], "target type"),
-        "square_root" => (vec!["float"], "float"),
+        "square_root" => (vec!["float64"], "float64"),
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "log" | "log10"
+        | "floor" | "ceil" | "round" | "abs" => (vec!["float64"], "float64"),
+        "atan2" | "pow" | "min" | "max" => (vec!["float64", "float64"], "float64"),
         "equal" | "not_equal" => (vec!["T", "T"], "bool"),
         "greater_than" | "greater_equal" | "less_than" | "less_equal" => {
             (vec!["number", "number"], "bool")
@@ -2692,12 +2696,33 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             OpDef { id: "numeric_cast", label: "numeric_cast", pins: 1, out_type: "int32",
                     param: Some("type"), enabled: true, hint: "convert to int8…uint64, float32/64" },
             OpDef { id: "square_root", label: "square_root", pins: 1, out_type: "float64",
-                    param: None, enabled: false,
-                    hint: "needs float intrinsics (sqrt) across sim/C/Lustre — roadmap" },
+                    param: None, enabled: true,
+                    hint: "sqrt(x) on float64 — cast float32 in/out explicitly" },
             op("squared", "squared (x*x)", 1, "int32"),
             op("cubed", "cubed (x*x*x)", 1, "int32"),
             OpDef { id: "to_nth_power", label: "to_nth_power(n)", pins: 1, out_type: "int32",
                     param: Some("n"), enabled: true, hint: "n between 2 and 8" },
+        ]),
+        // SCADE's libmath: double-precision `<math.h>` intrinsics, agreeing
+        // across the simulator, generated C, and the Kind 2 view.
+        ("Float Math", vec![
+            op("sin", "sin", 1, "float64"),
+            op("cos", "cos", 1, "float64"),
+            op("tan", "tan", 1, "float64"),
+            op("asin", "asin", 1, "float64"),
+            op("acos", "acos", 1, "float64"),
+            op("atan", "atan", 1, "float64"),
+            op("atan2", "atan2(y, x)", 2, "float64"),
+            op("exp", "exp", 1, "float64"),
+            op("log", "log (ln)", 1, "float64"),
+            op("log10", "log10", 1, "float64"),
+            op("pow", "pow(x, y)", 2, "float64"),
+            op("floor", "floor", 1, "float64"),
+            op("ceil", "ceil", 1, "float64"),
+            op("round", "round", 1, "float64"),
+            op("abs", "abs", 1, "float64"),
+            op("min", "min", 2, "float64"),
+            op("max", "max", 2, "float64"),
         ]),
         ("Comparisons", vec![
             op("equal", "equal (=)", 2, "bool"),
@@ -2842,6 +2867,12 @@ fn operation_body(
             let body = format!("{t}({a})");
             return Ok((body, t.to_string()));
         }
+        // Float intrinsics: `square_root` is the SCADE-named chip for sqrt;
+        // the Float Math family's ids are the surface function names.
+        "square_root" => format!("sqrt({a})"),
+        "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "log" | "log10"
+        | "floor" | "ceil" | "round" | "abs" => format!("{}({a})", opdef.id),
+        "atan2" | "pow" | "min" | "max" => format!("{}({a}, {b})", opdef.id),
         "equal" => format!("{a} = {b}"),
         "not_equal" => format!("{a} <> {b}"),
         "greater_than" => format!("{a} > {b}"),

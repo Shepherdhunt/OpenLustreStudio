@@ -1110,11 +1110,12 @@ pub(crate) fn makefile_for_entry(entry: &str) -> String {
 TARGET ?= {entry}
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -O2
+LDLIBS ?= -lm
 
 SOURCES = openlustre_generated.c driver.c
 
 $(TARGET): $(SOURCES)
-\t$(CC) $(CFLAGS) -o $@ $(SOURCES)
+\t$(CC) $(CFLAGS) -o $@ $(SOURCES) $(LDLIBS)
 
 run: $(TARGET)
 \t./$(TARGET)

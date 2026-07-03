@@ -31,6 +31,7 @@ pub fn emit_monitors(project: &Project) -> MonitorBundle {
     let _ = writeln!(source, "#include \"openlustre_monitors.h\"");
     let _ = writeln!(source, "#include <stdio.h>");
     let _ = writeln!(source, "#include <string.h>");
+    let _ = writeln!(source, "#include <math.h>");
     source.push('\n');
     // Small label-appending helper shared by every monitor in the file.
     let _ = writeln!(source, "static void _ol_append(char* buf, size_t buf_size, const char* sep, const char* s) {{");
@@ -173,6 +174,14 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         Expr::Var { name } => scope.ref_name(name),
         Expr::Cast { to, arg } => {
             format!("(({}){})", to.c_name(), emit_mon_expr(arg, scope))
+        }
+        Expr::FloatIntrinsic { op, args } => {
+            let parts = args
+                .iter()
+                .map(|a| emit_mon_expr(a, scope))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({parts})", op.c_name())
         }
         Expr::Unary { op, arg } => {
             let a = emit_mon_expr(arg, scope);

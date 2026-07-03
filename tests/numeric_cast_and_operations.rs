@@ -253,7 +253,7 @@ fn operations_catalog_has_the_scade_families() {
     let names: Vec<&str> = cat["categories"].as_array().unwrap()
         .iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec![
-        "Mathematics", "Comparisons", "Logical", "Structures/Arrays",
+        "Mathematics", "Float Math", "Comparisons", "Logical", "Structures/Arrays",
         "Time/Statefuls", "Choice", "Bitwise", "Higher Order",
     ]);
     let math = &cat["categories"][0]["items"];
@@ -263,10 +263,21 @@ fn operations_catalog_has_the_scade_families() {
                "square_root", "squared", "cubed", "to_nth_power"] {
         assert!(ids.contains(&id), "Mathematics missing {id}: {ids:?}");
     }
-    // square_root is offered but explicitly disabled with a hint, not silent.
+    // square_root is enabled (float intrinsics landed) with a float64 contract.
     let sqrt = math.as_array().unwrap().iter().find(|i| i["id"] == "square_root").unwrap();
-    assert_eq!(sqrt["enabled"], false);
-    assert!(sqrt["hint"].as_str().unwrap().contains("roadmap"));
+    assert_eq!(sqrt["enabled"], true);
+    assert_eq!(sqrt["output"], "float64");
+    // The Float Math family carries the whole <math.h> double set.
+    let fam = &cat["categories"][1]["items"];
+    let ids: Vec<&str> = fam.as_array().unwrap()
+        .iter().map(|i| i["id"].as_str().unwrap()).collect();
+    for id in ["sin", "cos", "tan", "asin", "acos", "atan", "atan2", "exp", "log",
+               "log10", "pow", "floor", "ceil", "round", "abs", "min", "max"] {
+        assert!(ids.contains(&id), "Float Math missing {id}: {ids:?}");
+    }
+    let atan2 = fam.as_array().unwrap().iter().find(|i| i["id"] == "atan2").unwrap();
+    assert_eq!(atan2["pins"], 2);
+    assert_eq!(atan2["signature"], "float64, float64 → float64");
 }
 
 #[test]
@@ -308,11 +319,24 @@ fn dropping_operations_creates_placed_equations_with_red_pins() {
         r#"{"node":"Calc","op":"to_nth_power","param":"99","x":0,"y":0}"#).unwrap();
     assert_eq!(s, 400, "n out of range must be rejected");
 
-    // Disabled operations are rejected with their hint.
-    let (s, body) = request(port, "POST", "/api/edit/add_operation",
-        r#"{"node":"Calc","op":"square_root","x":0,"y":0}"#).unwrap();
-    assert_eq!(s, 400);
-    assert!(body.contains("roadmap"), "{body}");
+    // square_root drops as a sqrt intrinsic with a float64 result local.
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Calc","op":"square_root","x":0,"y":264.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Calc", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][3]["body"], "sqrt(p3_1)");
+    let sq_local = d["locals"].as_array().unwrap()
+        .iter().find(|l| l["name"] == "square_root3").unwrap();
+    assert_eq!(sq_local["type"]["kind"], "Float64");
+    assert_eq!(d["equations"][3]["symbol"]["kind"], "op");
+    assert_eq!(d["equations"][3]["symbol"]["text"], "sqrt");
+
+    // Two-argument Float Math drops join both pins.
+    post_ok(port, "/api/edit/add_operation",
+        r#"{"node":"Calc","op":"atan2","x":0,"y":336.0}"#);
+    let (_, body) = request(port, "GET", "/api/diagram?node=Calc", "").unwrap();
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["equations"][4]["body"], "atan2(p4_1, p4_2)");
 }
 
 // --- Constant blocks + SCADE-style symbol descriptors -------------------------

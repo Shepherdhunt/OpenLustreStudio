@@ -755,6 +755,21 @@ impl Parser {
                             arg: Box::new(args.pop().unwrap()),
                         });
                     }
+                    // Float math intrinsics: `sqrt(x)`, `atan2(y, x)`, … —
+                    // these names are reserved in call position.
+                    if let Some(fop) = ol_ir::FloatOp::from_name(&name) {
+                        if args.len() != fop.arity() {
+                            return Err(ParseError::Expected {
+                                expected: format!(
+                                    "{} argument{} for `{name}(...)`",
+                                    fop.arity(),
+                                    if fop.arity() == 1 { "" } else { "s" }
+                                ),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        return Ok(Expr::FloatIntrinsic { op: fop, args });
+                    }
                     Ok(Expr::call(name, args))
                 } else if matches!(self.peek(), Some(Tok::LBrace)) {
                     // Record literal `Name { field: value, … }`.

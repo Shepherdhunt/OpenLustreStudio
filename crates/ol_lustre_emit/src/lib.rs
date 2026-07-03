@@ -266,6 +266,18 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             };
             (s, 100)
         }
+        // Float intrinsics print function-style in both views. In the Kind 2
+        // view (where floats are unbounded `real`) they follow the `bit_and`
+        // convention: the user supplies matching Lustre functions when
+        // proving models that use them.
+        Expr::FloatIntrinsic { op, args } => {
+            let parts = args
+                .iter()
+                .map(|a| format_expr_prec(a, 0, lustre))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("{}({parts})", op.name()), 100)
+        }
         // Array iterators print function-style and round-trip through the
         // parser. The Kind 2 view uses the same text — iterator bodies are
         // not yet lowered for proving (roadmap, like the bit-op convention).

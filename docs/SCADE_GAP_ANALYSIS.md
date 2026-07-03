@@ -19,7 +19,17 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **State machines are operator-owned.** A
+**Landed recently (newest first):** **Float intrinsics (2026-07-03).** The
+`<math.h>` double family is first-class: `sqrt sin cos tan asin acos atan
+atan2 exp log log10 pow floor ceil round abs min max` as
+`Expr::FloatIntrinsic`, float64-only (explicit `float64(x)` casts in/out —
+E0160/E0161), agreeing across parser/formatter, typecheck, clock calculus,
+IR simulation (f64 = the same libm doubles C calls), generated C
+(`<math.h>` + `-lm`), contract monitors, and the Kind 2 view (function-call
+convention like `bit_and`). `square_root` is un-greyed and a **Float Math**
+toolbox family drops all of them; dual-backend equivalence pinned on the
+exactly-rounded subset (`tests/float_intrinsics.rs`). Before that:
+**State machines are operator-owned.** A
 machine now belongs to exactly one operator and *is* its body: `StateMachineDef`
 gained an `owner`, and lowering merges an owned machine's state/transition/output
 logic into that operator's node (it drives the operator's outputs) — no separate
@@ -104,10 +114,9 @@ symbols; typed wire labels.
    *Also:* **composite constant values** — array/struct/string (`char[]`)
    constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
    scalar constants parse) plus a `char` type; scalar constants already work.
-2. **Float intrinsics** (P1, small, self-contained) — un-grey `square_root` and
-   add `sin/cos/abs/min/max…` as a float-intrinsics family agreeing across sim,
-   generated C (`<math.h>`), and the Kind 2 view. Mirrors the `numeric_cast`
-   pattern.
+2. ~~Float intrinsics~~ — **landed 2026-07-03** (see §6); float32-native
+   variants (`sqrtf` & friends) remain conscious roadmap — today float32
+   casts through float64 explicitly.
 3. **Tool Operational Requirements document** (P1 if certification-adjacent) —
    the last piece of the verification-by-equivalence story (§4); pure docs, the
    test suite already being the verification evidence.
@@ -205,6 +214,40 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-03 — float intrinsics: the `<math.h>` double family, end to end
+
+`square_root` stops being the greyed-out chip. `Expr::FloatIntrinsic { op, args }`
+(`ol_ir::FloatOp`: sqrt, sin, cos, tan, asin, acos, atan, atan2, exp, log,
+log10, pow, floor, ceil, round, abs, min, max) flows through every stage:
+
+* **Semantics: float64 only.** Operands and result are `float64`; a float32
+  or integer operand is **E0161** with the explicit-cast hint
+  (`sqrt(float64(x))`), wrong arity is **E0160** (also caught at parse
+  time). This keeps the profile's no-implicit-conversion rule *and* makes
+  the backends agree exactly: the simulator computes in Rust `f64` (the
+  platform libm — the same functions the C calls), the generated C calls
+  the `<math.h>` double family (`abs/min/max` → `fabs/fmin/fmax`), and
+  `round` is half-away-from-zero on both. The generated header includes
+  `<math.h>`; the emitted Makefile, the scenario harness, and the in-GUI
+  compile all link `-lm` on POSIX.
+* **Surface syntax** is function-style and round-trips
+  (`sqrt(x)`, `atan2(y, x)`); the names are reserved in call position only.
+  The Kind 2 view prints the same call text — the `bit_and` convention: the
+  user supplies matching Lustre `real` functions when proving.
+* **Authoring**: `square_root` enabled in Mathematics; a new **Float Math**
+  toolbox family drops the rest with typed `float64` pins (two pins for
+  `atan2/pow/min/max`); the diagram symbol is the function name; contract
+  monitors emit the same C calls.
+* **Tests** (`tests/float_intrinsics.rs`): parse/format round-trip, the
+  E0160/E0161 rules, exact-value simulation for the exactly-rounded subset
+  (sqrt/abs/min/max/floor/ceil/round/pow on representable decimals),
+  tolerance-checked transcendentals, generated-C content, and the
+  dual-backend IR-vs-compiled-C equivalence run — the byte-exact scenario
+  uses only the exactly-rounded subset, since libm transcendentals are not
+  correctly-rounded and could differ across platforms by an ulp.
+* Conscious limits, all loud: float32-native variants (`sqrtf`) are
+  roadmap — float32 casts through float64 explicitly today.
 
 ### 2026-06-16 (owned) — state machines are operator-owned
 

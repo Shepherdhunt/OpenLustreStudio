@@ -694,6 +694,8 @@ pub(crate) fn compile_in_dir_defs(
             let out = cmd
                 .args(source_names)
                 .arg("-I.")
+                // Float intrinsics call `<math.h>`; glibc needs an explicit -lm.
+                .arg("-lm")
                 .output()
                 .map_err(|e| format!("invoking {name}: {e}"))?;
             (out, name.to_string())
@@ -792,6 +794,8 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
             .arg(&exe)
             .args(&sources)
             .arg(format!("-I{}", d.display()))
+            // Float intrinsics call `<math.h>`; glibc needs an explicit -lm.
+            .arg("-lm")
             .output()
             .map_err(|e| format!("invoking {name}: {e}"))?,
         #[cfg(windows)]
