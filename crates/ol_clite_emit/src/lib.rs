@@ -305,6 +305,15 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
                 walk_call_targets(a, f);
             }
         }
+        Expr::Case { sel, arms, default } => {
+            walk_call_targets(sel, f);
+            for arm in arms {
+                walk_call_targets(&arm.value, f);
+            }
+            if let Some(d) = default {
+                walk_call_targets(d, f);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -387,6 +396,15 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
         Expr::FloatIntrinsic { args, .. } => {
             for a in args {
                 walk_calls_assign(a, map, idx);
+            }
+        }
+        Expr::Case { sel, arms, default } => {
+            walk_calls_assign(sel, map, idx);
+            for arm in arms {
+                walk_calls_assign(&arm.value, map, idx);
+            }
+            if let Some(d) = default {
+                walk_calls_assign(d, map, idx);
             }
         }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
@@ -681,6 +699,15 @@ fn collect_stateful(
         Expr::FloatIntrinsic { args, .. } => {
             for a in args {
                 collect_stateful(a, call_sites, project, out);
+            }
+        }
+        Expr::Case { sel, arms, default } => {
+            collect_stateful(sel, call_sites, project, out);
+            for arm in arms {
+                collect_stateful(&arm.value, call_sites, project, out);
+            }
+            if let Some(d) = default {
+                collect_stateful(d, call_sites, project, out);
             }
         }
         Expr::Const { .. } | Expr::Var { .. } | Expr::Call { .. } => {}
@@ -1054,6 +1081,32 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let f = if *single { op.c_name_single() } else { op.c_name() };
             (s, format!("{f}({})", arg_strs.join(", ")))
         }
+        // A ternary chain over the C enum constants; the default (or the
+        // last arm, when exhaustive) is the final else — mirroring the
+        // simulator's arm selection exactly.
+        Expr::Case { sel, arms, default } => {
+            let (mut stmts, sv) = lower_anf(sel, ctx);
+            let last = match default {
+                Some(d) => {
+                    let (ds, de) = lower_anf(d, ctx);
+                    stmts.extend(ds);
+                    de
+                }
+                None => {
+                    let (ds, de) = lower_anf(&arms.last().expect("case has arms").value, ctx);
+                    stmts.extend(ds);
+                    de
+                }
+            };
+            let chain = if default.is_some() { &arms[..] } else { &arms[..arms.len() - 1] };
+            let mut expr_s = last;
+            for arm in chain.iter().rev() {
+                let (as_, ae) = lower_anf(&arm.value, ctx);
+                stmts.extend(as_);
+                expr_s = format!("(({sv} == {}) ? {ae} : {expr_s})", c_ident(&arm.variant));
+            }
+            (stmts, expr_s)
+        }
         Expr::Unary { op, arg } => {
             let (s, a) = lower_anf(arg, ctx);
             let r = match op {
@@ -1340,6 +1393,15 @@ fn collect_pre_vars(
             }
             for a in arrays {
                 collect_pre_vars(a, env, out, seen);
+            }
+        }
+        Expr::Case { sel, arms, default } => {
+            collect_pre_vars(sel, env, out, seen);
+            for arm in arms {
+                collect_pre_vars(&arm.value, env, out, seen);
+            }
+            if let Some(d) = default {
+                collect_pre_vars(d, env, out, seen);
             }
         }
         Expr::Const { .. } | Expr::Var { .. } => {}

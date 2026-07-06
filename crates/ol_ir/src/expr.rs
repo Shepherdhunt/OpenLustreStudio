@@ -193,6 +193,24 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         single: bool,
     },
+    /// SCADE's `case`: multi-way selection on an enum value. Surface syntax
+    /// is `case(sel, VariantA: eA, VariantB: eB, _: dflt)` — each arm names
+    /// a variant of `sel`'s enum type, and without a `_` default the arms
+    /// must cover every variant. Renders as an if-chain in the Kind 2 view
+    /// and a ternary chain in generated C.
+    Case {
+        sel: Box<Expr>,
+        arms: Vec<CaseArm>,
+        default: Option<Box<Expr>>,
+    },
+}
+
+/// One `Variant: value` arm of an [`Expr::Case`]. The variant is a label
+/// resolved against the selector's enum type — not a variable.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CaseArm {
+    pub variant: String,
+    pub value: Expr,
 }
 
 /// Which math function an [`Expr::FloatIntrinsic`] applies. Names mirror
@@ -520,6 +538,15 @@ impl Expr {
                         walk(a, f);
                     }
                 }
+                Expr::Case { sel, arms, default } => {
+                    walk(sel, f);
+                    for arm in arms {
+                        walk(&arm.value, f);
+                    }
+                    if let Some(d) = default {
+                        walk(d, f);
+                    }
+                }
             }
         }
         walk(self, &mut f);
@@ -618,6 +645,17 @@ impl Expr {
             Expr::FloatIntrinsic { args, .. } => {
                 for a in args {
                     a.rename_var(from, to);
+                }
+            }
+            // Arm variants are enum labels, not variables — only the selector
+            // and the arm values rename.
+            Expr::Case { sel, arms, default } => {
+                sel.rename_var(from, to);
+                for arm in arms {
+                    arm.value.rename_var(from, to);
+                }
+                if let Some(d) = default {
+                    d.rename_var(from, to);
                 }
             }
         }

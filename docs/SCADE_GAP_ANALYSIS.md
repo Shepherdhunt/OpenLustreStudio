@@ -19,7 +19,16 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Layout pragmas in Lustre
+**Landed recently (newest first):** **`case` + `fby` (2026-07-06):**
+SCADE's multi-way enum selection as `Expr::Case`
+(`case(sel, Off: 0, Low: level, _: d)` — E0170–E0174: enum selector, known
+variants, no duplicates, exhaustive-or-default, agreeing arm types) across
+parser, sim (only the matching arm evaluates), C (ternary chain over enum
+constants), and the Kind 2 if-chain view; the enum type-drop "match" now
+generates a real `case`. `fby(x, init)` parses as sugar for `init -> pre x`.
+Enum values now cross the **CSV boundary by variant name** in both backends
+(IR parse + C driver strcmp/print chains), so enum-interface nodes are
+dual-backend testable. Before that: **Layout pragmas in Lustre
 (2026-07-06):** emitted `.lus` files carry `(*@layout <Node> {json} @*)`
 block-comment pragmas (positions/sizes/wrap/grid — the model's
 `DiagramLayout` as JSON); the importer reads them back, so a `.lus` file
@@ -255,6 +264,39 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (case/fby) — SCADE's `case` and `fby`, plus enum CSV I/O
+
+Two predefined operators every real SCADE model uses:
+
+* **`case`** — multi-way selection on an enum:
+  `case(mode, Off: 0, Low: level, High: level * 2)` or with a `_:` default.
+  `Expr::Case { sel, arms, default }` flows through every stage: parser
+  (arms are `label: expr` pairs; default must be last, at most one),
+  typechecker (**E0170** non-enum selector, **E0171** unknown variant,
+  **E0172** duplicate arm, **E0173** non-exhaustive without default — the
+  SCADE-strict rule, **E0174** arms disagreeing in type), clock calculus
+  (all operands on the site's clock), evaluation order (all arms are
+  same-cycle reads), the simulator (only the matching arm evaluates — like
+  merge, inactive branches must not advance state), the C emitter (a
+  ternary chain over the C enum constants), monitors, and the Kind 2 view
+  (the equivalent if-chain — standard Lustre). The enum type-drop's
+  **match** action now generates a real `case` (exhaustive by
+  construction) instead of a hand-built if-chain; the diagram symbol is
+  `CASE`.
+* **`fby(x, init)`** — SCADE's followed-by as parse sugar for
+  `init -> pre x` (same IR, so FBY still renders as the compact block);
+  the delayed flow must be a variable, per the profile's `pre <var>` rule.
+* **Enum values cross the CSV boundary by name** — the gap `case` exposed:
+  the IR simulator now parses enum input columns (validated against the
+  enum's variants, loud on unknowns) and the generated C driver reads
+  variant names via a `strcmp` chain and prints them back via a ternary
+  chain — so enum-interface nodes are dual-backend testable and the traces
+  stay byte-identical.
+* Tests (`tests/case_and_fby.rs`): parse/format round-trip and loud parse
+  errors, all five E-codes, arm-selection + fby simulation, generated-C
+  content, and the IR-vs-compiled-C equivalence run over an enum-driven
+  model.
 
 ### 2026-07-06 (layout) — diagram geometry rides in the Lustre as pragmas
 

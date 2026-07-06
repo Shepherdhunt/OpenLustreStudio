@@ -103,7 +103,7 @@ fn ir_simulator_and_generated_c_lite_agree_byte_for_byte() {
     // 2. Emit C-Lite for the same project plus a CSV driver.
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("EdgeCounter").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp =
         tempdir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("temp dir");

@@ -7,19 +7,22 @@
 
 use std::fmt::Write as _;
 
-use ol_ir::{NodeDef, NodeKind, Type};
+use ol_ir::{NodeDef, NodeKind, Project, Type};
 
-pub fn emit_csv_driver(node: &NodeDef) -> String {
-    emit_csv_driver_with_monitor(node, None)
+pub fn emit_csv_driver(node: &NodeDef, project: &Project) -> String {
+    emit_csv_driver_with_monitor(node, None, project)
 }
 
 /// Generate a CSV driver. If `monitor_contract_name` is `Some(name)`, the
 /// driver also wires in the matching contract monitor and emits
 /// `active_mode` and `violations` columns after the outputs — the same shape
-/// the IR simulator writes when the node has a contract.
+/// the IR simulator writes when the node has a contract. The project supplies
+/// enum definitions so enum-typed I/O reads and writes variant *names*,
+/// matching the IR trace byte for byte.
 pub fn emit_csv_driver_with_monitor(
     node: &NodeDef,
     monitor_contract_name: Option<&str>,
+    project: &Project,
 ) -> String {
     let mut s = String::new();
     let prefix = &node.name;
@@ -73,7 +76,7 @@ pub fn emit_csv_driver_with_monitor(
                     s,
                     "    in.{} = {};",
                     crate::c_ident(&p.name),
-                    parse_expr(&p.ty, "tok")
+                    parse_expr(&p.ty, "tok", project)
                 );
             }
         }
@@ -99,7 +102,7 @@ pub fn emit_csv_driver_with_monitor(
                 let _ = writeln!(
                     s,
                     "    {}",
-                    print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)))
+                    print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)), project)
                 );
             }
         }
@@ -247,20 +250,54 @@ fn dbg_field(ty: &Type, access: &str, name: &str) -> String {
     }
 }
 
-fn parse_expr(ty: &Type, tok: &str) -> String {
+fn parse_expr(ty: &Type, tok: &str, project: &Project) -> String {
     match ty {
         Type::Bool => format!(
             "((strcmp({tok}, \"true\")==0 || strcmp({tok}, \"1\")==0 || strcmp({tok}, \"t\")==0) ? true : false)"
         ),
         Type::Float32 | Type::Float64 => format!("strtod({tok}, NULL)"),
+        // An enum column carries the variant name; a strcmp chain maps it to
+        // the C enum constant. The IR simulator validates every input vector
+        // first, so an unknown token cannot reach a recorded scenario; the
+        // final fallback keeps the driver total.
+        Type::Named { name } => match enum_variants(project, name) {
+            Some(vs) if !vs.is_empty() => {
+                let mut t = vs[0].clone();
+                for v in vs.iter().rev() {
+                    t = format!("(strcmp({tok}, \"{v}\")==0 ? {v} : {t})");
+                }
+                t
+            }
+            _ => format!("({}) strtoll({tok}, NULL, 10)", ty.c_name()),
+        },
         _ => format!("({}) strtoll({tok}, NULL, 10)", ty.c_name()),
     }
 }
 
-fn print_stmt(ty: &Type, expr: &str) -> String {
+fn print_stmt(ty: &Type, expr: &str, project: &Project) -> String {
     match ty {
         Type::Bool => format!("printf({expr} ? \"true\" : \"false\");"),
         Type::Float32 | Type::Float64 => format!("printf(\"%g\", (double){expr});"),
+        // Enum outputs print their variant name — exactly what the IR trace
+        // writes, so the equivalence comparison stays byte-for-byte.
+        Type::Named { name } => match enum_variants(project, name) {
+            Some(vs) if !vs.is_empty() => {
+                let mut t = format!("\"{}\"", vs[vs.len() - 1]);
+                for v in &vs[..vs.len() - 1] {
+                    t = format!("({expr} == {v} ? \"{v}\" : {t})");
+                }
+                format!("printf(\"%s\", {t});")
+            }
+            _ => format!("printf(\"%lld\", (long long){expr});"),
+        },
         _ => format!("printf(\"%lld\", (long long){expr});"),
     }
+}
+
+/// The variant list of a named enum, when the name resolves to one.
+fn enum_variants<'a>(project: &'a Project, name: &str) -> Option<&'a Vec<String>> {
+    project.packages.iter().flat_map(|p| &p.types).find_map(|t| match &t.body {
+        ol_ir::TypeBody::Enum(e) if e.name == name => Some(&e.variants),
+        _ => None,
+    })
 }

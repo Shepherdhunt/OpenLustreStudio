@@ -249,7 +249,7 @@ fn generated_c_for_bit_ops_compiles_and_matches_ir_simulator() {
     };
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("Pack").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp = make_tempdir();
     std::fs::write(tmp.join("openlustre_generated.h"), &bundle.header).unwrap();

@@ -178,7 +178,7 @@ fn array_constant_lookup_agrees_across_backends() {
 
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("ArrayPick").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp = tempdir_in(&PathBuf::from(env!("CARGO_MANIFEST_DIR"))).expect("temp dir");
     let header_path = tmp.join("openlustre_generated.h");

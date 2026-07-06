@@ -218,6 +218,39 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             let e = format_expr_prec(else_branch, 0, lustre);
             (format!("if {c} then {t} else {e}"), 5)
         }
+        // Surface: `case(sel, A: eA, _: d)` (round-trips through the parser).
+        // Kind 2 view: the equivalent if-chain — standard Lustre, with the
+        // default (or the last arm, when exhaustive) as the final else.
+        Expr::Case { sel, arms, default } => {
+            if lustre {
+                let s = format_expr_prec(sel, 0, true);
+                let last = default
+                    .as_deref()
+                    .map(|d| format_expr_prec(d, 0, true))
+                    .unwrap_or_else(|| {
+                        format_expr_prec(&arms.last().expect("case has arms").value, 0, true)
+                    });
+                let chain_arms = if default.is_some() { &arms[..] } else { &arms[..arms.len() - 1] };
+                let mut t = last;
+                for arm in chain_arms.iter().rev() {
+                    t = format!(
+                        "if {s} = {} then {} else {t}",
+                        arm.variant,
+                        format_expr_prec(&arm.value, 0, true)
+                    );
+                }
+                (t, 5)
+            } else {
+                let mut parts = vec![format_expr_prec(sel, 0, false)];
+                for arm in arms {
+                    parts.push(format!("{}: {}", arm.variant, format_expr_prec(&arm.value, 0, false)));
+                }
+                if let Some(d) = default {
+                    parts.push(format!("_: {}", format_expr_prec(d, 0, false)));
+                }
+                (format!("case({})", parts.join(", ")), 100)
+            }
+        }
         Expr::Pre { arg } => (format!("pre {}", format_expr_prec(arg, 80, lustre)), 80),
         Expr::Arrow { init, body } => {
             let i = format_expr_prec(init, 15, lustre);

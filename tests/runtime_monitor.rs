@@ -141,6 +141,7 @@ fn ir_simulator_and_generated_c_monitor_agree_on_violations() {
     let driver = ol_clite_emit::harness::emit_csv_driver_with_monitor(
         entry,
         Some("FaultyLatch_contract"),
+        &project,
     );
 
     let tmp = make_tempdir();

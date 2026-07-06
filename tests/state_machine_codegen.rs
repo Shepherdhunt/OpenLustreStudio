@@ -100,7 +100,7 @@ fn state_machine_ir_sim_and_generated_c_agree_byte_for_byte() {
     // 2. Emit + compile C-Lite with a driver.
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("TrafficLight").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp = make_tempdir();
     std::fs::write(tmp.join("openlustre_generated.h"), &bundle.header).unwrap();
@@ -266,7 +266,7 @@ fn hierarchical_ir_sim_and_generated_c_agree_byte_for_byte() {
 
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("Mode").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp = make_tempdir();
     std::fs::write(tmp.join("openlustre_generated.h"), &bundle.header).unwrap();

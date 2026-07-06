@@ -159,3 +159,7 @@ path = "float_intrinsics.rs"
 [[test]]
 name = "doc_generator"
 path = "doc_generator.rs"
+
+[[test]]
+name = "case_and_fby"
+path = "case_and_fby.rs"

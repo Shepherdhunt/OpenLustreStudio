@@ -750,9 +750,10 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
         ol_clite_emit::harness::emit_csv_driver_with_monitor(
             node,
             node.contract.as_deref(),
+            project,
         )
     } else {
-        ol_clite_emit::harness::emit_csv_driver(node)
+        ol_clite_emit::harness::emit_csv_driver(node, project)
     };
 
     let stamp = std::time::SystemTime::now()

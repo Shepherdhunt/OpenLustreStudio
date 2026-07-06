@@ -120,6 +120,10 @@ impl TypeContext {
         self.enum_variant_to_name.get(variant).map(|s| s.as_str())
     }
 
+    pub fn enum_variants(&self, name: &str) -> Option<&Vec<String>> {
+        self.enums.get(name)
+    }
+
     pub fn const_type(&self, name: &str) -> Option<&Type> {
         self.constants.get(name)
     }
@@ -576,6 +580,15 @@ fn check_pre_initialization(
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
         }
+        Expr::Case { sel, arms, default } => {
+            check_pre_initialization(sel, under_arrow_body, diags, ctx);
+            for arm in arms {
+                check_pre_initialization(&arm.value, under_arrow_body, diags, ctx);
+            }
+            if let Some(d) = default {
+                check_pre_initialization(d, under_arrow_body, diags, ctx);
+            }
+        }
         Expr::Const { .. } | Expr::Var { .. } => {}
     }
 }
@@ -687,6 +700,94 @@ pub fn infer_expr_type(
             } else {
                 None
             }
+        }
+        Expr::Case { sel, arms, default } => {
+            let sel_t = infer_expr_type(sel, env, sigs, node, diags, ctx, tctx, None)?;
+            let enum_name = match tctx.resolve(&sel_t) {
+                Type::Named { name } if tctx.enum_variants(&name).is_some() => name,
+                other => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0170",
+                            format!("`case` selects on an enum, got {other:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            };
+            let variants = tctx.enum_variants(&enum_name).cloned().unwrap_or_default();
+            let mut seen: Vec<&str> = Vec::new();
+            for arm in arms {
+                if !variants.iter().any(|v| v == &arm.variant) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0171",
+                            format!(
+                                "`case` arm `{}` is not a variant of enum `{enum_name}` \
+                                 (variants: {})",
+                                arm.variant,
+                                variants.join(", ")
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                }
+                if seen.contains(&arm.variant.as_str()) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0172",
+                            format!("`case` arm `{}` appears twice", arm.variant),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                }
+                seen.push(&arm.variant);
+            }
+            if default.is_none() {
+                let missing: Vec<&str> = variants
+                    .iter()
+                    .map(|v| v.as_str())
+                    .filter(|v| !seen.contains(v))
+                    .collect();
+                if !missing.is_empty() {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0173",
+                            format!(
+                                "`case` on `{enum_name}` is not exhaustive: missing {} — \
+                                 add the arm(s) or a `_:` default",
+                                missing.join(", ")
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                }
+            }
+            // All arms (and the default) must agree on one result type.
+            let mut result: Option<Type> = None;
+            let values = arms
+                .iter()
+                .map(|a| &a.value)
+                .chain(default.as_deref());
+            for v in values {
+                let t = infer_expr_type(v, env, sigs, node, diags, ctx, tctx, hint.or(result.as_ref()))?;
+                match &result {
+                    None => result = Some(t),
+                    Some(r) if types_compatible(tctx, r, &t) => {}
+                    Some(r) => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0174",
+                                format!("`case` arms disagree in type: {r:?} vs {t:?}"),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            result
         }
         Expr::Var { name } => match env.get(name) {
             Some(t) => Some(t.clone()),
@@ -1518,6 +1619,15 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
             out.insert(clock.clone());
             collect_immediate_deps(on_true, out);
             collect_immediate_deps(on_false, out);
+        }
+        Expr::Case { sel, arms, default } => {
+            collect_immediate_deps(sel, out);
+            for arm in arms {
+                collect_immediate_deps(&arm.value, out);
+            }
+            if let Some(d) = default {
+                collect_immediate_deps(d, out);
+            }
         }
         // The iterated function is stateless: its seed and arrays are
         // same-cycle reads (the function name is not a variable).

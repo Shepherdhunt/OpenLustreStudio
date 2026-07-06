@@ -664,6 +664,55 @@ impl Parser {
                     return Ok(Expr::if_then_else(cond, then_branch, else_branch));
                 }
                 self.bump();
+                // `case(sel, VariantA: eA, VariantB: eB, _: dflt)` — arms are
+                // `label: expr` pairs, so they parse here, not as arguments.
+                if name == "case" && matches!(self.peek(), Some(Tok::LParen)) {
+                    self.bump();
+                    let sel = self.parse_expr()?;
+                    let mut arms = Vec::new();
+                    let mut default: Option<Box<Expr>> = None;
+                    while matches!(self.peek(), Some(Tok::Comma)) {
+                        self.bump();
+                        let label = match self.bump() {
+                            Some(Tok::Ident(v)) => v,
+                            other => {
+                                return Err(ParseError::Expected {
+                                    expected: "a variant name (or `_`) in `case` arm".into(),
+                                    found: other
+                                        .map(|t| t.describe())
+                                        .unwrap_or_else(|| "<eof>".into()),
+                                })
+                            }
+                        };
+                        self.expect(&Tok::Colon)?;
+                        let value = self.parse_expr()?;
+                        if label == "_" {
+                            if default.is_some() {
+                                return Err(ParseError::Expected {
+                                    expected: "at most one `_:` default in `case`".into(),
+                                    found: "a second default".into(),
+                                });
+                            }
+                            default = Some(Box::new(value));
+                        } else {
+                            if default.is_some() {
+                                return Err(ParseError::Expected {
+                                    expected: "the `_:` default to be the last `case` arm".into(),
+                                    found: format!("arm `{label}` after it"),
+                                });
+                            }
+                            arms.push(ol_ir::CaseArm { variant: label, value });
+                        }
+                    }
+                    self.expect(&Tok::RParen)?;
+                    if arms.is_empty() {
+                        return Err(ParseError::Expected {
+                            expected: "at least one `Variant: expr` arm in `case`".into(),
+                            found: "none".into(),
+                        });
+                    }
+                    return Ok(Expr::Case { sel: Box::new(sel), arms, default });
+                }
                 // Function/operator call?
                 if matches!(self.peek(), Some(Tok::LParen)) {
                     self.bump();
@@ -717,6 +766,31 @@ impl Parser {
                         let init = it.next().unwrap();
                         let array = it.next().unwrap();
                         return Ok(Expr::fold(iter_node, init, array));
+                    }
+                    // SCADE's followed-by, depth 1: `fby(x, init)` is sugar
+                    // for `init -> pre x`. The delayed flow must be a
+                    // variable — the profile's `pre <var>` rule.
+                    if name == "fby" {
+                        if args.len() != 2 {
+                            return Err(ParseError::Expected {
+                                expected: "fby(x, init)".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        let init = args.pop().unwrap();
+                        let x = args.pop().unwrap();
+                        if !matches!(x, Expr::Var { .. }) {
+                            return Err(ParseError::Expected {
+                                expected: "a variable as fby's first argument \
+                                           (`pre` of a complex expression is roadmap)"
+                                    .into(),
+                                found: ol_ir_expr_describe(&x),
+                            });
+                        }
+                        return Ok(Expr::Arrow {
+                            init: Box::new(init),
+                            body: Box::new(Expr::Pre { arg: Box::new(x) }),
+                        });
                     }
                     // `merge(c, a, b)` joins two complementary clocked
                     // streams; the clock must be a variable name.

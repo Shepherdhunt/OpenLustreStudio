@@ -174,7 +174,7 @@ fn generated_c_for_consts_compiles_and_runs() {
     let project = gate_project();
     let bundle = ol_clite_emit::emit_project(&project);
     let entry = project.find_node("Gate").unwrap();
-    let driver = ol_clite_emit::harness::emit_csv_driver(entry);
+    let driver = ol_clite_emit::harness::emit_csv_driver(entry, &project);
 
     let tmp = make_tempdir();
     std::fs::write(tmp.join("openlustre_generated.h"), &bundle.header).unwrap();

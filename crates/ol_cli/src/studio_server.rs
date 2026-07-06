@@ -701,7 +701,7 @@ fn build_driver(ctx: &ServerCtx) -> Result<String, String> {
     let entry = project
         .find_node(&entry_name)
         .ok_or_else(|| format!("main operator `{entry_name}` not found"))?;
-    Ok(ol_clite_emit::harness::emit_csv_driver(entry))
+    Ok(ol_clite_emit::harness::emit_csv_driver(entry, &project))
 }
 
 fn build_makefile(ctx: &ServerCtx) -> Result<String, String> {
@@ -788,6 +788,7 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
             "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
+        Expr::Case { .. } => op("CASE"),
         Expr::FloatIntrinsic { op: fop, single, .. } => {
             if *single { op(&fop.single_name()) } else { op(fop.name()) }
         }
@@ -3400,13 +3401,16 @@ fn add_type_op_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
             if ol_stdlib::parse_type(&result_ty).is_err() {
                 return bad(&format!("match result type `{result_ty}` is not a valid type"));
             }
-            // selector p_PIN_1, then one value pin per variant (p_PIN_2..).
-            let n = e.variants.len();
-            let mut expr = format!("p_PIN_{}", n + 1);
-            for i in (0..n.saturating_sub(1)).rev() {
-                expr = format!("if p_PIN_1 = {} then p_PIN_{} else {expr}", e.variants[i], i + 2);
-            }
-            vec![("match".into(), result_ty, expr)]
+            // A real `case`: selector p_PIN_1, one value pin per variant
+            // (p_PIN_2..) — exhaustive by construction, checked by E0173.
+            let arms = e
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(i, v)| format!("{v}: p_PIN_{}", i + 2))
+                .collect::<Vec<_>>()
+                .join(", ");
+            vec![("match".into(), result_ty, format!("case(p_PIN_1, {arms})"))]
         }
         _ => {
             return bad(&format!(
@@ -3892,9 +3896,9 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     let bundle = ol_clite_emit::emit_project(&project);
     let has_contract = entry.contract.is_some();
     let driver = if has_contract {
-        ol_clite_emit::harness::emit_csv_driver_with_monitor(&entry, entry.contract.as_deref())
+        ol_clite_emit::harness::emit_csv_driver_with_monitor(&entry, entry.contract.as_deref(), &project)
     } else {
-        ol_clite_emit::harness::emit_csv_driver(&entry)
+        ol_clite_emit::harness::emit_csv_driver(&entry, &project)
     };
     let mut wrote = vec![
         ("openlustre_generated.h", bundle.header),

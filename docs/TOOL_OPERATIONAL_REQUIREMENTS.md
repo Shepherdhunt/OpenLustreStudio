@@ -51,7 +51,7 @@ openlustre studio …         the GUI (same headless endpoints underneath)
 Each requirement is stated as a claim the tool makes. **Evidence** names the
 test files (under `tests/`) and, where relevant, the diagnostic codes that
 make a violation loud rather than silent. Diagnostics carry stable codes
-(`E0001`–`E0161` today) so review checklists can reference them.
+(`E0001`–`E0174` today) so review checklists can reference them.
 
 ### TOR-1 — Model well-formedness (type system)
 

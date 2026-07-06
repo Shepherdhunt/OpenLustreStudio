@@ -244,6 +244,23 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         // Iterators don't appear in boolean contracts; lower to a neutral
         // value so the monitor still compiles if one ever does.
         Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
+        // A ternary chain over the C enum constants, like the main emitter.
+        Expr::Case { sel, arms, default } => {
+            let sv = emit_mon_expr(sel, scope);
+            let mut t = match default {
+                Some(d) => emit_mon_expr(d, scope),
+                None => emit_mon_expr(&arms.last().expect("case has arms").value, scope),
+            };
+            let chain = if default.is_some() { &arms[..] } else { &arms[..arms.len() - 1] };
+            for arm in chain.iter().rev() {
+                t = format!(
+                    "(({sv} == {}) ? {} : {t})",
+                    crate::c_ident(&arm.variant),
+                    emit_mon_expr(&arm.value, scope)
+                );
+            }
+            t
+        }
         Expr::Field { base, field } => format!("{}.{field}", emit_mon_expr(base, scope)),
         Expr::Index { base, index } => format!(
             "{}[{}]",

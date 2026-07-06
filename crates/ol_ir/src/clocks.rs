@@ -269,6 +269,9 @@ fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clo
             .as_deref()
             .and_then(|i| natural_clock(i, var_clocks))
             .or_else(|| arrays.iter().find_map(|a| natural_clock(a, var_clocks))),
+        Expr::Case { sel, arms, default } => natural_clock(sel, var_clocks)
+            .or_else(|| arms.iter().find_map(|a| natural_clock(&a.value, var_clocks)))
+            .or_else(|| default.as_deref().and_then(|d| natural_clock(d, var_clocks))),
     }
 }
 
@@ -356,6 +359,16 @@ fn check_expr(
         Expr::FloatIntrinsic { args, .. } => {
             for a in args {
                 check_expr(a, expected, var_clocks, eq, info);
+            }
+        }
+        // Like if/then/else: selector and every arm run on the site's clock.
+        Expr::Case { sel, arms, default } => {
+            check_expr(sel, expected, var_clocks, eq, info);
+            for arm in arms {
+                check_expr(&arm.value, expected, var_clocks, eq, info);
+            }
+            if let Some(d) = default {
+                check_expr(d, expected, var_clocks, eq, info);
             }
         }
         Expr::Field { base, .. } => check_expr(base, expected, var_clocks, eq, info),

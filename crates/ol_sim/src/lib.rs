@@ -379,7 +379,7 @@ impl<'a> Sim<'a> {
             let mut inputs = BTreeMap::new();
             for (i, p) in self.node.inputs.iter().enumerate() {
                 let raw = fields.get(i).copied().unwrap_or("").trim();
-                let v = parse_value(raw, &p.ty).map_err(|_| SimError::ParseError {
+                let v = parse_value(raw, &p.ty, self.project).map_err(|_| SimError::ParseError {
                     value: raw.into(),
                     col: p.name.clone(),
                     ty: p.ty.clone(),
@@ -495,7 +495,7 @@ fn enum_variant_value(name: &str, project: &Project) -> Option<Value> {
     None
 }
 
-fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
+fn parse_value(raw: &str, ty: &Type, project: &Project) -> Result<Value, ()> {
     match ty {
         Type::Bool => match raw.to_ascii_lowercase().as_str() {
             "true" | "1" | "t" => Ok(Value::Bool(true)),
@@ -504,6 +504,25 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
         },
         t if t.is_float() => raw.parse::<f64>().map(Value::Float).map_err(|_| ()),
         t if t.is_integer() => raw.parse::<i64>().map(Value::Int).map_err(|_| ()),
+        // An enum input reads its variant name — the same text `Value::to_csv`
+        // writes, so enum-interface traces round-trip. Unknown variants are a
+        // parse error, never a silent default.
+        Type::Named { name } => {
+            let variants = project
+                .packages
+                .iter()
+                .flat_map(|p| &p.types)
+                .find_map(|t| match &t.body {
+                    ol_ir::TypeBody::Enum(e) if &e.name == name => Some(&e.variants),
+                    _ => None,
+                })
+                .ok_or(())?;
+            if variants.iter().any(|v| v == raw) {
+                Ok(Value::Enum(raw.to_string()))
+            } else {
+                Err(())
+            }
+        }
         // Arrays at the CSV boundary use `[e0;e1;…]` — the same bracketed,
         // semicolon-separated form `Value::to_csv` produces, so traces
         // round-trip and the generated C driver can match byte-for-byte.
@@ -523,7 +542,7 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
             }
             let mut vals = Vec::with_capacity(parts.len());
             for p in parts {
-                vals.push(parse_value(p.trim(), elem)?);
+                vals.push(parse_value(p.trim(), elem, project)?);
             }
             Ok(Value::Array(vals))
         }
@@ -940,6 +959,28 @@ fn eval(
                 FloatOp::Max => x.max(vals[1]),
             };
             Ok(Value::Float(r))
+        }
+        // Only the matching arm evaluates — like if/then/else and merge,
+        // inactive branches must not run.
+        Expr::Case { sel, arms, default } => {
+            let sv = eval(sel, env, state, call_states, project, site_clocks, cov)?;
+            let variant = match &sv {
+                Value::Enum(v) => v.clone(),
+                other => {
+                    return Err(SimError::EvalError(format!(
+                        "`case` selector is not an enum value: {other:?}"
+                    )))
+                }
+            };
+            if let Some(arm) = arms.iter().find(|a| a.variant == variant) {
+                eval(&arm.value, env, state, call_states, project, site_clocks, cov)
+            } else if let Some(d) = default {
+                eval(d, env, state, call_states, project, site_clocks, cov)
+            } else {
+                Err(SimError::EvalError(format!(
+                    "`case` has no arm for variant `{variant}` and no `_:` default"
+                )))
+            }
         }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, site_clocks, cov),
         Expr::Field { base, field } => {
