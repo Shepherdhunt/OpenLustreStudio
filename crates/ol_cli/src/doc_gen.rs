@@ -263,6 +263,13 @@ fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
     // The operator-owned state machine, if any.
     for m in pkg.state_machines.iter().filter(|m| m.owner.as_deref() == Some(&n.name)) {
         let _ = write!(out, "<h3>State machine: {}</h3>\n", esc(&m.name));
+        if !m.signals.is_empty() {
+            let _ = write!(
+                out,
+                "<p><span class=\"meta\">signals: <code>{}</code></span></p>\n",
+                esc(&m.signals.join(", "))
+            );
+        }
         out.push_str("<table><tr><th>State</th><th>Transitions</th><th>Equations</th></tr>\n");
         for s in &m.states {
             let marker = if s.name == m.initial_state { " <b>(initial)</b>" } else { "" };
@@ -288,6 +295,7 @@ fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
                         esc(&ol_lustre_emit::format_expr(&e.rhs))
                     )
                 })
+                .chain(s.emits.iter().map(|sig| format!("emit {}", esc(sig))))
                 .collect::<Vec<_>>()
                 .join("<br>");
             let _ = write!(

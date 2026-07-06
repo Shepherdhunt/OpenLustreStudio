@@ -19,7 +19,21 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **SysML 2.0 association groundwork +
+**Landed recently (newest first):** **Automata signals + refine-with-history
+(2026-07-06):** SCADE-style **signals** — a machine declares boolean events
+(`StateMachineDef.signals`), states emit them (`StateDef.emits`), and a
+signal is `true` exactly while an emitting state is active (same-cycle
+broadcast; readable in any guard or state equation, including the emitting
+state's own exit guard). Lowered to ordinary bool locals + or-chain
+equations, so sim/C/Kind 2/monitors need nothing new. Signals of a refined
+sub-machine merge into the parent on resolution (a parent equation can read
+a nested emitter). Validation: undeclared emission, duplicate declaration,
+and clashes with ports/locals/state names are lowering errors. **`refine M
+with history`** (`StateDef.refine_history`) — the delegated machine resumes
+at the sub-state held on exit instead of restarting. Textual editor grammar:
+a signals field, `emit name` state segments, `refine M with history`; all
+round-trip `/api/fsm`, and diff/doc report signals and emissions. Before
+that: **SysML 2.0 association groundwork +
 clause-level trace links (2026-07-06):** operators can name the SysML 2.0
 model (and element) they realize — `NodeDef.sysml` (`SysmlRef {model,
 element}`), edited via right-click ▸ SysML Model… (journaled), shown on tree
@@ -250,7 +264,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). Remaining: signals, and richer parallel/history UI (a state's inline nested-region authoring beyond `refine`) | P2 |
+| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). **2026-07-06**: **signals** landed (declare in the machine, `emit name` in states, same-cycle broadcast readable in guards/equations, merged across refinement) and **`refine M with history`** is authorable in the editor. Remaining: a state's inline nested-region authoring beyond `refine` (multi-region parallel states in the textual grammar) | P3 (was P2) |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
@@ -296,6 +310,41 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (signals+history) — automaton signals, refine with history
+
+**Signals** (SCADE's local boolean events): `StateMachineDef.signals`
+declares them; `StateDef.emits` raises them. Semantics: a signal is `true`
+exactly while a state that emits it is active — same-cycle broadcast, so a
+guard can read the signal its own state emits and a parent state's equation
+can read what a nested (refined) state emits; signals of an inlined
+sub-machine merge into the parent's set on `resolve_refines`. Lowering is
+deliberately boring: each signal becomes a bool local with one equation (the
+or-chain of `region_active and state = S` over its emitters, `false` if
+never emitted), so the simulator, generated C, Kind 2 view, and monitors all
+handle it with zero new code. Validation at lowering: `UnknownSignal`
+(emission of an undeclared name), `DuplicateSignal`, `SignalClash` (a signal
+may not shadow an input/output/local or a state name — states are enum
+variants referenced by bare name).
+
+**`refine M with history`**: `StateDef.refine_history` — the region created
+for the delegation resumes at the sub-state held on exit (the existing
+history lowering) instead of restarting at the sub-machine's initial state.
+
+Authoring: the FSM editor gained a **signals** field (comma list), `emit
+name` state-line segments, and `refine M with history`; the keyword preview
+highlights both, the diagram labels emitters, and everything round-trips
+`/api/fsm` (`signals`, per-state `emits`, `refine_history`). YAML library
+blocks accept `signals:` / `emits:` too. `openlustre diff` includes signal
+lists in the machine description; the design document prints the machine's
+signals and each state's emissions.
+
+Tests: `tests/state_machines.rs` (same-cycle emission trace, guard reading
+its own state's signal, sub-machine signal read from the parent after
+refinement, history-vs-restart resume traces, the three validation errors)
+and `tests/studio_workspace_types.rs` (API round-trip, undeclared-emission
+400, refining operator builds). GUI grammar browser-verified (author with
+`emit`/`with history`, save, reload round-trips the form).
 
 ### 2026-07-06 (sysml+clauses) — SysML 2.0 association groundwork, clause-level trace links
 

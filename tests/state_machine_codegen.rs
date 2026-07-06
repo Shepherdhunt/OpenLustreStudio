@@ -34,6 +34,8 @@ fn traffic_light_project() -> Project {
         ],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -52,6 +54,7 @@ fn traffic_light_project() -> Project {
             make_state("Green", true, false, "Yellow"),
             make_state("Yellow", false, true, "Red"),
         ],
+        signals: vec![],
         contract: None,
         owner: None,
     };
@@ -177,6 +180,8 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let hi = StateDef {
         name: "Hi".into(),
@@ -184,6 +189,8 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -194,6 +201,8 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let active = StateDef {
         name: "Active".into(),
@@ -201,6 +210,8 @@ fn mode_project() -> Project {
         transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
         regions: vec![Region { initial_state: "Lo".into(), states: vec![lo, hi], history: false }],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "Mode".into(),
@@ -216,6 +227,7 @@ fn mode_project() -> Project {
         locals: vec![],
         initial_state: "Idle".into(),
         states: vec![idle, active],
+        signals: vec![],
         contract: None,
         owner: None,
     };

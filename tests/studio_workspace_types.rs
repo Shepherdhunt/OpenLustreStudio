@@ -560,6 +560,96 @@ fn state_machine_create_is_rejected_unless_it_translates_cleanly() {
     assert_eq!(bd["ok"], true, "the valid machine's operator builds: {bd}");
 }
 
+/// Signals and refine-history through the Studio API: a machine declares
+/// boolean signals, states emit them, guards/equations read them; a state can
+/// `refine` another operator's machine `with history`. Everything round-trips
+/// through `/api/fsm`, undeclared emissions are rejected, and the owning
+/// operators build.
+#[test]
+fn state_machine_signals_and_refine_history_round_trip_the_api() {
+    let g = start_server_on_workspace("ws_sm_signals");
+    let port = g.port;
+
+    // Beacon(pulse) returns (light, flash): ON emits `blink`; both states
+    // mirror the signal into `flash`; ON's exit guard reads it.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Beacon","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"input","name":"pulse","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"output","name":"light","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Beacon","side":"output","name":"flash","type":"bool"}"#);
+    let beacon = |signals: &str| -> String {
+        format!(
+            r#"{{"name":"BeaconSM","operator":"Beacon","initial_state":"Off",
+                 "inputs":[{{"name":"pulse","type":"bool"}}],
+                 "outputs":[{{"name":"light","type":"bool"}},{{"name":"flash","type":"bool"}}],
+                 "signals":{signals},
+                 "states":[
+                   {{"name":"Off","equations":[{{"lhs":"light","body":"false"}},{{"lhs":"flash","body":"blink"}}],
+                     "transitions":[{{"guard":"pulse","target":"On"}}]}},
+                   {{"name":"On","equations":[{{"lhs":"light","body":"true"}},{{"lhs":"flash","body":"blink"}}],
+                     "transitions":[{{"guard":"pulse and blink","target":"Off"}}],
+                     "emits":["blink"]}}
+                 ]}}"#
+        )
+    };
+
+    // Emitting (and reading) an undeclared signal is a loud 400.
+    let (s, body) = request(port, "POST", "/api/edit/add_state_machine", &beacon("[]")).expect("bad");
+    assert_eq!(s, 400, "undeclared signal must be rejected: {body}");
+    assert!(body.contains("blink"), "error names the signal: {body}");
+
+    post_ok(port, "/api/edit/add_state_machine", &beacon(r#"["blink"]"#));
+
+    // The declaration and emissions round-trip through the editor endpoint.
+    let m = get_json(port, "/api/fsm?name=BeaconSM");
+    assert_eq!(m["signals"], serde_json::json!(["blink"]), "{m}");
+    let on = m["states"].as_array().unwrap().iter().find(|s| s["name"] == "On").unwrap();
+    assert_eq!(on["emits"], serde_json::json!(["blink"]), "{on}");
+
+    // The operator builds — the signal is an ordinary local in the Lustre.
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Beacon"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "{bd}");
+    assert!(bd["lustre"].as_str().unwrap().contains("blink"), "signal in lustre: {bd}");
+
+    // Refine with history: SpinOp's machine nests inside ModeOp's Active state.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"SpinOp","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"SpinOp","side":"input","name":"tick","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"SpinOp","side":"output","name":"level","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_state_machine",
+        r#"{"name":"Spin","operator":"SpinOp","initial_state":"Lo",
+            "inputs":[{"name":"tick","type":"bool"}],
+            "outputs":[{"name":"level","type":"int32"}],
+            "states":[
+              {"name":"Lo","equations":[{"lhs":"level","body":"1"}],"transitions":[{"guard":"tick","target":"Hi"}]},
+              {"name":"Hi","equations":[{"lhs":"level","body":"2"}],"transitions":[{"guard":"tick","target":"Lo"}]}
+            ]}"#);
+    post_ok(port, "/api/edit/add_node", r#"{"name":"ModeOp","kind":"operator"}"#);
+    for p in [r#"{"node":"ModeOp","side":"input","name":"go","type":"bool"}"#,
+              r#"{"node":"ModeOp","side":"input","name":"stop","type":"bool"}"#,
+              r#"{"node":"ModeOp","side":"input","name":"tick","type":"bool"}"#,
+              r#"{"node":"ModeOp","side":"output","name":"level","type":"int32"}"#] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    post_ok(port, "/api/edit/add_state_machine",
+        r#"{"name":"ModeSM","operator":"ModeOp","initial_state":"Idle",
+            "inputs":[{"name":"go","type":"bool"},{"name":"stop","type":"bool"},{"name":"tick","type":"bool"}],
+            "outputs":[{"name":"level","type":"int32"}],
+            "states":[
+              {"name":"Idle","equations":[{"lhs":"level","body":"0"}],"transitions":[{"guard":"go","target":"Active"}]},
+              {"name":"Active","equations":[],"transitions":[{"guard":"stop","target":"Idle"}],
+               "refines":"Spin","refine_history":true}
+            ]}"#);
+    let m = get_json(port, "/api/fsm?name=ModeSM");
+    let active = m["states"].as_array().unwrap().iter().find(|s| s["name"] == "Active").unwrap();
+    assert_eq!(active["refines"], "Spin", "{active}");
+    assert_eq!(active["refine_history"], true, "history flag round-trips: {active}");
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"ModeOp"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "refining operator builds: {bd}");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

@@ -635,7 +635,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry.</p>
+    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry; add <code class="inline">with history</code> (<code class="inline">Active: refine Spin with history</code>) to resume where it left off instead. <strong>Signals:</strong> declare boolean events in the signals field and mark states with <code class="inline">emit name</code> (e.g. <code class="inline">Green: go = true; emit crossing</code>) — a signal is true exactly while an emitting state is active and any guard or state equation can read it.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -647,6 +647,9 @@
         <label>name</label><input id="fsm-name" placeholder="Lights">
         <label>operator</label><select id="fsm-operator" onchange="fsmOperatorChanged()"></select>
         <label>initial</label><input id="fsm-initial" placeholder="Red" oninput="fsmPreview()">
+      </div>
+      <div class="row">
+        <label>signals</label><input id="fsm-signals" style="flex:1" oninput="fsmPreview()" placeholder="comma-separated boolean events, e.g. crossing, alarm (optional)" title="A signal is true exactly while a state that emits it is active; guards and equations can read it">
       </div>
       <div class="row">
         <label>inputs</label><input id="fsm-inputs" style="flex:1" readonly title="the owning operator's inputs" placeholder="(from the operator)">
@@ -3583,7 +3586,10 @@ function renderFsm(m) {
     svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="30" class="box"' +
       (initial ? ' stroke="#107c10" stroke-width="2.4"' : '') + '/>';
     svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
-    const eqs = st.equations.map(e => e.lhs + " = " + e.body).join("; ");
+    const parts = st.equations.map(e => e.lhs + " = " + e.body)
+      .concat((st.emits || []).map(s => "emit " + s));
+    if (st.refines) parts.unshift("refine " + st.refines + (st.refine_history ? " (history)" : ""));
+    const eqs = parts.join("; ");
     svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
       escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
   }
@@ -3613,17 +3619,22 @@ function fsmBuildPayload() {
     if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr` or `Name: refine Machine` — got: " + t); return null; }
     const name = t.slice(0, ci).trim();
     const eqs = [];
-    let refines = null;
+    const emits = [];
+    let refines = null, refineHistory = false;
     for (const seg of t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean)) {
-      // `refine Machine` delegates this state to another state machine.
-      const rm = seg.match(/^refine\s+(\w+)$/);
-      if (rm) { refines = rm[1]; continue; }
+      // `refine Machine [with history]` delegates this state to another machine.
+      const rm = seg.match(/^refine\s+(\w+)(\s+with\s+history)?$/);
+      if (rm) { refines = rm[1]; refineHistory = !!rm[2]; continue; }
+      // `emit signal` raises a declared signal while this state is active.
+      const em = seg.match(/^emit\s+(\w+)$/);
+      if (em) { emits.push(em[1]); continue; }
       const ei = seg.indexOf("=");
-      if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr` or `refine Machine` — got: " + seg); return null; }
+      if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr`, `emit signal`, or `refine Machine [with history]` — got: " + seg); return null; }
       eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
     }
     const st = { name, equations: eqs, transitions: [] };
-    if (refines) st.refines = refines;
+    if (refines) { st.refines = refines; if (refineHistory) st.refine_history = true; }
+    if (emits.length) st.emits = emits;
     states[name] = st;
     order.push(name);
   }
@@ -3642,6 +3653,8 @@ function fsmBuildPayload() {
     initial_state: document.getElementById("fsm-initial").value.trim(),
     inputs: parsePortsSpec(document.getElementById("fsm-inputs").value),
     outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
+    signals: document.getElementById("fsm-signals").value
+      .split(",").map(s => s.trim()).filter(Boolean),
     states: order.map(n => states[n]),
   };
 }
@@ -3734,14 +3747,16 @@ function fsmLoadIntoForm(m) {
   if (m.owner && [...opSel.options].some(o => o.value === m.owner)) opSel.value = m.owner;
   opSel.disabled = true; // can't reassign the owner while editing
   document.getElementById("fsm-initial").value = m.initial_state || "";
+  document.getElementById("fsm-signals").value = (m.signals || []).join(", ");
   const ports = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
   document.getElementById("fsm-inputs").value = ports(m.inputs);
   document.getElementById("fsm-outputs").value = ports(m.outputs);
   document.getElementById("fsm-states").value = (m.states || [])
     .map(s => {
       const parts = [];
-      if (s.refines) parts.push("refine " + s.refines);
+      if (s.refines) parts.push("refine " + s.refines + (s.refine_history ? " with history" : ""));
       for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
+      for (const sig of (s.emits || [])) parts.push("emit " + sig);
       return s.name + ": " + parts.join("; ");
     })
     .join("\n");
@@ -3763,6 +3778,7 @@ function fsmTemplate(reset) {
   if (reset || !name.value.trim()) name.value = "Lights";
   document.getElementById("fsm-operator").disabled = false;
   document.getElementById("fsm-initial").value = "Red";
+  document.getElementById("fsm-signals").value = "";
   // inputs/outputs are derived from the owning operator (fsmOperatorChanged).
   document.getElementById("fsm-states").value =
     "Red: go = false; warn = false\n" +
@@ -3795,10 +3811,14 @@ function fsmPreview() {
     const body = rest.split(";").map(seg => {
       seg = seg.trim();
       if (!seg) return "";
-      const rm = seg.match(/^refine\s+(\w+)$/);
-      return rm
-        ? '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>'
-        : escapeHTML(seg);
+      const rm = seg.match(/^refine\s+(\w+)(\s+with\s+history)?$/);
+      if (rm) {
+        return '<span class="kw">refine</span> <span class="st">' + escapeHTML(rm[1]) + '</span>' +
+          (rm[2] ? ' <span class="kw">with history</span>' : '');
+      }
+      const em = seg.match(/^emit\s+(\w+)$/);
+      if (em) return '<span class="kw">emit</span> <span class="st">' + escapeHTML(em[1]) + '</span>';
+      return escapeHTML(seg);
     }).filter(Boolean).join("; ");
     html += '<span class="st">state ' + escapeHTML(nm) + '</span>' + tag + ': ' + body + "\n";
   }

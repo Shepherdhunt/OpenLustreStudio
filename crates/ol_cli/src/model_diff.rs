@@ -99,12 +99,16 @@ pub fn diff_projects(old: &Project, new: &Project) -> Vec<String> {
 
     // --- State machines (raw, pre-lowering) -------------------------------
     let sm_desc = |m: &ol_ir::StateMachineDef| {
-        format!(
+        let mut d = format!(
             "owner {}, initial {}, states [{}]",
             m.owner.as_deref().unwrap_or("(standalone)"),
             m.initial_state,
             m.states.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ")
-        )
+        );
+        if !m.signals.is_empty() {
+            d.push_str(&format!(", signals [{}]", m.signals.join(", ")));
+        }
+        d
     };
     let old_sms: BTreeMap<&str, String> = old
         .packages

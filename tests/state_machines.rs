@@ -32,6 +32,8 @@ fn toggle_machine() -> StateMachineDef {
                 }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
             StateDef {
                 name: "ON".into(),
@@ -45,9 +47,12 @@ fn toggle_machine() -> StateMachineDef {
                 }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
         ],
         contract: None,
+        signals: vec![],
         owner: None,
     }
 }
@@ -212,6 +217,8 @@ fn three_state_traffic_light_simulates_correctly() {
         ],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let sm = StateMachineDef {
         name: "TrafficLight".into(),
@@ -225,6 +232,7 @@ fn three_state_traffic_light_simulates_correctly() {
             make_state("Yellow", false, true, "Red"),
         ],
         contract: None,
+        signals: vec![],
         owner: None,
     };
     let mut project = Project {
@@ -287,6 +295,8 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let hi = StateDef {
         name: "Hi".into(),
@@ -294,6 +304,8 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let idle = StateDef {
         name: "Idle".into(),
@@ -304,6 +316,8 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
         regions: vec![],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     let active = StateDef {
         name: "Active".into(),
@@ -316,6 +330,8 @@ fn hierarchical_mode_machine() -> StateMachineDef {
             history: false,
         }],
         refines: None,
+        refine_history: false,
+        emits: vec![],
     };
     StateMachineDef {
         name: "Mode".into(),
@@ -332,6 +348,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         initial_state: "Idle".into(),
         states: vec![idle, active],
         contract: None,
+        signals: vec![],
         owner: None,
     }
 }
@@ -373,6 +390,8 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("tick"), target: "Hi".into() }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
             StateDef {
                 name: "Hi".into(),
@@ -380,9 +399,12 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("tick"), target: "Lo".into() }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
         ],
         contract: None,
+        signals: vec![],
         owner: None,
     };
     let refmode = StateMachineDef {
@@ -408,6 +430,8 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("go"), target: "Active".into() }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
             StateDef {
                 name: "Active".into(),
@@ -415,9 +439,12 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
                 transitions: vec![Transition { guard: Expr::var("stop"), target: "Idle".into() }],
                 regions: vec![],
                 refines: Some("Spin".into()), // delegate to the Spin machine
+                refine_history: false,
+                emits: vec![],
             },
         ],
         contract: None,
+        signals: vec![],
         owner: None,
     };
     vec![spin, refmode]
@@ -489,6 +516,8 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
                 transitions: vec![Transition { guard: Expr::var("press"), target: "On".into() }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
             StateDef {
                 name: "On".into(),
@@ -496,9 +525,12 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
                 transitions: vec![Transition { guard: Expr::var("press"), target: "Off".into() }],
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: vec![],
             },
         ],
         contract: None,
+        signals: vec![],
         owner: Some("Lamp".into()), // operator-owned: merge into Lamp's body
     };
     let mut project = Project {
@@ -589,4 +621,271 @@ fn hierarchical_machine_simulates_with_restart_on_entry() {
         (true, 1),  // c6 Active re-entered -> nested restarts at Lo
     ];
     assert_eq!(trace, expected);
+}
+
+// --- Signals (SCADE-style boolean events) -------------------------------------
+
+/// Toggle with a `blink` signal: ON emits it, both states mirror it into the
+/// `flash` output (same-cycle broadcast), and ON's exit guard reads it too.
+fn beacon_machine() -> StateMachineDef {
+    StateMachineDef {
+        name: "Beacon".into(),
+        inputs: vec![Port { name: "pulse".into(), ty: Type::Bool }],
+        outputs: vec![
+            Port { name: "light".into(), ty: Type::Bool },
+            Port { name: "flash".into(), ty: Type::Bool },
+        ],
+        locals: vec![],
+        initial_state: "OFF".into(),
+        states: vec![
+            StateDef {
+                name: "OFF".into(),
+                equations: vec![
+                    Equation { lhs: vec!["light".into()], rhs: Expr::bool_lit(false) },
+                    Equation { lhs: vec!["flash".into()], rhs: Expr::var("blink") },
+                ],
+                transitions: vec![Transition { guard: Expr::var("pulse"), target: "ON".into() }],
+                regions: vec![],
+                refines: None,
+                refine_history: false,
+                emits: vec![],
+            },
+            StateDef {
+                name: "ON".into(),
+                equations: vec![
+                    Equation { lhs: vec!["light".into()], rhs: Expr::bool_lit(true) },
+                    Equation { lhs: vec!["flash".into()], rhs: Expr::var("blink") },
+                ],
+                // The guard reads the signal the state itself emits.
+                transitions: vec![Transition {
+                    guard: Expr::and(Expr::var("pulse"), Expr::var("blink")),
+                    target: "OFF".into(),
+                }],
+                regions: vec![],
+                refines: None,
+                refine_history: false,
+                emits: vec!["blink".into()],
+            },
+        ],
+        contract: None,
+        signals: vec!["blink".into()],
+        owner: None,
+    }
+}
+
+#[test]
+fn signals_are_true_exactly_while_an_emitting_state_is_active() {
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            state_machines: vec![beacon_machine()],
+            ..Default::default()
+        }],
+        main: Some("Beacon".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("lowers cleanly");
+    assert!(
+        !ol_typecheck::check_project(&project).has_errors(),
+        "{:?}",
+        ol_typecheck::check_project(&project).errors().map(|d| d.render()).collect::<Vec<_>>()
+    );
+
+    // The signal is an ordinary bool local of the lowered node, with its own
+    // equation — so every downstream tool (C, Kind 2, monitors) sees it.
+    let node = project.find_node("Beacon").unwrap();
+    assert!(node.locals.iter().any(|l| l.name == "blink" && l.ty == Type::Bool));
+    assert!(node.equations.iter().any(|e| e.lhs == vec!["blink".to_string()]));
+    let c = ol_clite_emit::emit_project(&project);
+    assert!(c.source.contains("blink"), "signal local reaches the generated C");
+
+    // flash mirrors the signal, which mirrors "the ON state is active".
+    let mut sim = Sim::new(&project, "Beacon").unwrap();
+    let mut trace = Vec::new();
+    for p in [false, true, true, false, true, false] {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("pulse".into(), Value::Bool(p));
+        let out = sim.step(&inputs).unwrap();
+        trace.push((out["light"].as_bool().unwrap(), out["flash"].as_bool().unwrap()));
+    }
+    // The signal always equals the light (same activation), including the
+    // cycle where the guard `pulse and blink` fires the exit.
+    assert_eq!(
+        trace,
+        vec![
+            (false, false),
+            (false, false),
+            (true, true), // ON: emits blink; pulse and blink -> OFF
+            (false, false),
+            (false, false), // pulse=T -> ON next cycle
+            (true, true),
+        ]
+    );
+}
+
+#[test]
+fn emitting_an_undeclared_signal_is_rejected() {
+    let mut bad = beacon_machine();
+    bad.signals.clear();
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![bad], ..Default::default() }],
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::UnknownSignal(_, _, _)), "{errs:?}");
+}
+
+#[test]
+fn duplicate_and_clashing_signal_names_are_rejected() {
+    let mut dup = beacon_machine();
+    dup.signals = vec!["blink".into(), "blink".into()];
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![dup], ..Default::default() }],
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::DuplicateSignal(_, _)), "{errs:?}");
+
+    // A signal may not shadow an output…
+    let mut clash = beacon_machine();
+    clash.signals = vec!["light".into()];
+    clash.states[1].emits = vec!["light".into()];
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![clash], ..Default::default() }],
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::SignalClash(_, _)), "{errs:?}");
+
+    // …nor a state name (states are enum variants referenced by bare name).
+    let mut clash = beacon_machine();
+    clash.signals = vec!["ON".into()];
+    clash.states[1].emits = vec!["ON".into()];
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![clash], ..Default::default() }],
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(matches!(errs[0], ol_ir::state_machine::LowerError::SignalClash(_, _)), "{errs:?}");
+}
+
+/// A refined sub-machine's signal merges into the parent on resolution, so a
+/// parent state equation can read what a nested state emits.
+#[test]
+fn a_sub_machine_signal_is_readable_in_the_parent_after_refinement() {
+    let blinker = StateMachineDef {
+        name: "Blinker".into(),
+        inputs: vec![Port { name: "tick".into(), ty: Type::Bool }],
+        outputs: vec![],
+        locals: vec![],
+        initial_state: "A".into(),
+        states: vec![
+            StateDef {
+                name: "A".into(),
+                equations: vec![],
+                transitions: vec![Transition { guard: Expr::var("tick"), target: "B".into() }],
+                regions: vec![],
+                refines: None,
+                refine_history: false,
+                emits: vec![],
+            },
+            StateDef {
+                name: "B".into(),
+                equations: vec![],
+                transitions: vec![Transition { guard: Expr::var("tick"), target: "A".into() }],
+                regions: vec![],
+                refines: None,
+                refine_history: false,
+                emits: vec!["hot".into()],
+            },
+        ],
+        contract: None,
+        signals: vec!["hot".into()],
+        owner: None,
+    };
+    let watch = StateMachineDef {
+        name: "Watch".into(),
+        inputs: vec![Port { name: "tick".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "hot_seen".into(), ty: Type::Bool }],
+        locals: vec![],
+        initial_state: "Watching".into(),
+        states: vec![StateDef {
+            name: "Watching".into(),
+            equations: vec![Equation { lhs: vec!["hot_seen".into()], rhs: Expr::var("hot") }],
+            transitions: vec![],
+            regions: vec![],
+            refines: Some("Blinker".into()),
+            refine_history: false,
+            emits: vec![],
+        }],
+        contract: None,
+        signals: vec![],
+        owner: None,
+    };
+    let mut project = Project {
+        name: "sig".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            state_machines: vec![blinker, watch],
+            ..Default::default()
+        }],
+        main: Some("Watch".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("resolves and lowers");
+    assert!(!ol_typecheck::check_project(&project).has_errors());
+
+    let mut sim = Sim::new(&project, "Watch").unwrap();
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("tick".into(), Value::Bool(true));
+        seen.push(sim.step(&inputs).unwrap()["hot_seen"].as_bool().unwrap());
+    }
+    // The nested machine alternates A/B each tick; `hot` (and so `hot_seen`)
+    // is true exactly on the B cycles.
+    assert_eq!(seen, vec![false, true, false, true]);
+}
+
+// --- Refine with history -------------------------------------------------------
+
+/// `refine … with history`: on re-entry the sub-machine resumes at the
+/// sub-state it held on exit, instead of restarting at its initial state.
+#[test]
+fn refine_with_history_resumes_the_sub_state_held_on_exit() {
+    let run = |history: bool| {
+        let mut machines = spin_and_refmode();
+        machines[1].states[1].refine_history = history;
+        let mut project = Project {
+            name: "ref".into(),
+            packages: vec![Package { name: "user".into(), state_machines: machines, ..Default::default() }],
+            main: Some("RefMode".into()),
+            ..Default::default()
+        };
+        project.lower_state_machines().expect("lowers");
+        let mut sim = Sim::new(&project, "RefMode").unwrap();
+        let seq = [
+            (true, false, false),  // Idle, go -> Active
+            (false, false, true),  // Active/Lo (level 1), tick -> Hi
+            (false, true, false),  // Active/Hi (level 2), stop -> Idle
+            (true, false, false),  // Idle, go -> Active
+            (false, false, false), // Active again: restart at Lo, or resume Hi?
+        ];
+        let mut levels = Vec::new();
+        for (go, stop, tick) in seq {
+            let mut inputs = BTreeMap::new();
+            inputs.insert("go".into(), Value::Bool(go));
+            inputs.insert("stop".into(), Value::Bool(stop));
+            inputs.insert("tick".into(), Value::Bool(tick));
+            levels.push(sim.step(&inputs).unwrap()["level"].as_int().unwrap());
+        }
+        levels
+    };
+    assert_eq!(run(false), vec![0, 1, 2, 0, 1], "no history: restart at Lo");
+    assert_eq!(run(true), vec![0, 1, 2, 0, 2], "history: resume at Hi");
 }

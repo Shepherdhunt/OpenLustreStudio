@@ -70,6 +70,15 @@ pub struct StateDef {
     /// that does not delegate.
     #[serde(default)]
     pub refines: Option<String>,
+    /// SCADE history on the `refines` delegation: when set, the inlined
+    /// sub-machine resumes at the sub-state it held on exit instead of
+    /// restarting at its initial state. Meaningless without `refines`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refine_history: bool,
+    /// Signals this state emits while active (SCADE signal emission). Each
+    /// must be declared in the machine's `signals` list.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emits: Vec<String>,
 }
 
 /// A nested automaton inside a state: its own initial state and states (each of
@@ -93,6 +102,12 @@ pub struct StateMachineDef {
     pub locals: Vec<Local>,
     pub initial_state: String,
     pub states: Vec<StateDef>,
+    /// SCADE-style signals: boolean events local to the automaton. A signal
+    /// is `true` exactly while a state that `emits` it is active (same-cycle
+    /// broadcast), `false` otherwise; guards and state equations may read it.
+    /// Each lowers to a bool local of the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<String>,
     #[serde(default)]
     pub contract: Option<String>,
     /// The operator this machine belongs to. `Some(op)` machines are
@@ -131,6 +146,12 @@ pub enum LowerError {
     RefineCycle(String, String),
     #[error("machine `{0}` is owned by operator `{1}`, which does not exist")]
     UnknownOwner(String, String),
+    #[error("machine `{0}`: state `{1}` emits undeclared signal `{2}` (declare it in the machine's signals)")]
+    UnknownSignal(String, String, String),
+    #[error("machine `{0}`: signal `{1}` is declared more than once")]
+    DuplicateSignal(String, String),
+    #[error("machine `{0}`: signal `{1}` collides with an input, output, local, or state name")]
+    SignalClash(String, String),
 }
 
 /// Resolve every `refines` reference in `sm` into an inlined nested [`Region`]
@@ -144,8 +165,11 @@ pub fn resolve_refines(
     by_name: &std::collections::HashMap<String, StateMachineDef>,
 ) -> Result<StateMachineDef, LowerError> {
     let mut stack = vec![sm.name.clone()];
-    let states = resolve_states(&sm.name, &sm.states, by_name, &mut stack)?;
-    Ok(StateMachineDef { states, ..sm.clone() })
+    // Signals declared by inlined sub-machines merge (by name) into the
+    // resolved machine, so their states' `emits` stay valid after inlining.
+    let mut signals = sm.signals.clone();
+    let states = resolve_states(&sm.name, &sm.states, by_name, &mut stack, &mut signals)?;
+    Ok(StateMachineDef { states, signals, ..sm.clone() })
 }
 
 /// Prefix every state name (and the transition targets / region initial-states
@@ -173,6 +197,10 @@ fn prefix_states(states: Vec<StateDef>, prefix: &str) -> Vec<StateDef> {
                 })
                 .collect(),
             refines: None,
+            refine_history: false,
+            // Signal names are machine-scoped (merged, not renamed), so
+            // emissions travel unprefixed with the state.
+            emits: s.emits,
         })
         .collect()
 }
@@ -182,6 +210,7 @@ fn resolve_states(
     states: &[StateDef],
     by_name: &std::collections::HashMap<String, StateMachineDef>,
     stack: &mut Vec<String>,
+    signals: &mut Vec<String>,
 ) -> Result<Vec<StateDef>, LowerError> {
     let mut out = Vec::with_capacity(states.len());
     for st in states {
@@ -190,7 +219,7 @@ fn resolve_states(
         for r in &st.regions {
             regions.push(Region {
                 initial_state: r.initial_state.clone(),
-                states: resolve_states(machine, &r.states, by_name, stack)?,
+                states: resolve_states(machine, &r.states, by_name, stack, signals)?,
                 history: r.history,
             });
         }
@@ -202,8 +231,13 @@ fn resolve_states(
                 LowerError::UnknownRefine(machine.to_string(), st.name.clone(), target.clone())
             })?;
             stack.push(target.clone());
-            let sub_states = resolve_states(machine, &sub.states, by_name, stack)?;
+            let sub_states = resolve_states(machine, &sub.states, by_name, stack, signals)?;
             stack.pop();
+            for s in &sub.signals {
+                if !signals.contains(s) {
+                    signals.push(s.clone());
+                }
+            }
             // Qualify the inlined sub-machine's state names per refinement site
             // (`<parent state>_`) so they collide with neither the standalone
             // version of the sub-machine nor another refinement of it.
@@ -211,7 +245,7 @@ fn resolve_states(
             regions.push(Region {
                 initial_state: format!("{prefix}{}", sub.initial_state),
                 states: prefix_states(sub_states, &prefix),
-                history: false,
+                history: st.refine_history,
             });
         }
         out.push(StateDef {
@@ -220,6 +254,8 @@ fn resolve_states(
             transitions: st.transitions.clone(),
             regions,
             refines: None,
+            refine_history: false,
+            emits: st.emits.clone(),
         });
     }
     Ok(out)
@@ -247,6 +283,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
     for out in &sm.outputs {
         require_cover(sm, &out.name, &sm.states)?;
     }
+    validate_signals(sm, &names)?;
 
     let mut lo = Lower {
         machine: sm,
@@ -254,11 +291,27 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         locals: sm.locals.clone(),
         equations: Vec::new(),
         next_id: 0,
+        signal_conds: std::collections::BTreeMap::new(),
     };
     let top = lo.emit_region(&sm.initial_state, &sm.states, Expr::bool_lit(true), false);
     for out in &sm.outputs {
         let rhs = lo.value_of(&out.name, &top, &out.ty);
         lo.equations.push(Equation { lhs: vec![out.name.clone()], rhs });
+    }
+    // A signal is true exactly while some emitting state is active: the
+    // or-chain of the (region-active and state = S) conditions collected
+    // during region emission; never emitted means constantly false.
+    for sig in &sm.signals {
+        let rhs = match lo.signal_conds.remove(sig) {
+            Some(conds) => {
+                let mut it = conds.into_iter();
+                let first = it.next().expect("non-empty by construction");
+                it.fold(first, Expr::or)
+            }
+            None => Expr::bool_lit(false),
+        };
+        lo.locals.push(Local { name: sig.clone(), ty: Type::Bool });
+        lo.equations.push(Equation { lhs: vec![sig.clone()], rhs });
     }
 
     let node = NodeDef {
@@ -301,6 +354,10 @@ struct Lower<'a> {
     locals: Vec<Local>,
     equations: Vec<Equation>,
     next_id: usize,
+    /// Per signal, the activation conditions of the states that emit it,
+    /// collected while regions are lowered (a nested emitter contributes
+    /// `region_active and state = S`; a top-level one just `state = S`).
+    signal_conds: std::collections::BTreeMap<String, Vec<Expr>>,
 }
 
 impl<'a> Lower<'a> {
@@ -387,6 +444,16 @@ impl<'a> Lower<'a> {
 
         let mut nodes = Vec::with_capacity(states.len());
         for st in states {
+            if !st.emits.is_empty() {
+                let in_state = Expr::bin(BinOp::Eq, Expr::var(&state_var), Expr::var(&st.name));
+                let emitting = match &active_var {
+                    Some(av) => Expr::and(Expr::var(av), in_state),
+                    None => in_state,
+                };
+                for sig in &st.emits {
+                    self.signal_conds.entry(sig.clone()).or_default().push(emitting.clone());
+                }
+            }
             let mut nested = Vec::new();
             for region in &st.regions {
                 let in_state = Expr::bin(BinOp::Eq, Expr::var(&state_var), Expr::var(&st.name));
@@ -467,6 +534,43 @@ fn collect_state_names(states: &[StateDef], into: &mut Vec<String>) {
             collect_state_names(&r.states, into);
         }
     }
+}
+
+/// Signals must be unique, must not shadow the machine's interface, locals,
+/// or state names (states are enum variants referenced by bare name), and
+/// every emission must name a declared signal.
+fn validate_signals(sm: &StateMachineDef, state_names: &[String]) -> Result<(), LowerError> {
+    let mut seen = std::collections::HashSet::new();
+    for sig in &sm.signals {
+        if !seen.insert(sig.clone()) {
+            return Err(LowerError::DuplicateSignal(sm.name.clone(), sig.clone()));
+        }
+        let clashes = sm.inputs.iter().any(|p| &p.name == sig)
+            || sm.outputs.iter().any(|p| &p.name == sig)
+            || sm.locals.iter().any(|l| &l.name == sig)
+            || state_names.iter().any(|n| n == sig);
+        if clashes {
+            return Err(LowerError::SignalClash(sm.name.clone(), sig.clone()));
+        }
+    }
+    fn check_emits(sm: &StateMachineDef, states: &[StateDef]) -> Result<(), LowerError> {
+        for st in states {
+            for sig in &st.emits {
+                if !sm.signals.contains(sig) {
+                    return Err(LowerError::UnknownSignal(
+                        sm.name.clone(),
+                        st.name.clone(),
+                        sig.clone(),
+                    ));
+                }
+            }
+            for r in &st.regions {
+                check_emits(sm, &r.states)?;
+            }
+        }
+        Ok(())
+    }
+    check_emits(sm, &sm.states)
 }
 
 fn validate_region(sm: &StateMachineDef, initial: &str, states: &[StateDef]) -> Result<(), LowerError> {

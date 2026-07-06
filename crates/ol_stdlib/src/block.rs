@@ -98,6 +98,10 @@ pub struct RawState {
     pub equations: Vec<RawEquation>,
     #[serde(default)]
     pub transitions: Vec<RawTransition>,
+    /// Signals this state emits while active (each declared in the block's
+    /// `signals` list).
+    #[serde(default)]
+    pub emits: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +126,10 @@ pub struct LibBlock {
     /// Only set when `kind: state_machine`.
     #[serde(default)]
     pub states: Vec<RawState>,
+    /// Only set when `kind: state_machine`: boolean signals local to the
+    /// automaton, true exactly while an emitting state is active.
+    #[serde(default)]
+    pub signals: Vec<String>,
 }
 
 /// Lowering result for one block.
@@ -248,6 +256,8 @@ impl LibBlock {
                 transitions,
                 regions: vec![],
                 refines: None,
+                refine_history: false,
+                emits: s.emits.clone(),
             });
         }
 
@@ -260,6 +270,7 @@ impl LibBlock {
             locals,
             initial_state,
             states,
+            signals: self.signals.clone(),
             contract: contract.as_ref().map(|_| self.contract_name()),
             owner: None,
         };

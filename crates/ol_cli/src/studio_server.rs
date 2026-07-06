@@ -1570,6 +1570,8 @@ fn sm_state_json(st: &ol_ir::StateDef) -> serde_json::Value {
             "states": r.states.iter().map(sm_state_json).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "refines": st.refines,
+        "refine_history": st.refine_history,
+        "emits": st.emits,
     })
 }
 
@@ -1606,6 +1608,7 @@ fn fsm_get(
                                 "name": p.name, "type": p.ty,
                             })).collect::<Vec<_>>(),
                             "initial_state": m.initial_state,
+                            "signals": m.signals,
                             "states": states,
                         });
                         return Ok(value.to_string());
@@ -1664,12 +1667,27 @@ fn parse_sm_states(states_json: Option<&serde_json::Value>) -> Result<Vec<ol_ir:
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
+        let refine_history = st.get("refine_history").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut emits = Vec::new();
+        for e in st.get("emits").and_then(|v| v.as_array()).unwrap_or(&empty) {
+            let sig = e
+                .as_str()
+                .ok_or_else(|| format!("state `{sname}`: `emits` must be an array of signal names"))?
+                .trim()
+                .to_string();
+            if sig.is_empty() {
+                return Err(format!("state `{sname}`: an emitted signal name cannot be empty"));
+            }
+            emits.push(sig);
+        }
         states.push(ol_ir::StateDef {
             name: sname.to_string(),
             equations,
             transitions,
             regions,
             refines,
+            refine_history,
+            emits,
         });
     }
     Ok(states)
@@ -1709,6 +1727,20 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         .to_string();
 
     let states = parse_sm_states(req.get("states"))?;
+    // Declared signals: boolean events emitted by states, readable anywhere
+    // in the machine. Trimmed; empty names are loud.
+    let mut signals = Vec::new();
+    for s in req.get("signals").and_then(|v| v.as_array()).unwrap_or(&vec![]) {
+        let sig = s
+            .as_str()
+            .ok_or("`signals` must be an array of names")?
+            .trim()
+            .to_string();
+        if sig.is_empty() {
+            return Err("a signal name cannot be empty".into());
+        }
+        signals.push(sig);
+    }
     // The operator this machine belongs to (operator-owned model). The editor
     // sends it; a machine always belongs to exactly one operator.
     let owner = req
@@ -1724,6 +1756,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         locals: vec![],
         initial_state,
         states,
+        signals,
         contract: None,
         owner,
     };
