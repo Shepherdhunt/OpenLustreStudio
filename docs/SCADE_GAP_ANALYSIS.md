@@ -19,8 +19,11 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Design-document generator
-(2026-07-06):** `openlustre doc` / Project ▸ Design Document — deterministic
+**Landed recently (newest first):** **Control-law library (2026-07-06):**
+`libraries/control/control.yaml` — RateLimiter, FirstOrderLag, Hysteresis,
+Debounce, PIDController, each with a CoCoSpec contract, behaviorally
+simulation-tested, in the embedded palette (46 blocks now).
+**Design-document generator (2026-07-06):** `openlustre doc` / Project ▸ Design Document — deterministic
 self-contained HTML report (interfaces, schematic SVGs, Lustre behavior,
 state machines, contracts, traceability matrix). **Float32 intrinsics
 (2026-07-06):** the `sqrtf` family end to end. Before that:
@@ -245,6 +248,21 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (control) — the control-law block family
+
+The regulation blocks embedded SCADE work lives off, in
+`libraries/control/control.yaml` (float64 arithmetic; cast float32 signals
+explicitly): **RateLimiter** (slew limiting, first-cycle pass-through,
+`|y − pre y| ≤ rate` as contract modes), **FirstOrderLag** (exponential
+low-pass, `0 ≤ alpha ≤ 1` assumed), **Hysteresis** (two-threshold switch
+with Above/Below/Holding modes), **Debounce** (n-cycle stability filter; a
+just-changed input provably cannot propagate), and **PIDController**
+(textbook P+I+D, no anti-windup — clamp downstream; first-cycle mode pins
+the exact arithmetic). All five carry contracts, pass `lib-check` (46
+blocks / 46 contracts now), land in the embedded palette automatically, and
+are behaviorally simulation-tested cycle-by-cycle
+(`control_blocks_simulate_correctly`, tests/stdlib_library.rs).
 
 ### 2026-07-06 (doc) — the design-document generator
 

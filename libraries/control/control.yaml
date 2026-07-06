@@ -1,0 +1,133 @@
+# Control-law blocks: the classic embedded regulation family — slew limiting,
+# first-order filtering, hysteresis, debounce, and PID — each with a contract.
+# All arithmetic is float64; cast float32 signals in and out explicitly.
+
+# Slew limiter: y follows x but moves at most `rate` per cycle.
+- name: RateLimiter
+  kind: operator
+  category: control
+  inputs:
+    - { name: x,    type: float64 }
+    - { name: rate, type: float64 }
+  outputs: [{ name: y, type: float64 }]
+  locals:  [{ name: py, type: float64 }]
+  equations:
+    - lhs: [py]
+      body: "0.0 -> pre y"
+    - lhs: [y]
+      body: "x -> (if x > py + rate then py + rate else if x < py - rate then py - rate else x)"
+  contract:
+    assumptions: ["rate >= 0.0"]
+    modes:
+      - { name: FirstCycle, requires: ["first_cycle"], ensures: ["y = x"] }
+      - name: Slewing
+        requires: ["not first_cycle"]
+        ensures:
+          - "y <= pre y + rate"
+          - "y >= pre y - rate"
+
+# First-order lag (exponential low-pass): y += alpha * (x - y_prev).
+- name: FirstOrderLag
+  kind: operator
+  category: control
+  inputs:
+    - { name: x,     type: float64 }
+    - { name: alpha, type: float64 }
+  outputs: [{ name: y, type: float64 }]
+  locals:  [{ name: py, type: float64 }]
+  equations:
+    - lhs: [py]
+      body: "0.0 -> pre y"
+    - lhs: [y]
+      body: "x -> py + alpha * (x - py)"
+  contract:
+    assumptions: ["alpha >= 0.0", "alpha <= 1.0"]
+    modes:
+      - { name: FirstCycle, requires: ["first_cycle"], ensures: ["y = x"] }
+      - name: Filtering
+        requires: ["not first_cycle"]
+        ensures: ["y = pre y + alpha * (x - pre y)"]
+
+# Two-threshold switch: on above `hi`, off below `lo`, held in between.
+- name: Hysteresis
+  kind: operator
+  category: control
+  inputs:
+    - { name: x,  type: float64 }
+    - { name: lo, type: float64 }
+    - { name: hi, type: float64 }
+  outputs: [{ name: on, type: bool }]
+  locals:  [{ name: pon, type: bool }]
+  equations:
+    - lhs: [pon]
+      body: "false -> pre on"
+    - lhs: [on]
+      body: "if x >= hi then true else if x <= lo then false else pon"
+  contract:
+    assumptions: ["lo < hi"]
+    modes:
+      - { name: Above,   requires: ["x >= hi"],           ensures: ["on"] }
+      - { name: Below,   requires: ["x <= lo"],           ensures: ["not on"] }
+      - name: Holding
+        requires: ["x > lo", "x < hi", "not first_cycle"]
+        ensures: ["on = pre on"]
+
+# Debounce: y takes x only after x has held the same value for n cycles.
+- name: Debounce
+  kind: operator
+  category: control
+  inputs:
+    - { name: x, type: bool }
+    - { name: n, type: int32 }
+  outputs: [{ name: y, type: bool }]
+  locals:
+    - { name: px,  type: bool }
+    - { name: cnt, type: int32 }
+  equations:
+    - lhs: [px]
+      body: "false -> pre x"
+    - lhs: [cnt]
+      body: "0 -> (if x = px then (if pre cnt < n then pre cnt + 1 else pre cnt) else 0)"
+    - lhs: [y]
+      body: "false -> (if cnt >= n then x else pre y)"
+  contract:
+    assumptions: ["n >= 1"]
+    modes:
+      - { name: FirstCycle, requires: ["first_cycle"], ensures: ["not y"] }
+      # An input that just changed cannot have propagated yet: the stability
+      # counter restarted, so the output holds.
+      - name: JustChanged
+        requires: ["not first_cycle", "x <> pre x"]
+        ensures: ["y = pre y"]
+
+# Textbook PID: u = kp*err + ki*sum(err) + kd*d(err)/dt (unit cycle time).
+# No anti-windup — clamp with RateLimiter/Clamp downstream when needed.
+- name: PIDController
+  kind: operator
+  category: control
+  inputs:
+    - { name: setpoint, type: float64 }
+    - { name: meas,     type: float64 }
+    - { name: kp,       type: float64 }
+    - { name: ki,       type: float64 }
+    - { name: kd,       type: float64 }
+  outputs: [{ name: u, type: float64 }]
+  locals:
+    - { name: err,   type: float64 }
+    - { name: integ, type: float64 }
+    - { name: perr,  type: float64 }
+  equations:
+    - lhs: [err]
+      body: "setpoint - meas"
+    - lhs: [integ]
+      body: "err -> pre integ + err"
+    - lhs: [perr]
+      body: "0.0 -> pre err"
+    - lhs: [u]
+      body: "kp * err + ki * integ + kd * (err - perr)"
+  contract:
+    modes:
+      - name: FirstCycle
+        requires: ["first_cycle"]
+        ensures:
+          - "u = kp * (setpoint - meas) + ki * (setpoint - meas) + kd * ((setpoint - meas) - 0.0)"
