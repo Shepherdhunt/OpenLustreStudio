@@ -14,9 +14,26 @@ use std::fmt::Write as _;
 
 use ol_ir::{NodeDef, Project};
 
-pub fn generate_html(project: &Project) -> String {
+/// `base_dir` is where relative SysML association paths resolve (the model
+/// file's directory); pass `None` to skip reading associated SysML models.
+pub fn generate_html(project: &Project, base_dir: Option<&std::path::Path>) -> String {
     let mut body = String::new();
     let user_pkgs: Vec<_> = project.packages.iter().filter(|p| p.name != "stdlib").collect();
+    // Associated SysML 2.0 models, read once per distinct path.
+    let mut sysml_models: BTreeMap<String, Option<crate::sysml::SysmlModel>> = BTreeMap::new();
+    if let Some(dir) = base_dir {
+        for pkg in &user_pkgs {
+            for n in &pkg.nodes {
+                if let Some(sr) = &n.sysml {
+                    sysml_models.entry(sr.model.clone()).or_insert_with(|| {
+                        std::fs::read_to_string(dir.join(&sr.model))
+                            .ok()
+                            .map(|s| crate::sysml::parse(&s))
+                    });
+                }
+            }
+        }
+    }
 
     // --- Header + table of contents --------------------------------------
     let _ = write!(
@@ -40,7 +57,12 @@ pub fn generate_html(project: &Project) -> String {
     // --- One section per operator -----------------------------------------
     for pkg in &user_pkgs {
         for n in &pkg.nodes {
-            render_node(n, pkg, &mut body);
+            let sysml = n
+                .sysml
+                .as_ref()
+                .and_then(|sr| sysml_models.get(&sr.model))
+                .and_then(|m| m.as_ref());
+            render_node(n, pkg, sysml, &mut body);
         }
     }
 
@@ -183,7 +205,12 @@ padding:0 .45em;margin-right:.3em;font-size:.85em;color:#2b579a}\
 svg{border:1px solid #d2dae2;background:#fff;max-width:100%;height:auto}\
 ul.toc{columns:2}";
 
-fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
+fn render_node(
+    n: &NodeDef,
+    pkg: &ol_ir::Package,
+    sysml: Option<&crate::sysml::SysmlModel>,
+    out: &mut String,
+) {
     let _ = write!(
         out,
         "<h2 id=\"op-{0}\">{0} <span class=\"meta\">({1:?})</span></h2>\n",
@@ -207,6 +234,43 @@ fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
             );
         }
         out.push_str("</p>\n");
+    }
+
+    // Requirements the associated SysML model records as satisfied by this
+    // operator (`satisfy R by E`), with their doc text — the model file is
+    // the requirements' source of truth.
+    if let (Some(sr), Some(sm)) = (&n.sysml, sysml) {
+        let last = |s: &str| s.rsplit("::").next().unwrap_or(s).to_string();
+        let elem_last = sr.element.as_deref().map(last);
+        let satisfied: Vec<_> = sm
+            .satisfies
+            .iter()
+            .filter(|sat| {
+                let by_last = last(&sat.by);
+                by_last == n.name
+                    || sr.element.as_deref() == Some(sat.by.as_str())
+                    || elem_last.as_deref() == Some(by_last.as_str())
+            })
+            .collect();
+        if !satisfied.is_empty() {
+            out.push_str("<table><tr><th>SysML requirement</th><th>Text</th></tr>\n");
+            for sat in satisfied {
+                let id = sm.resolve_requirement_id(&sat.requirement);
+                let doc = sm
+                    .requirements
+                    .iter()
+                    .find(|r| r.id == id)
+                    .and_then(|r| r.doc.as_deref())
+                    .unwrap_or("");
+                let _ = write!(
+                    out,
+                    "<tr><td><span class=\"req\">{}</span></td><td>{}</td></tr>\n",
+                    esc(&id),
+                    esc(doc)
+                );
+            }
+            out.push_str("</table>\n");
+        }
     }
 
     // Interface tables.
@@ -488,8 +552,8 @@ mod tests {
             }]
         }))
         .unwrap();
-        let a = generate_html(&project);
-        let b = generate_html(&project);
+        let a = generate_html(&project, None);
+        let b = generate_html(&project, None);
         assert_eq!(a, b, "same model must produce byte-identical documents");
         for needle in ["<h2 id=\"op-Top\">", "SRS-1", "y = x + 1;", "<svg"] {
             assert!(a.contains(needle), "missing {needle}:\n{a}");

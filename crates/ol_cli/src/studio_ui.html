@@ -4191,7 +4191,10 @@ async function testsRun() {
     html += "<h4>MC/DC <span class='build-note'>(DO-178C Level A)</span></h4><p>" +
       m.covered_conditions + " / " + m.total_conditions +
       " conditions shown to independently affect their decision — " +
-      m.covered_decisions + " / " + m.total_decisions + " decisions fully covered.</p>";
+      m.covered_decisions + " / " + m.total_decisions + " decisions fully covered." +
+      (m.covered_via_masking ? " " + m.covered_via_masking +
+        " condition(s) covered via the masking analysis (coupled conditions unique-cause cannot isolate)." : "") +
+      "</p>";
     if (m.uncovered.length) {
       html += "<table><thead><tr><th>node</th><th>equation</th><th>decision</th><th>condition</th></tr></thead><tbody>";
       for (const u of m.uncovered) {

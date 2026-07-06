@@ -174,10 +174,15 @@ vs history semantics, freeze-while-inactive.
 ### TOR-8 — Coverage measurement
 
 The scenario harness shall measure, on the IR backend: decision coverage and
-**unique-cause MC/DC** (the DO-178C Level A metric) — each atomic condition's
-value captured in a single evaluation pass, independence pairs analyzed
-suite-wide, uncovered conditions reported by name. Coupled conditions are
-reported uncovered (masking MC/DC is a documented exclusion, §4).
+**MC/DC** (the DO-178C Level A metric) — each atomic condition's value
+captured in a single evaluation pass, independence pairs analyzed
+suite-wide, uncovered conditions reported by name. Unique-cause pairs are
+sought first; where none can exist (notably **coupled conditions** — the
+same condition appearing more than once in a decision), the **masking
+analysis** applies: a pair qualifies when the condition differs, the
+outcome differs, and the condition is controlling in both trials as
+re-evaluated over the decision's recorded boolean structure. The report
+states how many conditions were covered via masking.
 
 **Evidence:** `mcdc.rs`.
 
@@ -246,7 +251,6 @@ the workspace import test in `studio_workspace_types.rs`.
 
 ## 4. Documented exclusions (loud, not silent)
 
-- Masking MC/DC for coupled conditions (unique-cause only today).
 - Float32-native intrinsics (`sqrtf` …): float32 casts through float64
   explicitly; the typechecker refuses the implicit path (`E0161`).
 - Stateful/clocked array iteration; Kind 2 proving of iterator bodies.

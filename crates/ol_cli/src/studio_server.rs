@@ -249,7 +249,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(project) => (
                 200,
                 "text/html; charset=utf-8",
-                crate::doc_gen::generate_html(&project).into_bytes(),
+                crate::doc_gen::generate_html(&project, ctx.model().parent()).into_bytes(),
             ),
             Err(e) => (500, "text/plain", e.to_string().into_bytes()),
         },
@@ -505,17 +505,48 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
         diagnostics.push(crate::diag_to_json(d, "contract"));
     }
     // SysML groundwork: the associated model file should exist on disk
-    // (relative to the project). A dangling reference is a loud warning.
+    // (relative to the project) — a dangling reference is a loud warning —
+    // and when it does exist, every requirement ID annotated on the operator
+    // (or its contract clauses) must be a requirement the model declares:
+    // the SysML model is the requirements' source of truth.
     if let Some(dir) = ctx.model().parent().map(|p| p.to_path_buf()) {
         for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+            let (contracts, _) = ol_contract_ir::parse_contracts(&pkg.contracts);
             for n in &pkg.nodes {
-                if let Some(sr) = &n.sysml {
-                    if !dir.join(&sr.model).exists() {
+                let Some(sr) = &n.sysml else { continue };
+                let Ok(text) = std::fs::read_to_string(dir.join(&sr.model)) else {
+                    let d = ol_ir::Diagnostic::warning(
+                        "W0170",
+                        format!(
+                            "sysml association of `{}` points at `{}`, which does \
+                             not exist in the project",
+                            n.name, sr.model
+                        ),
+                    )
+                    .with_context(format!("node {}", n.name));
+                    diagnostics.push(crate::diag_to_json(&d, "sysml"));
+                    continue;
+                };
+                let sm = crate::sysml::parse(&text);
+                let mut ids: Vec<&String> = n.requirements.iter().collect();
+                if let Some(c) = n
+                    .contract
+                    .as_ref()
+                    .and_then(|cname| contracts.iter().find(|c| &c.name == cname))
+                {
+                    ids.extend(c.assumptions.iter().flat_map(|a| &a.requirements));
+                    ids.extend(c.guarantees.iter().flat_map(|g| &g.requirements));
+                    ids.extend(c.modes.iter().flat_map(|m| &m.requirements));
+                }
+                ids.sort();
+                ids.dedup();
+                for id in ids {
+                    if !sm.has_requirement(id) {
                         let d = ol_ir::Diagnostic::warning(
-                            "W0170",
+                            "W0171",
                             format!(
-                                "sysml association of `{}` points at `{}`, which does \
-                                 not exist in the project",
+                                "requirement `{id}` of `{}` is not declared in its \
+                                 associated sysml model `{}`",
                                 n.name, sr.model
                             ),
                         )

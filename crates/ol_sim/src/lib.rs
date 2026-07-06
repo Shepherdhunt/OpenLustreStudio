@@ -1486,7 +1486,39 @@ pub struct McdcDecision {
     pub context: String,
     pub decision: String,
     pub conditions: Vec<String>,
+    /// The decision's boolean structure over condition indices — what the
+    /// masking analysis re-evaluates.
+    pub shape: DecisionShape,
     pub trials: Vec<McdcTrial>,
+}
+
+/// The boolean structure of a decision with its atomic conditions abstracted
+/// to indices (into the decision's condition list). Recorded at coverage
+/// registration so masking MC/DC can re-evaluate the decision on modified
+/// condition vectors without re-running the model.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub enum DecisionShape {
+    /// Condition `i` of the decision.
+    Cond(usize),
+    Not(Box<DecisionShape>),
+    And(Box<DecisionShape>, Box<DecisionShape>),
+    Or(Box<DecisionShape>, Box<DecisionShape>),
+    Xor(Box<DecisionShape>, Box<DecisionShape>),
+    Implies(Box<DecisionShape>, Box<DecisionShape>),
+}
+
+impl DecisionShape {
+    /// The decision's outcome for one assignment of its conditions.
+    pub fn eval(&self, values: &[bool]) -> bool {
+        match self {
+            DecisionShape::Cond(i) => values.get(*i).copied().unwrap_or(false),
+            DecisionShape::Not(a) => !a.eval(values),
+            DecisionShape::And(a, b) => a.eval(values) && b.eval(values),
+            DecisionShape::Or(a, b) => a.eval(values) || b.eval(values),
+            DecisionShape::Xor(a, b) => a.eval(values) ^ b.eval(values),
+            DecisionShape::Implies(a, b) => !a.eval(values) || b.eval(values),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1496,6 +1528,7 @@ struct DecisionData {
     decision_text: String,
     cond_ptrs: Vec<usize>,
     cond_texts: Vec<String>,
+    shape: DecisionShape,
     trials: Vec<McdcTrial>,
     seen: std::collections::HashSet<McdcTrial>,
 }
@@ -1547,19 +1580,34 @@ impl Coverage {
 /// through the boolean connectives, treat everything else as one condition.
 /// Each leaf is keyed by its address (stable for the Sim's lifetime).
 fn decision_conditions(expr: &Expr) -> Vec<(usize, String)> {
-    fn go(e: &Expr, out: &mut Vec<(usize, String)>) {
+    decision_structure(expr).0
+}
+
+/// The conditions AND the decision's boolean structure over their indices,
+/// in one traversal so the leaf order agrees.
+fn decision_structure(expr: &Expr) -> (Vec<(usize, String)>, DecisionShape) {
+    fn go(e: &Expr, out: &mut Vec<(usize, String)>) -> DecisionShape {
         match e {
-            Expr::Binary { op: BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies, lhs, rhs } => {
-                go(lhs, out);
-                go(rhs, out);
+            Expr::Binary { op: op @ (BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Implies), lhs, rhs } => {
+                let l = Box::new(go(lhs, out));
+                let r = Box::new(go(rhs, out));
+                match op {
+                    BinOp::And => DecisionShape::And(l, r),
+                    BinOp::Or => DecisionShape::Or(l, r),
+                    BinOp::Xor => DecisionShape::Xor(l, r),
+                    _ => DecisionShape::Implies(l, r),
+                }
             }
-            Expr::Unary { op: UnaryOp::Not, arg } => go(arg, out),
-            _ => out.push((e as *const Expr as usize, ol_lustre_emit::format_expr(e))),
+            Expr::Unary { op: UnaryOp::Not, arg } => DecisionShape::Not(Box::new(go(arg, out))),
+            _ => {
+                out.push((e as *const Expr as usize, ol_lustre_emit::format_expr(e)));
+                DecisionShape::Cond(out.len() - 1)
+            }
         }
     }
     let mut v = Vec::new();
-    go(expr, &mut v);
-    v
+    let shape = go(expr, &mut v);
+    (v, shape)
 }
 
 /// Unique-cause MC/DC analysis. For each condition, find two trials that
@@ -1578,6 +1626,53 @@ pub fn mcdc_independence(num_conditions: usize, trials: &[McdcTrial]) -> Vec<Opt
                     if ta.outcome != tb.outcome
                         && ta.values[i] != tb.values[i]
                         && (0..num_conditions).filter(|&j| j != i).all(|j| ta.values[j] == tb.values[j])
+                    {
+                        return Some((a, b));
+                    }
+                }
+            }
+            None
+        })
+        .collect()
+}
+
+/// Masking MC/DC analysis — the DO-178C-accepted alternative to unique-cause
+/// (CAST-6). A condition's independent effect is demonstrated by a pair of
+/// trials where the condition differs, the outcome differs, and the
+/// condition is CONTROLLING in both trials: flipping it (alone) flips the
+/// decision as re-evaluated over `shape`, so every other differing condition
+/// is masked. Textually identical conditions are treated as one coupled
+/// condition — they always carry the same value, so unique-cause can never
+/// isolate them, and flipping toggles every instance together.
+pub fn mcdc_masking_independence(
+    shape: &DecisionShape,
+    conditions: &[String],
+    trials: &[McdcTrial],
+) -> Vec<Option<(usize, usize)>> {
+    let n = conditions.len();
+    // Coupled group per condition: every index with the same text.
+    let group: Vec<Vec<usize>> = (0..n)
+        .map(|i| (0..n).filter(|&j| conditions[j] == conditions[i]).collect())
+        .collect();
+    let controlling = |values: &[bool], g: &[usize]| -> bool {
+        let mut flipped = values.to_vec();
+        for &j in g {
+            flipped[j] = !flipped[j];
+        }
+        shape.eval(values) != shape.eval(&flipped)
+    };
+    (0..n)
+        .map(|i| {
+            for a in 0..trials.len() {
+                for b in (a + 1)..trials.len() {
+                    let (ta, tb) = (&trials[a], &trials[b]);
+                    if ta.values.len() != n || tb.values.len() != n {
+                        continue;
+                    }
+                    if ta.outcome != tb.outcome
+                        && ta.values[i] != tb.values[i]
+                        && controlling(&ta.values, &group[i])
+                        && controlling(&tb.values, &group[i])
                     {
                         return Some((a, b));
                     }
@@ -1611,7 +1706,7 @@ impl<'a> Sim<'a> {
                     if coverage.roots.contains_key(&key) {
                         return;
                     }
-                    let conds = decision_conditions(root);
+                    let (conds, shape) = decision_structure(root);
                     let idx = coverage.decisions.len();
                     coverage.roots.insert(key, idx);
                     coverage.decisions.push(DecisionData {
@@ -1620,6 +1715,7 @@ impl<'a> Sim<'a> {
                         decision_text: ol_lustre_emit::format_expr(root),
                         cond_ptrs: conds.iter().map(|(p, _)| *p).collect(),
                         cond_texts: conds.iter().map(|(_, t)| t.clone()).collect(),
+                        shape,
                         trials: Vec::new(),
                         seen: Default::default(),
                     });
@@ -1692,6 +1788,7 @@ impl<'a> Sim<'a> {
                     context: d.context.clone(),
                     decision: d.decision_text.clone(),
                     conditions: d.cond_texts.clone(),
+                    shape: d.shape.clone(),
                     trials: d.trials.clone(),
                 })
                 .collect()

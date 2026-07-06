@@ -134,9 +134,11 @@ fn ir_full_trace(
     if let (Some(mcdc), Some(decisions)) = (mcdc, sim.mcdc_decisions()) {
         for d in decisions {
             let key = (d.node.clone(), d.context.clone(), d.decision.clone());
-            let entry = mcdc
-                .entry(key)
-                .or_insert_with(|| McdcDecisionAgg { conditions: d.conditions.clone(), trials: Default::default() });
+            let entry = mcdc.entry(key).or_insert_with(|| McdcDecisionAgg {
+                conditions: d.conditions.clone(),
+                shape: d.shape.clone(),
+                trials: Default::default(),
+            });
             for t in d.trials {
                 entry.trials.insert(t);
             }
@@ -154,6 +156,7 @@ type McdcAcc = std::collections::BTreeMap<(String, String, String), McdcDecision
 
 struct McdcDecisionAgg {
     conditions: Vec<String>,
+    shape: ol_sim::DecisionShape,
     trials: std::collections::HashSet<ol_sim::McdcTrial>,
 }
 
@@ -210,6 +213,9 @@ pub struct McdcSummary {
     pub covered_decisions: usize,
     pub total_conditions: usize,
     pub covered_conditions: usize,
+    /// Of the covered conditions, how many needed the masking analysis (no
+    /// unique-cause pair exists — typically coupled conditions).
+    pub covered_via_masking: usize,
     pub uncovered: Vec<McdcUncovered>,
 }
 
@@ -227,6 +233,7 @@ fn summarize_mcdc(acc: &McdcAcc) -> McdcSummary {
     let mut covered_decisions = 0;
     let mut total_conditions = 0;
     let mut covered_conditions = 0;
+    let mut covered_via_masking = 0;
     let mut uncovered = Vec::new();
     for ((node, context, decision), agg) in acc {
         let n = agg.conditions.len();
@@ -235,12 +242,19 @@ fn summarize_mcdc(acc: &McdcAcc) -> McdcSummary {
         }
         total_decisions += 1;
         let trials: Vec<ol_sim::McdcTrial> = agg.trials.iter().cloned().collect();
-        let indep = ol_sim::mcdc_independence(n, &trials);
+        // Unique-cause is the stronger demonstration; masking (the accepted
+        // DO-178C alternative) covers what unique-cause structurally can't —
+        // notably coupled conditions, which always toggle together.
+        let unique = ol_sim::mcdc_independence(n, &trials);
+        let masking = ol_sim::mcdc_masking_independence(&agg.shape, &agg.conditions, &trials);
         let mut all = true;
-        for (i, pair) in indep.iter().enumerate() {
+        for i in 0..n {
             total_conditions += 1;
-            if pair.is_some() {
+            if unique[i].is_some() {
                 covered_conditions += 1;
+            } else if masking[i].is_some() {
+                covered_conditions += 1;
+                covered_via_masking += 1;
             } else {
                 all = false;
                 uncovered.push(McdcUncovered {
@@ -248,7 +262,7 @@ fn summarize_mcdc(acc: &McdcAcc) -> McdcSummary {
                     context: context.clone(),
                     decision: decision.clone(),
                     condition: agg.conditions[i].clone(),
-                    reason: "no test pair flips only this condition and the outcome".into(),
+                    reason: "no test pair isolates this condition (unique-cause or masking)".into(),
                 });
             }
         }
@@ -261,6 +275,7 @@ fn summarize_mcdc(acc: &McdcAcc) -> McdcSummary {
         covered_decisions,
         total_conditions,
         covered_conditions,
+        covered_via_masking,
         uncovered,
     }
 }

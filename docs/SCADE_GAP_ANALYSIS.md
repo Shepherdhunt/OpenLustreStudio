@@ -19,7 +19,24 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Automata signals + refine-with-history
+**Landed recently (newest first):** **SysML 2.0 requirements lifting +
+masking MC/DC (2026-07-06):** the associated `.sysml` file is now **read**
+(`crates/ol_cli/src/sysml.rs` — a tolerant subset reader for the SysML v2
+textual notation: `requirement def/usage` with `<'SRS-x'>` short names and
+`doc` bodies, `satisfy R by E`; everything else skipped). `openlustre trace`
+pulls `satisfy` links targeting an operator (by node name or associated
+element) into the matrix as `sysml satisfy` rows, reports each model's
+requirement/satisfy counts, and flags annotated IDs the model does not
+declare (`--strict` fails on them); the Studio inspect warns **W0171** for
+those; the design document lists each operator's satisfied SysML
+requirements with their doc text. "Untraced" now means *no link of any
+kind*. And **masking MC/DC**: the simulator records each decision's boolean
+structure (`DecisionShape`); textually identical (coupled) conditions —
+which unique-cause can never isolate — are covered when a trial pair flips
+the condition and the outcome with the condition *controlling* in both
+trials (re-evaluated over the shape). Reports say how many conditions
+needed masking; TOR-8 updated (masking is no longer an exclusion). Before
+that: **Automata signals + refine-with-history
 (2026-07-06):** SCADE-style **signals** — a machine declares boolean events
 (`StateMachineDef.signals`), states emit them (`StateDef.emits`), and a
 signal is `true` exactly while an emitting state is active (same-cycle
@@ -266,7 +283,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
 | Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). **2026-07-06**: **signals** landed (declare in the machine, `emit name` in states, same-cycle broadcast readable in guards/equations, merged across refinement) and **`refine M with history`** is authorable in the editor. Remaining: a state's inline nested-region authoring beyond `refine` (multi-region parallel states in the textual grammar) | P3 (was P2) |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
-| ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
+| ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. **2026-07-06: masking MC/DC landed** — the decision's boolean shape is recorded, coupled conditions are grouped, and a controlling-in-both-trials pair covers what unique-cause structurally cannot; reports count masking-covered conditions. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. **2026-07-06**: clause-level links landed — `requirements` on each contract Assumption/Guarantee/Mode, matrix grew an `element` column (`operator` / `assume L` / `guarantee L` / `mode M`), doc tags clause lines. **ReqIF export is decided out (2026-07-06)** — instead, **SysML 2.0 association groundwork landed**: `NodeDef.sysml` names the SysML model/element an operator realizes (Studio-edited, W0170 on dangling file, in trace/diff/doc); requirements will always ride in the SysML model | done |
 | ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
@@ -285,9 +302,10 @@ qualification-by-pedigree**, and it is already half-built:
    the compiled generated C, cell-by-cell (done).
 2. **Formal contract proofs** — Kind 2 proves the model's contracts; monitors compile
    the same contracts into the C so violations are observable at runtime (done).
-3. **Coverage evidence** — decision coverage **and unique-cause MC/DC** (the DO-178C
-   Level A metric) measured on the IR backend and reported per condition (done 2026-06-12;
-   masking MC/DC for coupled conditions remains roadmap).
+3. **Coverage evidence** — decision coverage **and MC/DC** (the DO-178C
+   Level A metric) measured on the IR backend and reported per condition
+   (unique-cause done 2026-06-12; **masking for coupled conditions done
+   2026-07-06** — the coverage story has no remaining exclusion).
 4. **Tool Operational Requirements document** — **done 2026-07-03**:
    `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` enumerates the tool's claims
    (TOR-1…12) with each mapped to its verification evidence in the test
@@ -310,6 +328,57 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (sysml-reqs) — the associated SysML model's requirements feed the trace
+
+`crates/ol_cli/src/sysml.rs` reads the SysML 2.0 **textual notation** —
+deliberately a tolerant subset: `requirement def` / `requirement` usages
+(short-name IDs like `<'SRS-042'>`, `doc /* … */` bodies) and
+`satisfy R by E;` relationships; every other construct (parts, attributes,
+actions, imports) is skipped without error, so a real system model authored
+elsewhere reads fine. A requirement's ID is its short name, else its
+declared name; satisfy references resolve through either.
+
+Consumers: **`openlustre trace`** reads each associated model once, adds a
+`sysml satisfy` matrix row for every satisfy statement targeting the
+operator (by node name, the associated element, or its last `::` segment),
+prints a per-model `-- sysml model(s): file: N requirement(s), M satisfy
+link(s)` summary, and reports annotated IDs the model does not declare —
+`--strict` fails on them (the SysML model is the requirements' source of
+truth). "Untraced operator" tightened to mean *no requirement link of any
+kind* (node, clause, or satisfy). The **Studio inspect** warns **W0171**
+per undeclared ID (W0170 still covers a missing file). The **design
+document** gives each associated operator a "SysML requirement" table: ID +
+doc text for every requirement the model says the operator satisfies.
+
+Tests: parser unit tests in `sysml.rs`;
+`sysml_requirements_lift_into_the_trace_matrix` (tests/studio_editing.rs)
+drives the satisfy row, the W0171 warning, the strict gate, and the doc
+table end to end through the Studio API and CLI.
+
+### 2026-07-06 (masking) — masking MC/DC closes the coupled-condition gap
+
+Unique-cause MC/DC structurally cannot cover a **coupled condition** — the
+same atomic condition appearing more than once in a decision (`a and b or
+not a and c` has two `a` leaves that always flip together). The simulator
+now records each decision's boolean structure over its condition indices
+(`DecisionShape`, built in the same traversal that lists the conditions),
+and `mcdc_masking_independence` implements the DO-178C-accepted masking
+analysis: textually identical conditions form one coupled group, and a
+trial pair demonstrates independent effect when the condition differs, the
+outcome differs, and the condition is **controlling in both trials** —
+flipping the whole group flips the decision as re-evaluated over the shape,
+so every other differing condition is provably masked. The suite summary
+tries unique-cause first (the stronger demonstration) and falls back to
+masking, reporting `N via masking` in `test run` and the Studio Tests dock;
+`TOOL_OPERATIONAL_REQUIREMENTS.md` TOR-8 updated and the §4 exclusion
+removed.
+
+Tests (tests/mcdc.rs): the coupled decision uncoverable by unique-cause and
+fully covered by masking (pure analysis + simulator shape capture), the
+non-controlling pair correctly rejected (masking is not laxer than the
+definition), and the CLI report showing `4/4 conditions independent … 2 via
+masking`.
 
 ### 2026-07-06 (signals+history) — automaton signals, refine with history
 

@@ -10,6 +10,7 @@ mod lustre_import;
 mod model_diff;
 mod scenario;
 mod studio_server;
+mod sysml;
 
 use ol_clite_emit::{load_manifest_dir, monitor};
 use ol_cocospec_emit::Target;
@@ -355,7 +356,7 @@ fn main() -> Result<()> {
         }
         Cmd::Doc { model, out } => {
             let project = load(&model)?;
-            let html = doc_gen::generate_html(&project);
+            let html = doc_gen::generate_html(&project, model.parent());
             std::fs::write(&out, html)
                 .with_context(|| format!("writing {}", out.display()))?;
             println!("design document written to {}", out.display());
@@ -517,16 +518,13 @@ fn cmd_diff(old: &Path, new: &Path) -> Result<()> {
 fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, strict: bool) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
     // (requirement, operator, element): element is `operator` for node-level
-    // annotations, or the contract clause (`guarantee g`, `mode M`, …) for
-    // clause-level ones — the rung below the operator.
+    // annotations, the contract clause (`guarantee g`, `mode M`, …) for
+    // clause-level ones, or `sysml satisfy` for links pulled from the
+    // operator's associated SysML 2.0 model.
     let mut rows: Vec<(String, String, String)> = Vec::new();
-    let mut untraced: Vec<String> = Vec::new();
     for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
         let (contracts, _) = ol_contract_ir::parse_contracts(&pkg.contracts);
         for n in &pkg.nodes {
-            if n.requirements.is_empty() {
-                untraced.push(n.name.clone());
-            }
             for r in &n.requirements {
                 rows.push((r.clone(), n.name.clone(), "operator".into()));
             }
@@ -551,6 +549,74 @@ fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, stric
             }
         }
     }
+
+    // SysML 2.0: read each associated model once. `satisfy R by E` statements
+    // that target an operator (by node name or by its associated element)
+    // become matrix rows — the requirements riding in the SysML model ARE the
+    // trace anchors. Annotated IDs that the associated model does not declare
+    // are reported (and fail --strict): the model file is the source of truth.
+    let model_dir = model.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let mut sysml_models: std::collections::BTreeMap<String, Option<sysml::SysmlModel>> =
+        Default::default();
+    let mut sysml_summaries: Vec<String> = Vec::new();
+    let mut sysml_missing: Vec<String> = Vec::new();
+    for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+        for n in &pkg.nodes {
+            let Some(sr) = &n.sysml else { continue };
+            let parsed = sysml_models.entry(sr.model.clone()).or_insert_with(|| {
+                let m = std::fs::read_to_string(model_dir.join(&sr.model))
+                    .ok()
+                    .map(|s| sysml::parse(&s));
+                if let Some(m) = &m {
+                    sysml_summaries.push(format!(
+                        "{}: {} requirement(s), {} satisfy link(s)",
+                        sr.model,
+                        m.requirements.len(),
+                        m.satisfies.len()
+                    ));
+                }
+                m
+            });
+            let Some(sm) = parsed else { continue };
+            let last = |s: &str| s.rsplit("::").next().unwrap_or(s).to_string();
+            let elem_last = sr.element.as_deref().map(last);
+            for sat in &sm.satisfies {
+                let by_last = last(&sat.by);
+                let hits = by_last == n.name
+                    || sr.element.as_deref() == Some(sat.by.as_str())
+                    || elem_last.as_deref() == Some(by_last.as_str());
+                if hits {
+                    rows.push((
+                        sm.resolve_requirement_id(&sat.requirement),
+                        n.name.clone(),
+                        "sysml satisfy".into(),
+                    ));
+                }
+            }
+            // Every ID annotated on the node or its contract clauses must be a
+            // requirement the associated SysML model declares.
+            let clause_reqs = rows
+                .iter()
+                .filter(|(_, node, elem)| node == &n.name && elem != "sysml satisfy")
+                .map(|(r, _, _)| r.clone())
+                .collect::<std::collections::BTreeSet<_>>();
+            for id in clause_reqs {
+                if !sm.has_requirement(&id) {
+                    sysml_missing.push(format!("{id} ({} -> {})", n.name, sr.model));
+                }
+            }
+        }
+    }
+
+    // Untraced: operators with no requirement link of any kind.
+    let mut untraced: Vec<String> = project
+        .packages
+        .iter()
+        .filter(|p| p.name != "stdlib")
+        .flat_map(|p| &p.nodes)
+        .filter(|n| !rows.iter().any(|(_, node, _)| node == &n.name))
+        .map(|n| n.name.clone())
+        .collect();
     rows.sort();
     rows.dedup();
     let mut csv = String::from("requirement,operator,element\n");
@@ -587,6 +653,24 @@ fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, stric
     if !sysml_links.is_empty() {
         sysml_links.sort();
         println!("-- sysml association(s): {}", sysml_links.join("; "));
+    }
+    if !sysml_summaries.is_empty() {
+        sysml_summaries.sort();
+        println!("-- sysml model(s): {}", sysml_summaries.join("; "));
+    }
+    if !sysml_missing.is_empty() {
+        sysml_missing.sort();
+        sysml_missing.dedup();
+        println!(
+            "-- requirement(s) not declared in the associated sysml model: {}",
+            sysml_missing.join("; ")
+        );
+        if strict {
+            anyhow::bail!(
+                "{} requirement annotation(s) missing from the associated SysML model",
+                sysml_missing.len()
+            );
+        }
     }
     if !untraced.is_empty() {
         untraced.sort();
@@ -1348,8 +1432,13 @@ fn cmd_test_run(
         }
     }
     if let Some(m) = &outcome.mcdc {
+        let masking = if m.covered_via_masking > 0 {
+            format!(", {} via masking", m.covered_via_masking)
+        } else {
+            String::new()
+        };
         println!(
-            "MC/DC: {}/{} conditions independent ({}/{} decisions fully covered)",
+            "MC/DC: {}/{} conditions independent ({}/{} decisions fully covered{masking})",
             m.covered_conditions, m.total_conditions, m.covered_decisions, m.total_decisions
         );
         for u in &m.uncovered {

@@ -722,6 +722,100 @@ fn sysml_association_round_trip_warns_traces_and_clears() {
     assert_eq!(release_logic(&ins)["sysml"]["model"], "models/sys.sysml");
 }
 
+/// SysML 2.0 requirements lifting: the associated `.sysml` file's
+/// requirement definitions and `satisfy` relationships feed the trace matrix;
+/// annotated IDs the model does not declare are warned about (W0171 in the
+/// inspect, a report line + --strict failure in `openlustre trace`); the
+/// design document shows the satisfied requirements with their doc text.
+#[test]
+fn sysml_requirements_lift_into_the_trace_matrix() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+
+    std::fs::create_dir_all(g.tmp.join("models")).unwrap();
+    std::fs::write(
+        g.tmp.join("models/flight.sysml"),
+        r#"
+        package Flight {
+            requirement def <'SRS-201'> ReleaseReq {
+                doc /* The system shall release only when armed. */
+            }
+            requirement def <'SRS-202'> StationReq;
+            part def Rel;
+            satisfy ReleaseReq by Rel;
+            satisfy StationReq by Elsewhere;
+        }
+        "#,
+    )
+    .unwrap();
+    post("/api/edit/set_sysml",
+        r#"{"node":"ReleaseLogic","model":"models/flight.sysml","element":"Flight::Rel"}"#);
+    // One ID the model declares, one it does not.
+    post("/api/edit/set_requirements",
+        r#"{"node":"ReleaseLogic","requirements":["SRS-201","SRS-999"]}"#);
+
+    // The inspect warns (W0171) about the undeclared ID only.
+    let (s, b) = request(port, "GET", "/api/inspect", "").unwrap();
+    assert_eq!(s, 200);
+    let ins: serde_json::Value = serde_json::from_str(&b).unwrap();
+    let w0171: Vec<&str> = ins["diagnostics"].as_array().unwrap().iter()
+        .filter(|d| d["code"] == "W0171")
+        .map(|d| d["message"].as_str().unwrap())
+        .collect();
+    assert_eq!(w0171.len(), 1, "exactly the undeclared ID warns: {w0171:?}");
+    assert!(w0171[0].contains("SRS-999"), "{w0171:?}");
+
+    // `trace`: the satisfy row rides in the matrix; the summary names the
+    // model; the undeclared annotation is reported.
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "trace"])
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "{text}");
+    assert!(text.contains("SRS-201,ReleaseLogic,operator"), "{text}");
+    assert!(text.contains("SRS-201,ReleaseLogic,sysml satisfy"), "{text}");
+    assert!(!text.contains("SRS-202,ReleaseLogic"), "satisfy of another element must not leak: {text}");
+    assert!(
+        text.contains("-- sysml model(s): models/flight.sysml: 2 requirement(s), 2 satisfy link(s)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("-- requirement(s) not declared in the associated sysml model: SRS-999 (ReleaseLogic -> models/flight.sysml)"),
+        "{text}"
+    );
+
+    // --strict gates on the undeclared annotation.
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "trace", "--strict"])
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "--strict must fail on an undeclared requirement");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(text.contains("missing from the associated SysML model"), "{text}");
+
+    // The design document lists the satisfied requirement with its doc text.
+    let (s, doc) = request(port, "GET", "/api/doc", "").unwrap();
+    assert_eq!(s, 200);
+    assert!(doc.contains("SysML requirement"), "doc table missing");
+    assert!(doc.contains("SRS-201"), "doc id missing");
+    assert!(doc.contains("The system shall release only when armed."), "doc text missing");
+}
+
 /// Project ▸ Design Document serves the report from the running Studio.
 #[test]
 fn design_document_endpoint_serves_the_report() {

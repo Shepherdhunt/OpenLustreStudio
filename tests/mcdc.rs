@@ -187,3 +187,125 @@ fn cli_reports_mcdc_coverage_for_the_suite() {
     assert!(out.contains("uncovered:") && out.contains("`a`"), "names the uncovered condition: {out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// --- Masking MC/DC (coupled conditions) ----------------------------------------
+
+use ol_sim::{mcdc_masking_independence, DecisionShape};
+
+fn coupled_shape() -> (DecisionShape, Vec<String>) {
+    // (a and b) or (not a and c): leaves in evaluation order [a, b, a, c] —
+    // the two `a` leaves are COUPLED (same expression), so no test can ever
+    // flip one without the other and unique-cause is structurally impossible.
+    let c = |i| Box::new(DecisionShape::Cond(i));
+    let shape = DecisionShape::Or(
+        Box::new(DecisionShape::And(c(0), c(1))),
+        Box::new(DecisionShape::And(Box::new(DecisionShape::Not(c(2))), c(3))),
+    );
+    (shape, ["a", "b", "a", "c"].iter().map(|s| s.to_string()).collect())
+}
+
+#[test]
+fn masking_covers_coupled_conditions_unique_cause_cannot() {
+    let (shape, conds) = coupled_shape();
+    let trials = [
+        trial(&[true, true, true, false], true),     // a=T b=T c=F -> T
+        trial(&[false, true, false, false], false),  // a=F b=T c=F -> F
+        trial(&[false, false, false, true], true),   // a=F b=F c=T -> T
+        trial(&[true, false, true, false], false),   // a=T b=F c=F -> F
+        trial(&[false, false, false, false], false), // a=F b=F c=F -> F
+    ];
+    // Unique-cause can never isolate the coupled `a` leaves…
+    let unique = mcdc_independence(4, &trials);
+    assert!(unique[0].is_none() && unique[2].is_none(), "{unique:?}");
+    assert!(unique[1].is_some() && unique[3].is_some(), "{unique:?}");
+    // …masking isolates them: in the T,T,·,F / F,T,·,F pair `a` flips, the
+    // outcome flips, and `a` is controlling in both trials (b=T arms the
+    // left product, c=F disarms the right), so every other difference is
+    // masked. All four conditions are covered under masking.
+    let masking = mcdc_masking_independence(&shape, &conds, &trials);
+    assert!(masking.iter().all(|p| p.is_some()), "{masking:?}");
+}
+
+#[test]
+fn masking_rejects_pairs_where_the_condition_is_not_controlling() {
+    // a or b with only {TT, FF}: outcomes differ and each condition flips,
+    // but in TT the other true operand masks it — flipping one condition
+    // leaves the decision true, so nothing was demonstrated.
+    let shape = DecisionShape::Or(
+        Box::new(DecisionShape::Cond(0)),
+        Box::new(DecisionShape::Cond(1)),
+    );
+    let conds = vec!["a".to_string(), "b".to_string()];
+    let weak = [trial(&[true, true], true), trial(&[false, false], false)];
+    let masking = mcdc_masking_independence(&shape, &conds, &weak);
+    assert!(masking.iter().all(|p| p.is_none()), "masking is not laxer than it should be: {masking:?}");
+
+    // With TF and FT each condition is controlling in its pair.
+    let good = [
+        trial(&[true, false], true),
+        trial(&[false, false], false),
+        trial(&[false, true], true),
+    ];
+    let masking = mcdc_masking_independence(&shape, &conds, &good);
+    assert!(masking.iter().all(|p| p.is_some()), "{masking:?}");
+}
+
+fn coupled_model() -> serde_json::Value {
+    // node Vote(a, b, c) returns (open)  open = a and b or not a and c;
+    serde_json::json!({
+        "name": "mcdc_coupled", "packages": [{"name": "user", "nodes": [{
+            "name": "Vote", "kind": "Operator",
+            "inputs": [
+                {"name": "a", "ty": {"kind": "Bool"}},
+                {"name": "b", "ty": {"kind": "Bool"}},
+                {"name": "c", "ty": {"kind": "Bool"}}
+            ],
+            "outputs": [{"name": "open", "ty": {"kind": "Bool"}}],
+            "equations": [{"lhs": ["open"],
+                "rhs": ol_stdlib::parse_expr("a and b or not a and c").unwrap()}]
+        }]}],
+        "main": "Vote"
+    })
+}
+
+#[test]
+fn simulator_records_the_decision_shape_for_masking_analysis() {
+    let project = load(coupled_model());
+    let mut sim = ol_sim::Sim::new(&project, "Vote").unwrap();
+    sim.enable_coverage();
+    sim.run_csv_full(
+        "a,b,c\ntrue,true,false\nfalse,true,false\nfalse,false,true\ntrue,false,false\nfalse,false,false\n",
+    )
+    .unwrap();
+    let decisions = sim.mcdc_decisions().unwrap();
+    let d = decisions.iter().find(|d| d.context == "open").expect("the coupled decision");
+    assert_eq!(d.conditions, vec!["a", "b", "a", "c"], "coupled leaves recorded: {d:?}");
+
+    let unique = mcdc_independence(d.conditions.len(), &d.trials);
+    assert!(unique[0].is_none() && unique[2].is_none(), "coupled `a` beyond unique-cause: {unique:?}");
+    let masking = mcdc_masking_independence(&d.shape, &d.conditions, &d.trials);
+    assert!(masking.iter().all(|p| p.is_some()), "fully covered under masking: {masking:?}");
+}
+
+#[test]
+fn cli_reports_masking_coverage_for_coupled_conditions() {
+    let tmp = make_tempdir("mcdc_masking_cli");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&coupled_model()).unwrap()).unwrap();
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    std::fs::write(
+        scen.join("vote.csv"),
+        "a,b,c\ntrue,true,false\nfalse,true,false\nfalse,false,true\ntrue,false,false\nfalse,false,false\n",
+    )
+    .unwrap();
+    let (ok, out) = openlustre(&["test", "record", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "{out}");
+    let (ok, out) = openlustre(&["test", "run", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap(), "--backend", "ir"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("MC/DC: 4/4 conditions independent"), "{out}");
+    assert!(out.contains("2 via masking"), "the coupled `a` leaves count as masking-covered: {out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
