@@ -180,13 +180,18 @@ pub enum Expr {
         arrays: Vec<Expr>,
     },
     /// A float math intrinsic — the SCADE libmath family. Surface syntax is
-    /// function-style (`sqrt(x)`, `atan2(y, x)`). Operands and result are
-    /// `float64` only: `float32` streams cast in and out explicitly
-    /// (`sqrt(float64(x))`), so the IR simulator, the generated C (`<math.h>`
-    /// double functions), and the Kind 2 view all compute the same thing.
+    /// function-style (`sqrt(x)`, `atan2(y, x)`); the `f`-suffixed names
+    /// (`sqrtf(x)`) are the single-precision variants. Double intrinsics take
+    /// and return `float64`, single ones `float32` — never mixed, so the IR
+    /// simulator (Rust f64/f32 = the platform libm), the generated C
+    /// (`<math.h>` double/float functions), and the Kind 2 view all compute
+    /// the same thing.
     FloatIntrinsic {
         op: FloatOp,
         args: Vec<Expr>,
+        /// Single precision (`sqrtf`, float32) instead of double (`sqrt`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        single: bool,
     },
 }
 
@@ -278,10 +283,49 @@ impl FloatOp {
         }
     }
 
+    /// The single-precision surface name: the double name plus `f`
+    /// (`sqrtf`, `atan2f`, `absf`, `minf`, `maxf`).
+    pub fn single_name(self) -> String {
+        format!("{}f", self.name())
+    }
+
+    /// The `<math.h>` float function for the single-precision variant.
+    pub fn c_name_single(self) -> &'static str {
+        match self {
+            FloatOp::Sqrt => "sqrtf",
+            FloatOp::Sin => "sinf",
+            FloatOp::Cos => "cosf",
+            FloatOp::Tan => "tanf",
+            FloatOp::Asin => "asinf",
+            FloatOp::Acos => "acosf",
+            FloatOp::Atan => "atanf",
+            FloatOp::Atan2 => "atan2f",
+            FloatOp::Exp => "expf",
+            FloatOp::Log => "logf",
+            FloatOp::Log10 => "log10f",
+            FloatOp::Pow => "powf",
+            FloatOp::Floor => "floorf",
+            FloatOp::Ceil => "ceilf",
+            FloatOp::Round => "roundf",
+            FloatOp::Abs => "fabsf",
+            FloatOp::Min => "fminf",
+            FloatOp::Max => "fmaxf",
+        }
+    }
+
     /// Resolve a surface name (`"sqrt"`) to its intrinsic, reserving these
     /// names in call position.
     pub fn from_name(name: &str) -> Option<FloatOp> {
         FloatOp::ALL.iter().copied().find(|op| op.name() == name)
+    }
+
+    /// Resolve either surface form: `"sqrt"` → (Sqrt, double),
+    /// `"sqrtf"` → (Sqrt, single).
+    pub fn from_surface(name: &str) -> Option<(FloatOp, bool)> {
+        if let Some(op) = FloatOp::from_name(name) {
+            return Some((op, false));
+        }
+        name.strip_suffix('f').and_then(FloatOp::from_name).map(|op| (op, true))
     }
 }
 
@@ -378,7 +422,10 @@ impl Expr {
         }
     }
     pub fn float_intrinsic(op: FloatOp, args: Vec<Expr>) -> Self {
-        Expr::FloatIntrinsic { op, args }
+        Expr::FloatIntrinsic { op, args, single: false }
+    }
+    pub fn float_intrinsic_single(op: FloatOp, args: Vec<Expr>) -> Self {
+        Expr::FloatIntrinsic { op, args, single: true }
     }
     pub fn array(items: Vec<Expr>) -> Self {
         Expr::Array { items }

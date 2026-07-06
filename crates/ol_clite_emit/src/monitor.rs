@@ -175,13 +175,14 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         Expr::Cast { to, arg } => {
             format!("(({}){})", to.c_name(), emit_mon_expr(arg, scope))
         }
-        Expr::FloatIntrinsic { op, args } => {
+        Expr::FloatIntrinsic { op, args, single } => {
             let parts = args
                 .iter()
                 .map(|a| emit_mon_expr(a, scope))
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("{}({parts})", op.c_name())
+            let f = if *single { op.c_name_single() } else { op.c_name() };
+            format!("{f}({parts})")
         }
         Expr::Unary { op, arg } => {
             let a = emit_mon_expr(arg, scope);

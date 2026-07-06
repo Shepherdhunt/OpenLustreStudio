@@ -33,7 +33,7 @@ fn intrinsics_parse_and_round_trip_through_the_surface_formatter() {
     // Two-argument intrinsics keep their argument order.
     let a2 = ol_stdlib::parse_expr("atan2(y, x)").unwrap();
     assert!(
-        matches!(&a2, ol_ir::Expr::FloatIntrinsic { op: ol_ir::FloatOp::Atan2, args } if args.len() == 2),
+        matches!(&a2, ol_ir::Expr::FloatIntrinsic { op: ol_ir::FloatOp::Atan2, args, .. } if args.len() == 2),
         "{a2:?}"
     );
     assert_eq!(ol_lustre_emit::format_expr(&a2), "atan2(y, x)");
@@ -305,5 +305,130 @@ fn generated_c_calls_math_h_and_traces_match_compiled_c() {
     assert!(ok, "run: {out}");
     assert!(out.contains("[PASS] mathy (ir)"), "{out}");
     assert!(out.contains("[PASS] mathy (c )"), "intrinsics C backend: {out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+// --- Single-precision (float32) variants ---------------------------------------
+
+#[test]
+fn single_precision_intrinsics_parse_typecheck_and_round_trip() {
+    let e = ol_stdlib::parse_expr("sqrtf(x)").expect("parse sqrtf");
+    assert!(
+        matches!(&e, ol_ir::Expr::FloatIntrinsic { op: ol_ir::FloatOp::Sqrt, single: true, .. }),
+        "{e:?}"
+    );
+    assert_eq!(ol_lustre_emit::format_expr(&e), "sqrtf(x)");
+    assert_eq!(e, ol_stdlib::parse_expr("sqrtf(x)").unwrap());
+    assert_eq!(ol_lustre_emit::format_expr_lustre(&e), "sqrtf(x)");
+
+    // sqrtf takes float32; a float64 operand is E0161 with the float32 hint.
+    let p = one_eq_project(
+        serde_json::json!({"kind": "Float32"}),
+        serde_json::json!({"expr": "FloatIntrinsic", "op": "Sqrt", "single": true,
+                           "args": [var("xf")]}),
+    );
+    let report = ol_typecheck::check_project(&p);
+    assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+
+    let p = one_eq_project(
+        serde_json::json!({"kind": "Float32"}),
+        serde_json::json!({"expr": "FloatIntrinsic", "op": "Sqrt", "single": true,
+                           "args": [var("xd")]}),
+    );
+    let report = ol_typecheck::check_project(&p);
+    let d = report.diagnostics.iter().find(|d| d.code == "E0161").expect("E0161");
+    assert!(d.message.contains("float32("), "hint missing: {}", d.message);
+
+    // The `single` flag round-trips through JSON; absent means double, so
+    // pre-existing models load unchanged.
+    let txt = serde_json::to_string(&e).unwrap();
+    assert!(txt.contains("\"single\":true"), "{txt}");
+    let d64: ol_ir::Expr = serde_json::from_str(
+        r#"{"expr":"FloatIntrinsic","op":"Sqrt","args":[{"expr":"Var","name":"x"}]}"#,
+    )
+    .unwrap();
+    assert!(matches!(&d64, ol_ir::Expr::FloatIntrinsic { single: false, .. }));
+}
+
+fn mathf_model() -> serde_json::Value {
+    let eq = |lhs: &str, body: &str| {
+        serde_json::json!({"lhs": [lhs], "rhs": ol_stdlib::parse_expr(body).unwrap()})
+    };
+    serde_json::json!({
+        "name": "mathf",
+        "packages": [{
+            "name": "user",
+            "nodes": [{
+                "name": "Mathf",
+                "kind": "Function",
+                "inputs": [
+                    {"name": "a", "ty": {"kind": "Float32"}},
+                    {"name": "b", "ty": {"kind": "Float32"}}
+                ],
+                "outputs": [
+                    {"name": "root", "ty": {"kind": "Float32"}},
+                    {"name": "mag", "ty": {"kind": "Float32"}},
+                    {"name": "lo", "ty": {"kind": "Float32"}},
+                    {"name": "rd", "ty": {"kind": "Float32"}}
+                ],
+                "equations": [
+                    eq("root", "sqrtf(a)"),
+                    eq("mag", "absf(b)"),
+                    eq("lo", "minf(a, b)"),
+                    eq("rd", "roundf(b)")
+                ]
+            }]
+        }],
+        "main": "Mathf"
+    })
+}
+
+#[test]
+fn single_precision_traces_match_between_ir_and_compiled_c() {
+    let tmp = make_tempdir("fi_f32");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&mathf_model()).unwrap()).unwrap();
+    let project = ol_ir::load_project(&model).unwrap();
+
+    // The generated C calls the float functions, not the double ones.
+    let emitted = ol_clite_emit::emit_project(&project);
+    for call in ["sqrtf(", "fabsf(", "fminf(", "roundf("] {
+        assert!(emitted.source.contains(call), "generated C missing {call}:\n{}", emitted.source);
+    }
+
+    // IR simulation computes in f32: sqrtf(6.25)=2.5, absf(-3.5)=3.5, …
+    let mut sim = ol_sim::Sim::new(&project, "Mathf").unwrap();
+    let trace = sim.run_csv("a,b\n6.25,-3.5\n").unwrap();
+    let lines: Vec<&str> = trace.to_csv().trim().lines().map(str::to_owned)
+        .collect::<Vec<_>>().leak().iter().map(|s| s.as_str()).collect();
+    assert_eq!(lines[1], "0,2.5,3.5,-3.5,-4");
+
+    // And the compiled C agrees cell by cell on exactly-rounded cases.
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    std::fs::write(scen.join("mathf.csv"), "a,b\n6.25,-3.5\n4,2.5\n0.25,0.5\n").unwrap();
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO"))
+            .args(["run", "-q", "-p", "ol_cli", "--"])
+            .args(args)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        )
+    };
+    let (ok, out) = run(&["test", "record", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record: {out}");
+    let (ok, out) = run(&["test", "run", model.to_str().unwrap(),
+        "--scenarios", scen.to_str().unwrap(), "--backend", "both"]);
+    assert!(ok, "run: {out}");
+    assert!(out.contains("[PASS] mathf (ir)"), "{out}");
+    assert!(out.contains("[PASS] mathf (c )"), "float32 C backend: {out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }

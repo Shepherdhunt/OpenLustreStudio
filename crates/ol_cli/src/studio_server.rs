@@ -773,7 +773,9 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
             "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
-        Expr::FloatIntrinsic { op: fop, .. } => op(fop.name()),
+        Expr::FloatIntrinsic { op: fop, single, .. } => {
+            if *single { op(&fop.single_name()) } else { op(fop.name()) }
+        }
         Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
         _ => serde_json::Value::Null,
     }
@@ -2627,6 +2629,11 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "log" | "log10"
         | "floor" | "ceil" | "round" | "abs" => (vec!["float64"], "float64"),
         "atan2" | "pow" | "min" | "max" => (vec!["float64", "float64"], "float64"),
+        "sqrtf" | "sinf" | "cosf" | "tanf" | "asinf" | "acosf" | "atanf" | "expf"
+        | "logf" | "log10f" | "floorf" | "ceilf" | "roundf" | "absf" => {
+            (vec!["float32"], "float32")
+        }
+        "atan2f" | "powf" | "minf" | "maxf" => (vec!["float32", "float32"], "float32"),
         "equal" | "not_equal" => (vec!["T", "T"], "bool"),
         "greater_than" | "greater_equal" | "less_than" | "less_equal" => {
             (vec!["number", "number"], "bool")
@@ -2728,6 +2735,28 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("abs", "abs", 1, "float64"),
             op("min", "min", 2, "float64"),
             op("max", "max", 2, "float64"),
+        ]),
+        // The single-precision (float32) variants: `<math.h>` float
+        // functions, for targets that compute in single precision.
+        ("Float Math (32-bit)", vec![
+            op("sqrtf", "sqrtf", 1, "float32"),
+            op("sinf", "sinf", 1, "float32"),
+            op("cosf", "cosf", 1, "float32"),
+            op("tanf", "tanf", 1, "float32"),
+            op("asinf", "asinf", 1, "float32"),
+            op("acosf", "acosf", 1, "float32"),
+            op("atanf", "atanf", 1, "float32"),
+            op("atan2f", "atan2f(y, x)", 2, "float32"),
+            op("expf", "expf", 1, "float32"),
+            op("logf", "logf (ln)", 1, "float32"),
+            op("log10f", "log10f", 1, "float32"),
+            op("powf", "powf(x, y)", 2, "float32"),
+            op("floorf", "floorf", 1, "float32"),
+            op("ceilf", "ceilf", 1, "float32"),
+            op("roundf", "roundf", 1, "float32"),
+            op("absf", "absf", 1, "float32"),
+            op("minf", "minf", 2, "float32"),
+            op("maxf", "maxf", 2, "float32"),
         ]),
         ("Comparisons", vec![
             op("equal", "equal (=)", 2, "bool"),
@@ -2873,11 +2902,16 @@ fn operation_body(
             return Ok((body, t.to_string()));
         }
         // Float intrinsics: `square_root` is the SCADE-named chip for sqrt;
-        // the Float Math family's ids are the surface function names.
+        // the Float Math families' ids are the surface function names
+        // (`f`-suffixed = single precision).
         "square_root" => format!("sqrt({a})"),
         "sin" | "cos" | "tan" | "asin" | "acos" | "atan" | "exp" | "log" | "log10"
-        | "floor" | "ceil" | "round" | "abs" => format!("{}({a})", opdef.id),
-        "atan2" | "pow" | "min" | "max" => format!("{}({a}, {b})", opdef.id),
+        | "floor" | "ceil" | "round" | "abs" | "sqrtf" | "sinf" | "cosf" | "tanf"
+        | "asinf" | "acosf" | "atanf" | "expf" | "logf" | "log10f" | "floorf"
+        | "ceilf" | "roundf" | "absf" => format!("{}({a})", opdef.id),
+        "atan2" | "pow" | "min" | "max" | "atan2f" | "powf" | "minf" | "maxf" => {
+            format!("{}({a}, {b})", opdef.id)
+        }
         "equal" => format!("{a} = {b}"),
         "not_equal" => format!("{a} <> {b}"),
         "greater_than" => format!("{a} > {b}"),

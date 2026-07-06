@@ -864,9 +864,10 @@ fn eval(
             let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             cast_value(to, v)
         }
-        // Float intrinsics compute in f64 — the same double-precision libm
-        // functions the generated C calls, so both backends agree.
-        Expr::FloatIntrinsic { op, args } => {
+        // Float intrinsics compute in f64 (double variants) or f32 (single
+        // variants) — the same libm functions the generated C calls
+        // (`sqrt` vs `sqrtf`), so both backends agree.
+        Expr::FloatIntrinsic { op, args, single } => {
             let mut vals = Vec::with_capacity(args.len());
             for a in args {
                 match eval(a, env, state, call_states, project, site_clocks, cov)? {
@@ -888,6 +889,33 @@ fn eval(
                 )));
             }
             use ol_ir::FloatOp;
+            if *single {
+                // float32 values are stored f32-rounded; compute in f32 like
+                // the generated C's float functions do.
+                let x = vals[0] as f32;
+                let y = || vals[1] as f32;
+                let r = match op {
+                    FloatOp::Sqrt => x.sqrt(),
+                    FloatOp::Sin => x.sin(),
+                    FloatOp::Cos => x.cos(),
+                    FloatOp::Tan => x.tan(),
+                    FloatOp::Asin => x.asin(),
+                    FloatOp::Acos => x.acos(),
+                    FloatOp::Atan => x.atan(),
+                    FloatOp::Atan2 => x.atan2(y()),
+                    FloatOp::Exp => x.exp(),
+                    FloatOp::Log => x.ln(),
+                    FloatOp::Log10 => x.log10(),
+                    FloatOp::Pow => x.powf(y()),
+                    FloatOp::Floor => x.floor(),
+                    FloatOp::Ceil => x.ceil(),
+                    FloatOp::Round => x.round(),
+                    FloatOp::Abs => x.abs(),
+                    FloatOp::Min => x.min(y()),
+                    FloatOp::Max => x.max(y()),
+                };
+                return Ok(Value::Float(r as f64));
+            }
             let x = vals[0];
             let r = match op {
                 FloatOp::Sqrt => x.sqrt(),

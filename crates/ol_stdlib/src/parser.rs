@@ -755,9 +755,10 @@ impl Parser {
                             arg: Box::new(args.pop().unwrap()),
                         });
                     }
-                    // Float math intrinsics: `sqrt(x)`, `atan2(y, x)`, … —
-                    // these names are reserved in call position.
-                    if let Some(fop) = ol_ir::FloatOp::from_name(&name) {
+                    // Float math intrinsics: `sqrt(x)`, `atan2(y, x)`, and the
+                    // single-precision `sqrtf(x)` forms — these names are
+                    // reserved in call position.
+                    if let Some((fop, single)) = ol_ir::FloatOp::from_surface(&name) {
                         if args.len() != fop.arity() {
                             return Err(ParseError::Expected {
                                 expected: format!(
@@ -768,7 +769,7 @@ impl Parser {
                                 found: format!("{} arguments", args.len()),
                             });
                         }
-                        return Ok(Expr::FloatIntrinsic { op: fop, args });
+                        return Ok(Expr::FloatIntrinsic { op: fop, args, single });
                     }
                     Ok(Expr::call(name, args))
                 } else if matches!(self.peek(), Some(Tok::LBrace)) {

@@ -642,14 +642,16 @@ pub fn infer_expr_type(
             }
             Some(to.clone())
         }
-        Expr::FloatIntrinsic { op, args } => {
+        Expr::FloatIntrinsic { op, args, single } => {
+            let name = if *single { op.single_name() } else { op.name().to_string() };
+            let want = if *single { Type::Float32 } else { Type::Float64 };
+            let want_name = if *single { "float32" } else { "float64" };
             if args.len() != op.arity() {
                 diags.push(
                     Diagnostic::error(
                         "E0160",
                         format!(
-                            "`{}` takes {} argument{}, got {}",
-                            op.name(),
+                            "`{name}` takes {} argument{}, got {}",
                             op.arity(),
                             if op.arity() == 1 { "" } else { "s" },
                             args.len()
@@ -661,18 +663,16 @@ pub fn infer_expr_type(
             }
             let mut ok = true;
             for a in args {
-                let t = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, Some(&Type::Float64));
+                let t = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, Some(&want));
                 match t {
-                    Some(t) if tctx.resolve(&t) == Type::Float64 => {}
+                    Some(t) if tctx.resolve(&t) == want => {}
                     Some(t) => {
                         diags.push(
                             Diagnostic::error(
                                 "E0161",
                                 format!(
-                                    "`{}` requires float64 operands, got {t:?} — cast \
-                                     explicitly, e.g. `{}(float64(x))`",
-                                    op.name(),
-                                    op.name()
+                                    "`{name}` requires {want_name} operands, got {t:?} — cast \
+                                     explicitly, e.g. `{name}({want_name}(x))`"
                                 ),
                             )
                             .with_context(ctx.to_string()),
@@ -683,7 +683,7 @@ pub fn infer_expr_type(
                 }
             }
             if ok {
-                Some(Type::Float64)
+                Some(want)
             } else {
                 None
             }

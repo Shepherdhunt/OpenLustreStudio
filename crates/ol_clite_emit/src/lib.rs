@@ -1047,11 +1047,12 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let (s, a) = lower_anf(arg, ctx);
             (s, format!("(({}){a})", to.c_name()))
         }
-        // `<math.h>` double functions — the exact functions the simulator's
-        // f64 evaluation mirrors, so IR and compiled C traces agree.
-        Expr::FloatIntrinsic { op, args } => {
+        // `<math.h>` double/float functions — the exact functions the
+        // simulator's f64/f32 evaluation mirrors, so IR and C traces agree.
+        Expr::FloatIntrinsic { op, args, single } => {
             let (s, arg_strs) = lower_args(args, ctx);
-            (s, format!("{}({})", op.c_name(), arg_strs.join(", ")))
+            let f = if *single { op.c_name_single() } else { op.c_name() };
+            (s, format!("{f}({})", arg_strs.join(", ")))
         }
         Expr::Unary { op, arg } => {
             let (s, a) = lower_anf(arg, ctx);

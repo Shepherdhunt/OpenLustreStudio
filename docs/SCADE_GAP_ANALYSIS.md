@@ -133,9 +133,11 @@ symbols; typed wire labels.
    *Also:* **composite constant values** — array/struct/string (`char[]`)
    constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
    scalar constants parse) plus a `char` type; scalar constants already work.
-2. ~~Float intrinsics~~ — **landed 2026-07-03** (see §6); float32-native
-   variants (`sqrtf` & friends) remain conscious roadmap — today float32
-   casts through float64 explicitly.
+2. ~~Float intrinsics~~ — **landed 2026-07-03** (see §6); **float32-native
+   variants landed 2026-07-06**: `sqrtf`/`sinf`/… surface names
+   (`single: true` on the IR node), float32-only typecheck, f32 simulation
+   matching C's float functions (`sqrtf`, `fminf`, …), a "Float Math
+   (32-bit)" toolbox family, and a float32 dual-backend equivalence test.
 3. ~~Tool Operational Requirements document~~ — **landed 2026-07-03**:
    `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` (TOR-1…12, each claim mapped to
    its verification tests; usage constraints; documented exclusions). The
@@ -238,6 +240,21 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 — single-precision float intrinsics (`sqrtf` family)
+
+The float32-native half of the intrinsics story, for targets that compute
+in single precision (most embedded floats). Every intrinsic gained an
+`f`-suffixed surface form (`sqrtf(x)`, `atan2f(y, x)`, `absf`, `minf`,
+`maxf`) carried as `single: true` on `Expr::FloatIntrinsic` (serde-default,
+so existing models load unchanged). Single variants take and return
+`float32` only — E0161's hint adapts (`sqrtf(float32(x))`) — the simulator
+computes in Rust `f32` (the same platform float libm the C calls), the C
+emitter calls the `<math.h>` float family (`sqrtf`, `fabsf`, `fminf`, …),
+the Kind 2 view prints the same `f`-suffixed call names, and a **Float Math
+(32-bit)** toolbox family drops them with typed float32 pins. Dual-backend
+IR-vs-compiled-C equivalence pinned on exactly-rounded float32 cases
+(`tests/float_intrinsics.rs::single_precision_*`).
 
 ### 2026-07-03 (diff) — `openlustre diff`: semantic model comparison
 

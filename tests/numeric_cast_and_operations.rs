@@ -253,8 +253,8 @@ fn operations_catalog_has_the_scade_families() {
     let names: Vec<&str> = cat["categories"].as_array().unwrap()
         .iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec![
-        "Mathematics", "Float Math", "Comparisons", "Logical", "Structures/Arrays",
-        "Time/Statefuls", "Choice", "Bitwise", "Higher Order",
+        "Mathematics", "Float Math", "Float Math (32-bit)", "Comparisons", "Logical",
+        "Structures/Arrays", "Time/Statefuls", "Choice", "Bitwise", "Higher Order",
     ]);
     let math = &cat["categories"][0]["items"];
     let ids: Vec<&str> = math.as_array().unwrap()
