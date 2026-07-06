@@ -193,6 +193,14 @@ pub enum Expr {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         single: bool,
     },
+    /// Array structure operators: `concat(a, b)` joins two arrays of one
+    /// element type (length = sum); `reverse(a)` flips element order. Like
+    /// iterators they are always the whole right-hand side of an equation —
+    /// codegen is a plain element loop, and an array has no C value form.
+    ArrayOp {
+        op: ArrayOpKind,
+        args: Vec<Expr>,
+    },
     /// SCADE's `case`: multi-way selection on an enum value. Surface syntax
     /// is `case(sel, VariantA: eA, VariantB: eB, _: dflt)` — each arm names
     /// a variant of `sel`'s enum type, and without a `_` default the arms
@@ -211,6 +219,28 @@ pub enum Expr {
 pub struct CaseArm {
     pub variant: String,
     pub value: Expr,
+}
+
+/// Which array structure operator an [`Expr::ArrayOp`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ArrayOpKind {
+    Concat,
+    Reverse,
+}
+
+impl ArrayOpKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ArrayOpKind::Concat => "concat",
+            ArrayOpKind::Reverse => "reverse",
+        }
+    }
+    pub fn arity(self) -> usize {
+        match self {
+            ArrayOpKind::Concat => 2,
+            ArrayOpKind::Reverse => 1,
+        }
+    }
 }
 
 /// Which math function an [`Expr::FloatIntrinsic`] applies. Names mirror
@@ -552,6 +582,11 @@ impl Expr {
                         walk(d, f);
                     }
                 }
+                Expr::ArrayOp { args, .. } => {
+                    for a in args {
+                        walk(a, f);
+                    }
+                }
             }
         }
         walk(self, &mut f);
@@ -648,6 +683,11 @@ impl Expr {
                 }
             }
             Expr::FloatIntrinsic { args, .. } => {
+                for a in args {
+                    a.rename_var(from, to);
+                }
+            }
+            Expr::ArrayOp { args, .. } => {
                 for a in args {
                     a.rename_var(from, to);
                 }

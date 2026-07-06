@@ -344,6 +344,16 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             };
             (s, 100)
         }
+        // Array structure operators print function-style in both views —
+        // the map/fold convention (Kind 2 proving of these is roadmap).
+        Expr::ArrayOp { op, args } => {
+            let parts = args
+                .iter()
+                .map(|a| format_expr_prec(a, 0, lustre))
+                .collect::<Vec<_>>()
+                .join(", ");
+            (format!("{}({parts})", op.name()), 100)
+        }
         // Float intrinsics print function-style in both views. In the Kind 2
         // view (where floats are unbounded `real`) they follow the `bit_and`
         // convention: the user supplies matching Lustre functions when

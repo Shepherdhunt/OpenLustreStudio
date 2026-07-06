@@ -960,6 +960,32 @@ fn eval(
             };
             Ok(Value::Float(r))
         }
+        Expr::ArrayOp { op, args } => {
+            let mut arrs: Vec<Vec<Value>> = Vec::with_capacity(args.len());
+            for a in args {
+                match eval(a, env, state, call_states, project, site_clocks, cov)? {
+                    Value::Array(xs) => arrs.push(xs),
+                    other => {
+                        return Err(SimError::EvalError(format!(
+                            "`{}` operand is not an array: {other:?}",
+                            op.name()
+                        )))
+                    }
+                }
+            }
+            match op {
+                ol_ir::ArrayOpKind::Concat => {
+                    let mut out = arrs.remove(0);
+                    out.extend(arrs.remove(0));
+                    Ok(Value::Array(out))
+                }
+                ol_ir::ArrayOpKind::Reverse => {
+                    let mut out = arrs.remove(0);
+                    out.reverse();
+                    Ok(Value::Array(out))
+                }
+            }
+        }
         // Only the matching arm evaluates — like if/then/else and merge,
         // inactive branches must not run.
         Expr::Case { sel, arms, default } => {

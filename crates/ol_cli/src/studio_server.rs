@@ -789,6 +789,7 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
         Expr::Case { .. } => op("CASE"),
+        Expr::ArrayOp { op: aop, .. } => op(aop.name()),
         Expr::FloatIntrinsic { op: fop, single, .. } => {
             if *single { op(&fop.single_name()) } else { op(fop.name()) }
         }
@@ -2659,6 +2660,8 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "implies" => (vec!["bool", "bool"], "bool"),
         "record_field" => (vec!["structure"], "field type"),
         "array_index" => (vec!["array"], "element type"),
+        "concat" => (vec!["array", "array"], "array (lengths summed)"),
+        "reverse" => (vec!["array"], "array"),
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
         "when" | "when_not" => (vec!["T", "bool clock"], "T on the clock"),
         "merge" => (vec!["bool clock", "T", "T"], "T"),
@@ -2793,6 +2796,12 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
         ("Structures/Arrays", vec![
             OpDef { id: "record_field", label: "field access (.f)", pins: 1, out_type: "int32",
                     param: Some("field"), enabled: true, hint: "read one field of a structure" },
+            OpDef { id: "concat", label: "concat (a ++ b)", pins: 2, out_type: "int32",
+                    param: Some("type"), enabled: true,
+                    hint: "join two arrays; param is the RESULT type, e.g. int32[8]" },
+            OpDef { id: "reverse", label: "reverse", pins: 1, out_type: "int32",
+                    param: Some("type"), enabled: true,
+                    hint: "flip element order; param is the array type, e.g. int32[4]" },
             OpDef { id: "array_index", label: "array index ([i])", pins: 1, out_type: "int32",
                     param: Some("index"), enabled: true, hint: "read one element by constant index" },
         ]),
@@ -2952,6 +2961,21 @@ fn operation_body(
                 .and_then(|p| p.parse().ok())
                 .ok_or("array index needs integer parameter `index`")?;
             format!("{a}[{i}]")
+        }
+        // The param is the RESULT array type (e.g. `int32[8]`), since the
+        // operand types are unknown until the red pins are wired.
+        "concat" | "reverse" => {
+            let t = param.ok_or("concat/reverse need the result array type, e.g. `int32[8]`")?;
+            match ol_stdlib::parse_type(t) {
+                Ok(ol_ir::Type::Array { .. }) => {}
+                _ => return Err(format!("`{t}` is not an array type (e.g. int32[8])")),
+            }
+            let body = if opdef.id == "concat" {
+                format!("concat({a}, {b})")
+            } else {
+                format!("reverse({a})")
+            };
+            return Ok((body, t.to_string()));
         }
         "init_pre" => format!("{a} -> pre {b}"),
         "arrow" => format!("{a} -> {b}"),

@@ -300,7 +300,7 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
             }
         }
         // A `<math.h>` function, not a project node — only its operands walk.
-        Expr::FloatIntrinsic { args, .. } => {
+        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
             for a in args {
                 walk_call_targets(a, f);
             }
@@ -393,7 +393,7 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
                 walk_calls_assign(a, map, idx);
             }
         }
-        Expr::FloatIntrinsic { args, .. } => {
+        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
             for a in args {
                 walk_calls_assign(a, map, idx);
             }
@@ -696,7 +696,7 @@ fn collect_stateful(
                 collect_stateful(a, call_sites, project, out);
             }
         }
-        Expr::FloatIntrinsic { args, .. } => {
+        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
             for a in args {
                 collect_stateful(a, call_sites, project, out);
             }
@@ -834,6 +834,30 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
     // emit as a `for` loop rather than an expression.
     if let Expr::Iterate { kind, node, init, arrays } = &eq.rhs {
         emit_iterator(&eq.lhs, *kind, node, init.as_deref(), arrays, ctx, out);
+        return;
+    }
+
+    // Array structure operators: element loops, like iterators.
+    if let Expr::ArrayOp { op, args } = &eq.rhs {
+        let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+        let seq = ctx.iter_seq;
+        ctx.iter_seq += 1;
+        let i = format!("__ao{seq}i");
+        match op {
+            ol_ir::ArrayOpKind::Concat => {
+                let a = lower_operand(&args[0], ctx);
+                let b = lower_operand(&args[1], ctx);
+                let la = array_len_of(&args[0], ctx).unwrap_or(0);
+                let lb = array_len_of(&args[1], ctx).unwrap_or(0);
+                let _ = writeln!(out, "  for (int {i} = 0; {i} < {la}; {i}++) {lhs}[{i}] = {a}[{i}];");
+                let _ = writeln!(out, "  for (int {i} = 0; {i} < {lb}; {i}++) {lhs}[{la} + {i}] = {b}[{i}];");
+            }
+            ol_ir::ArrayOpKind::Reverse => {
+                let a = lower_operand(&args[0], ctx);
+                let n = array_len_of(&args[0], ctx).unwrap_or(0);
+                let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {lhs}[{i}] = {a}[{n} - 1 - {i}];");
+            }
+        }
         return;
     }
 
@@ -1275,6 +1299,7 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
         // Iterators are emitted at the equation level (a `for` loop), never
         // as a sub-expression — typecheck guarantees they are the whole RHS.
         Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),
+        Expr::ArrayOp { .. } => (vec![], "/* array op is not an expression */ 0".into()),
         // Sampling is pure evaluation here: the equation guard (or the merge
         // ternary) already decides which cycles reach this expression.
         Expr::When { arg, .. } => lower_anf(arg, ctx),
@@ -1395,7 +1420,9 @@ fn collect_pre_vars(
             collect_pre_vars(init, env, out, seen);
             collect_pre_vars(body, env, out, seen);
         }
-        Expr::Call { args, .. } | Expr::FloatIntrinsic { args, .. } => {
+        Expr::Call { args, .. }
+        | Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. } => {
             for a in args {
                 collect_pre_vars(a, env, out, seen);
             }

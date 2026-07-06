@@ -576,7 +576,7 @@ fn check_pre_initialization(
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
         }
-        Expr::FloatIntrinsic { args, .. } => {
+        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
             for a in args {
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
@@ -700,6 +700,61 @@ pub fn infer_expr_type(
                 Some(want)
             } else {
                 None
+            }
+        }
+        // concat/reverse: array-shape algebra. E0148 covers every misuse.
+        Expr::ArrayOp { op, args } => {
+            if args.len() != op.arity() {
+                diags.push(
+                    Diagnostic::error(
+                        "E0148",
+                        format!("`{}` takes {} argument(s), got {}", op.name(), op.arity(), args.len()),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            let mut shapes: Vec<(Type, u32)> = Vec::new();
+            for a in args {
+                let t = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, None)?;
+                match tctx.resolve(&t) {
+                    Type::Array { elem, len } => shapes.push((*elem, len)),
+                    other => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0148",
+                                format!("`{}` operands must be arrays, got {other:?}", op.name()),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            match op {
+                ol_ir::ArrayOpKind::Concat => {
+                    if shapes[0].0 != shapes[1].0 {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0148",
+                                format!(
+                                    "concat operands must share one element type, got {:?} and {:?}",
+                                    shapes[0].0, shapes[1].0
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                    Some(Type::Array {
+                        elem: Box::new(shapes[0].0.clone()),
+                        len: shapes[0].1 + shapes[1].1,
+                    })
+                }
+                ol_ir::ArrayOpKind::Reverse => Some(Type::Array {
+                    elem: Box::new(shapes[0].0.clone()),
+                    len: shapes[0].1,
+                }),
             }
         }
         Expr::Case { sel, arms, default } => {
@@ -1616,21 +1671,31 @@ fn check_mapfold_lhs(
 fn check_iterator_placement(rhs: &Expr, diags: &mut Vec<Diagnostic>, ctx: &str) {
     fn forbid_nested(e: &Expr, diags: &mut Vec<Diagnostic>, ctx: &str) {
         e.visit(|x| {
-            if matches!(x, Expr::Iterate { .. }) {
-                diags.push(
-                    Diagnostic::error(
-                        "E0146",
-                        "map/fold may only be the whole right-hand side of an equation, \
-                         not nested inside another expression",
-                    )
-                    .with_context(ctx.to_string()),
-                );
-            }
+            let name = match x {
+                Expr::Iterate { .. } => "map/fold",
+                Expr::ArrayOp { .. } => "concat/reverse",
+                _ => return,
+            };
+            diags.push(
+                Diagnostic::error(
+                    "E0146",
+                    format!(
+                        "{name} may only be the whole right-hand side of an equation, \
+                         not nested inside another expression"
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
         });
     }
     match rhs {
         Expr::Iterate { init, arrays, .. } => {
             for sub in init.iter().map(|b| b.as_ref()).chain(arrays.iter()) {
+                forbid_nested(sub, diags, ctx);
+            }
+        }
+        Expr::ArrayOp { args, .. } => {
+            for sub in args {
                 forbid_nested(sub, diags, ctx);
             }
         }
@@ -1746,7 +1811,9 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         }
         Expr::Pre { .. } => {}
         Expr::Arrow { init, .. } => collect_immediate_deps(init, out),
-        Expr::Call { args, .. } | Expr::FloatIntrinsic { args, .. } => {
+        Expr::Call { args, .. }
+        | Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. } => {
             for a in args {
                 collect_immediate_deps(a, out);
             }

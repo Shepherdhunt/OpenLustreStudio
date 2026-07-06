@@ -586,7 +586,9 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
                 init.as_deref().map(|i| walk(i, name, in_pre)).unwrap_or(true)
                     && arrays.iter().all(|a| walk(a, name, in_pre))
             }
-            Expr::FloatIntrinsic { args, .. } => args.iter().all(|a| walk(a, name, in_pre)),
+            Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+                args.iter().all(|a| walk(a, name, in_pre))
+            }
             Expr::Case { sel, arms, default } => {
                 walk(sel, name, in_pre)
                     && arms.iter().all(|a| walk(&a.value, name, in_pre))

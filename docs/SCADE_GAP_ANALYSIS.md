@@ -19,8 +19,14 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **mapfold + cross-compile + int helpers
-(2026-07-06):** SCADE's combined iterator `(acc, arr) = mapfold(F, seed, a)`
+**Landed recently (newest first):** **concat/reverse (2026-07-06):** array
+structure operators as `Expr::ArrayOp` — whole-rhs like iterators (E0146),
+shape rules under E0148 (arrays only, matching element types, lengths
+summed for concat), element-loop C, Structures/Arrays toolbox chips,
+dual-backend tested (`tests/array_ops.rs`). With this, `case`, `fby`,
+`mapfold`, and the float intrinsics, the SCADE predefined-operator surface
+for behavior modeling is essentially complete. Before that:
+**mapfold + cross-compile + int helpers (2026-07-06):** SCADE's combined iterator `(acc, arr) = mapfold(F, seed, a)`
 end to end (E0142/E0145/E0147, single-loop C, Higher Order toolbox drop
 creating both result locals, dual-backend tested); the Compile dialog and
 `/api/clite/compile` accept an arbitrary GCC-style cross toolchain driver
@@ -271,6 +277,21 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (arrays) — `concat` and `reverse`
+
+The array structure operators, completing the predefined-operator sweep:
+`joined = concat(a, b)` (one element type, result length = sum) and
+`flipped = reverse(a)`. Like iterators they are whole-rhs only (E0146 —
+an array has no C value form, so codegen is a plain element loop); every
+shape misuse is **E0148** (non-array operands, mismatched element types,
+wrong arity), and a wrongly-declared result length is the ordinary E0040.
+The simulator operates on `Value::Array`; the C emitter writes fixed-bound
+element loops (`lhs[la + i] = b[i]`, `lhs[i] = a[n-1-i]`); the Kind 2 view
+prints the same call text (the map/fold convention); Structures/Arrays
+toolbox chips drop them with the result type as the parameter (operand
+types are unknown until the red pins are wired). Dual-backend equivalence
+pinned in `tests/array_ops.rs`.
 
 ### 2026-07-06 (mapfold+) — the combined iterator, cross-compilation, int helpers
 

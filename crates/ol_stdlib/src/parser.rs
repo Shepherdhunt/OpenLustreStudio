@@ -776,6 +776,24 @@ impl Parser {
                         }
                         return Ok(Expr::fold(iter_node, init, array));
                     }
+                    // Array structure operators: concat(a, b) / reverse(a).
+                    if name == "concat" || name == "reverse" {
+                        let op = if name == "concat" {
+                            ol_ir::ArrayOpKind::Concat
+                        } else {
+                            ol_ir::ArrayOpKind::Reverse
+                        };
+                        if args.len() != op.arity() {
+                            return Err(ParseError::Expected {
+                                expected: format!(
+                                    "{} argument(s) for `{name}(...)`",
+                                    op.arity()
+                                ),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        return Ok(Expr::ArrayOp { op, args });
+                    }
                     // SCADE's followed-by, depth 1: `fby(x, init)` is sugar
                     // for `init -> pre x`. The delayed flow must be a
                     // variable — the profile's `pre <var>` rule.

@@ -244,6 +244,7 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         // Iterators don't appear in boolean contracts; lower to a neutral
         // value so the monitor still compiles if one ever does.
         Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
+        Expr::ArrayOp { .. } => "/* array op elided in monitor */ 0".into(),
         // A ternary chain over the C enum constants, like the main emitter.
         Expr::Case { sel, arms, default } => {
             let sv = emit_mon_expr(sel, scope);
