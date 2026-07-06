@@ -306,6 +306,7 @@ fn check_node(
 
         check_pre_initialization(&eq.rhs, false, diags, &eq_ctx);
         check_iterator_placement(&eq.rhs, diags, &eq_ctx);
+        check_mapfold_lhs(eq, &env, sigs, diags, &eq_ctx, tctx);
 
         // For single-output equations we pass the LHS's declared type as a
         // bidirectional hint so integer literals adopt the target type when
@@ -1281,7 +1282,11 @@ fn infer_iterator_type(
     tctx: &TypeContext,
 ) -> Option<Type> {
     use ol_ir::IterKind;
-    let iter = if kind == IterKind::Map { "map" } else { "fold" };
+    let iter = match kind {
+        IterKind::Map => "map",
+        IterKind::Fold => "fold",
+        IterKind::MapFold => "mapfold",
+    };
 
     let Some((f_inputs, f_outputs, f_kind)) = sigs.get(f_name) else {
         diags.push(
@@ -1305,11 +1310,15 @@ fn infer_iterator_type(
         );
         return None;
     }
-    if f_outputs.len() != 1 {
+    let want_outputs = if kind == IterKind::MapFold { 2 } else { 1 };
+    if f_outputs.len() != want_outputs {
         diags.push(
             Diagnostic::error(
                 "E0142",
-                format!("{iter}'s function `{f_name}` must have exactly one output"),
+                format!(
+                    "{iter}'s function `{f_name}` must have exactly {want_outputs} output{}",
+                    if want_outputs == 1 { "" } else { "s (accumulator, element)" }
+                ),
             )
             .with_context(ctx.to_string()),
         );
@@ -1449,6 +1458,152 @@ fn infer_iterator_type(
                 }
             }
             Some(f_out)
+        }
+        IterKind::MapFold => {
+            // mapfold(F, init, a): F is (accumulator, element) ->
+            // (accumulator, element_out); the result is the tuple
+            // (final accumulator, mapped array), bound by a two-name lhs.
+            if f_inputs.len() != 2 {
+                diags.push(
+                    Diagnostic::error(
+                        "E0145",
+                        format!(
+                            "mapfold: `{f_name}` must take exactly two inputs \
+                             (accumulator, element)"
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            let acc_ty = f_inputs[0].ty.clone();
+            let elem_ty = f_inputs[1].ty.clone();
+            if !types_compatible(tctx, &acc_ty, &f_out) {
+                diags.push(
+                    Diagnostic::error(
+                        "E0145",
+                        format!(
+                            "mapfold: `{f_name}`'s accumulator input {acc_ty:?} and first \
+                             output {f_out:?} must be the same type"
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            if let Some(seed) = init {
+                if let Some(seed_ty) =
+                    infer_expr_type(seed, env, sigs, node, diags, ctx, tctx, Some(&acc_ty))
+                {
+                    if !types_compatible(tctx, &acc_ty, &seed_ty) {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0145",
+                                format!(
+                                    "mapfold: seed has type {seed_ty:?} but `{f_name}`'s \
+                                     accumulator is {acc_ty:?}"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        return None;
+                    }
+                }
+            }
+            if let Some(e) = elems.first() {
+                if !types_compatible(tctx, &elem_ty, e) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0145",
+                            format!(
+                                "mapfold: array element type {e:?} but `{f_name}` \
+                                 expects {elem_ty:?}"
+                            ),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            }
+            // The equation-level check (E0147) verifies the two-name lhs
+            // against (accumulator, element_out array); the marker type here
+            // is the same tuple convention multi-output calls use.
+            Some(Type::named("__tuple__"))
+        }
+    }
+}
+
+/// The lhs shape of a `mapfold` equation: exactly two names, the first the
+/// accumulator's type, the second an array of `F`'s second output with the
+/// operand array's length.
+fn check_mapfold_lhs(
+    eq: &ol_ir::Equation,
+    env: &BTreeMap<String, Type>,
+    sigs: &HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)>,
+    diags: &mut Vec<Diagnostic>,
+    ctx: &str,
+    tctx: &TypeContext,
+) {
+    let Expr::Iterate { kind: ol_ir::IterKind::MapFold, node: f_name, arrays, .. } = &eq.rhs
+    else {
+        return;
+    };
+    let Some((_, f_outputs, _)) = sigs.get(f_name) else { return };
+    if f_outputs.len() != 2 {
+        return; // already E0142
+    }
+    if eq.lhs.len() != 2 {
+        diags.push(
+            Diagnostic::error(
+                "E0147",
+                format!(
+                    "mapfold binds two results — write `(acc, arr) = mapfold({f_name}, …)`, \
+                     got {} name(s)",
+                    eq.lhs.len()
+                ),
+            )
+            .with_context(ctx.to_string()),
+        );
+        return;
+    }
+    let n = arrays
+        .first()
+        .and_then(|a| match env.get(match a {
+            Expr::Var { name } => name.as_str(),
+            _ => "",
+        }) {
+            Some(t) => match tctx.resolve(t) {
+                Type::Array { len, .. } => Some(len),
+                _ => None,
+            },
+            None => None,
+        });
+    let want = [
+        f_outputs[0].ty.clone(),
+        Type::Array {
+            elem: Box::new(f_outputs[1].ty.clone()),
+            len: n.unwrap_or(0),
+        },
+    ];
+    for (name, want_ty) in eq.lhs.iter().zip(want.iter()) {
+        if let Some(decl) = env.get(name) {
+            let ok = match (tctx.resolve(decl), tctx.resolve(want_ty)) {
+                // Unknown operand length (0) checks the element type only.
+                (Type::Array { elem: d, .. }, Type::Array { elem: w, len: 0 }) => d == w,
+                (d, w) => d == w,
+            };
+            if !ok {
+                diags.push(
+                    Diagnostic::error(
+                        "E0147",
+                        format!(
+                            "mapfold result `{name}` is declared {decl:?} but the iterator \
+                             produces {want_ty:?}"
+                        ),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+            }
         }
     }
 }

@@ -579,6 +579,9 @@ enum CompilerKind {
     Posix(&'static str),
     #[cfg(windows)]
     Msvc(PathBuf),
+    /// A cross/custom toolchain driver invoked GCC-style
+    /// (`arm-none-eabi-gcc`, a wrapper script, a full path).
+    Custom(String),
 }
 
 fn find_compiler() -> Option<CompilerKind> {
@@ -680,7 +683,25 @@ pub(crate) fn compile_in_dir_defs(
         Some("msvc") => CompilerKind::Msvc(
             find_msvc_vcvars().ok_or("MSVC (vcvars64.bat) not found via vswhere")?,
         ),
-        Some(other) => return Err(format!("unknown compiler `{other}`")),
+        // Anything else is a cross/custom toolchain driver invoked
+        // GCC-style (arm-none-eabi-gcc, a wrapper script, a full path…).
+        // The produced binary targets whatever that driver targets — it is
+        // not run here, only compiled.
+        Some(other) => {
+            let ok = Command::new(other)
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !ok {
+                return Err(format!(
+                    "compiler `{other}` is not runnable (tried `{other} --version`)"
+                ));
+            }
+            CompilerKind::Custom(other.to_string())
+        }
     };
 
     let (out, desc) = match compiler {
@@ -699,6 +720,23 @@ pub(crate) fn compile_in_dir_defs(
                 .output()
                 .map_err(|e| format!("invoking {name}: {e}"))?;
             (out, name.to_string())
+        }
+        // Same GCC-style invocation, arbitrary driver: the cross-compilation
+        // path. The binary targets the driver's target; it is not run here.
+        CompilerKind::Custom(name) => {
+            let exe = dir.join(exe_name);
+            let mut cmd = Command::new(&name);
+            cmd.current_dir(dir).args(["-std=c11", "-Wall", "-O2", "-o"]).arg(&exe);
+            for d in defines {
+                cmd.arg(format!("-D{d}"));
+            }
+            let out = cmd
+                .args(source_names)
+                .arg("-I.")
+                .arg("-lm")
+                .output()
+                .map_err(|e| format!("invoking {name}: {e}"))?;
+            (out, name.clone())
         }
         #[cfg(windows)]
         CompilerKind::Msvc(vcvars) => {
@@ -781,9 +819,18 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
     let exe = d.join(exe_name);
     let compiler = find_compiler()
         .ok_or_else(|| "no C compiler found (cc/gcc/clang on PATH, or MSVC)".to_string())?;
-    let cc = match compiler {
-        CompilerKind::Posix(name) => Command::new(name)
-            .args([
+    // `find_compiler` only auto-detects host compilers, but keep Custom
+    // buildable here too (a wrapper driver can still target the host).
+    let posix_name: Option<String> = match &compiler {
+        CompilerKind::Posix(name) => Some((*name).to_string()),
+        CompilerKind::Custom(name) => Some(name.clone()),
+        #[cfg(windows)]
+        CompilerKind::Msvc(_) => None,
+    };
+    let cc = match (posix_name, compiler) {
+        (Some(name), _) => {
+            let mut cmd = Command::new(&name);
+            cmd.args([
                 "-std=c11",
                 "-Wall",
                 "-Wextra",
@@ -796,11 +843,11 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
             .args(&sources)
             .arg(format!("-I{}", d.display()))
             // Float intrinsics call `<math.h>`; glibc needs an explicit -lm.
-            .arg("-lm")
-            .output()
-            .map_err(|e| format!("invoking {name}: {e}"))?,
+            .arg("-lm");
+            cmd.output().map_err(|e| format!("invoking {name}: {e}"))?
+        }
         #[cfg(windows)]
-        CompilerKind::Msvc(vcvars) => {
+        (None, CompilerKind::Msvc(vcvars)) => {
             // cl.exe needs the vcvars environment and writes .obj files into
             // the working directory, so run `vcvars64.bat && cl` through cmd
             // inside the temp dir with bare file names.
@@ -823,6 +870,8 @@ fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledMo
                 .output()
                 .map_err(|e| format!("invoking cl via vcvars64: {e}"))?
         }
+        // posix_name is Some for every non-MSVC kind.
+        (None, _) => unreachable!("non-MSVC compilers always carry a command name"),
     };
     if !cc.status.success() {
         // MSVC reports errors on stdout, GNU-style compilers on stderr.

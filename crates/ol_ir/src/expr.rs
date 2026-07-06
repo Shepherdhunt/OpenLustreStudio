@@ -352,6 +352,11 @@ impl FloatOp {
 pub enum IterKind {
     Map,
     Fold,
+    /// `mapfold(F, init, a)` — SCADE's combined iterator: `F` is
+    /// `(accumulator, element) -> (accumulator, element_out)`; the result is
+    /// the tuple `(final_accumulator, mapped_array)`, bound by a two-name
+    /// equation `(acc, arr) = mapfold(F, seed, a)`.
+    MapFold,
 }
 
 impl Expr {

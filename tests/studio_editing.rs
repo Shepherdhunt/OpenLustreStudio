@@ -608,3 +608,45 @@ fn design_document_endpoint_serves_the_report() {
     assert!(body.contains("<h2 id=\"op-ReleaseLogic\">"), "operator section missing");
     assert!(body.contains("Contract: ReleaseLogic_contract"), "contract section missing");
 }
+
+/// Cross/custom compiler: /api/clite/compile accepts an arbitrary GCC-style
+/// driver command (the arm-none-eabi-gcc path), invoked by full path here;
+/// a non-runnable command is a loud error, not a silent fallback.
+#[test]
+fn compile_accepts_a_custom_compiler_command() {
+    // The host cc by absolute path exercises the custom-driver code path
+    // (only bare "cc"/"gcc"/"clang"/"msvc" take the named paths).
+    let cc = ["/usr/bin/cc", "/usr/bin/gcc", "/usr/bin/clang"]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists());
+    let Some(cc) = cc else { return }; // no host compiler: nothing to verify
+    let g = start_server_on_copy();
+    let out_dir = g.tmp.join("xbuild");
+    let (s, body) = request(
+        g.port,
+        "POST",
+        "/api/clite/compile",
+        &format!(
+            r#"{{"compiler":"{cc}","out_dir":"{}"}}"#,
+            out_dir.display().to_string().replace('\\', "/")
+        ),
+    )
+    .expect("compile");
+    assert_eq!(s, 200, "{body}");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["compiled"], true, "{body}");
+    assert!(
+        v["log"].as_str().unwrap_or("").contains(cc),
+        "log should name the custom driver: {body}"
+    );
+
+    // A bogus command is rejected loudly.
+    let (_, body) = request(
+        g.port,
+        "POST",
+        "/api/clite/compile",
+        r#"{"compiler":"no-such-compiler-xyz","out_dir":""}"#,
+    )
+    .expect("bad compile");
+    assert!(body.contains("not runnable"), "{body}");
+}

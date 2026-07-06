@@ -36,3 +36,35 @@
   contract:
     assumptions: ["b <> 0"]
     guarantees: ["y = (a / b)"]
+
+# Integer absolute value: |x|. int32-min saturates to int32-max (loudly
+# documented rather than UB — C's abs(INT_MIN) is undefined).
+- name: Abs
+  kind: function
+  category: math
+  inputs:  [{ name: x, type: int32 }]
+  outputs: [{ name: y, type: int32 }]
+  equations:
+    - lhs: [y]
+      body: "if x = -2147483648 then 2147483647 else if x < 0 then -x else x"
+  contract:
+    guarantees:
+      - "y >= 0"
+
+# Integer sign: -1, 0, or 1.
+- name: Sign
+  kind: function
+  category: math
+  inputs:  [{ name: x, type: int32 }]
+  outputs: [{ name: s, type: int32 }]
+  equations:
+    - lhs: [s]
+      body: "if x < 0 then -1 else if x > 0 then 1 else 0"
+  contract:
+    guarantees:
+      - "s >= -1"
+      - "s <= 1"
+    modes:
+      - { name: Negative, requires: ["x < 0"], ensures: ["s = -1"] }
+      - { name: Zero,     requires: ["x = 0"], ensures: ["s = 0"] }
+      - { name: Positive, requires: ["x > 0"], ensures: ["s = 1"] }

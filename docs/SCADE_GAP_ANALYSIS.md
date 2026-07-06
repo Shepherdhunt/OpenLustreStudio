@@ -19,7 +19,14 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **`case` + `fby` (2026-07-06):**
+**Landed recently (newest first):** **mapfold + cross-compile + int helpers
+(2026-07-06):** SCADE's combined iterator `(acc, arr) = mapfold(F, seed, a)`
+end to end (E0142/E0145/E0147, single-loop C, Higher Order toolbox drop
+creating both result locals, dual-backend tested); the Compile dialog and
+`/api/clite/compile` accept an arbitrary GCC-style cross toolchain driver
+(`arm-none-eabi-gcc`, full paths — verified runnable, loud otherwise); and
+`Abs`/`Sign` int32 library blocks (Abs saturates INT_MIN instead of C's UB;
+48 blocks / 48 contracts). Before that: **`case` + `fby` (2026-07-06):**
 SCADE's multi-way enum selection as `Expr::Case`
 (`case(sel, Off: 0, Low: level, _: d)` — E0170–E0174: enum selector, known
 variants, no duplicates, exhaustive-or-default, agreeing arm types) across
@@ -264,6 +271,35 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (mapfold+) — the combined iterator, cross-compilation, int helpers
+
+* **`mapfold(F, seed, a)`** — SCADE's third iterator, completing the family:
+  `F` is `(accumulator, element) -> (accumulator, element_out)` and the
+  equation binds both results, `(acc, arr) = mapfold(Step, 0, xs)`.
+  Typecheck: `F` must have exactly two outputs with the accumulator
+  threading (E0142/E0145), and a new **E0147** pins the two-name lhs shape
+  (accumulator type, element_out array). The simulator threads the
+  accumulator while collecting the mapped elements (a prefix-sums model
+  verifies `[1;2;3;4] → total 10, sums [1;3;6;10]`); the C emitter produces
+  one `for` loop assigning both results; the Kind 2 view keeps the surface
+  text like map/fold. The Higher Order toolbox drops `mapfold(F)` with
+  *two* fresh result locals (`mapfoldN`, `mapfoldN_arr`) — the drop plumbing
+  now supports multi-output operations. Dual-backend equivalence tested
+  (`tests/mapfold.rs`).
+* **Cross-compilation** — the Compile C-Lite dialog (and
+  `/api/clite/compile`) accepts a **cross / custom command**: any GCC-style
+  toolchain driver (`arm-none-eabi-gcc`, a wrapper script, a full path),
+  verified runnable via `--version` before use and invoked with the same
+  flags as the host path; a bogus command is a loud error. The produced
+  binary targets whatever the driver targets — compile-only, the
+  host-equivalence run still uses the host compiler. Tested by driving the
+  endpoint with a full-path compiler
+  (`compile_accepts_a_custom_compiler_command`).
+* **Integer `Abs` / `Sign` blocks** (libraries/math/arithmetic.yaml) — with
+  contracts; `Abs` saturates `INT_MIN` to `INT_MAX` instead of inheriting
+  C's undefined `abs(INT_MIN)`, and the behavioral test pins exactly that
+  cell. 48 blocks / 48 contracts in the embedded palette.
 
 ### 2026-07-06 (case/fby) — SCADE's `case` and `fby`, plus enum CSV I/O
 

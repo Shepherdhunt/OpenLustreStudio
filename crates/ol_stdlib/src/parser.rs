@@ -728,9 +728,10 @@ impl Parser {
                         }
                     }
                     self.expect(&Tok::RParen)?;
-                    // `map(F, a, …)` / `fold(F, init, a)` are array iterators:
-                    // the first argument is the iterated function's name.
-                    if name == "map" || name == "fold" {
+                    // `map(F, a, …)` / `fold(F, init, a)` / `mapfold(F, init, a)`
+                    // are array iterators: the first argument is the iterated
+                    // function's name.
+                    if name == "map" || name == "fold" || name == "mapfold" {
                         let iter_node = match args.first() {
                             Some(Expr::Var { name }) => name.clone(),
                             _ => {
@@ -755,16 +756,24 @@ impl Parser {
                             }
                             return Ok(Expr::map(iter_node, rest));
                         }
-                        // fold(F, init, array)
+                        // fold(F, init, array) / mapfold(F, init, array)
                         if rest.len() != 2 {
                             return Err(ParseError::Expected {
-                                expected: "fold(F, init, array)".into(),
+                                expected: format!("{name}(F, init, array)"),
                                 found: format!("{} arguments after F", rest.len()),
                             });
                         }
                         let mut it = rest.into_iter();
                         let init = it.next().unwrap();
                         let array = it.next().unwrap();
+                        if name == "mapfold" {
+                            return Ok(Expr::Iterate {
+                                kind: ol_ir::IterKind::MapFold,
+                                node: iter_node,
+                                init: Some(Box::new(init)),
+                                arrays: vec![array],
+                            });
+                        }
                         return Ok(Expr::fold(iter_node, init, array));
                     }
                     // SCADE's followed-by, depth 1: `fby(x, init)` is sugar

@@ -364,6 +364,7 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             let name = match kind {
                 ol_ir::IterKind::Map => "map",
                 ol_ir::IterKind::Fold => "fold",
+                ol_ir::IterKind::MapFold => "mapfold",
             };
             let mut parts: Vec<String> = vec![node.clone()];
             if let Some(i) = init {

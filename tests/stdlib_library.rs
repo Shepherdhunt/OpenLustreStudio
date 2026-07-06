@@ -45,6 +45,8 @@ fn expected_blocks_are_present() {
         "Delay", "Counter",
         // The control-law family.
         "RateLimiter", "FirstOrderLag", "Hysteresis", "Debounce", "PIDController",
+        // Integer helpers.
+        "Abs", "Sign",
     ] {
         assert!(names.contains(&expected), "missing block `{expected}`");
     }
@@ -114,6 +116,15 @@ fn control_blocks_simulate_correctly() {
     let p = wrap("Debounce", &[("x", "bool"), ("n", "int32")], &[("y", "bool")]);
     let t = run(&p, "x,n\ntrue,2\nfalse,2\ntrue,2\ntrue,2\ntrue,2\n");
     assert_eq!(t, ["0,false", "1,false", "2,false", "3,false", "4,true"], "{t:?}");
+
+    // Abs saturates INT_MIN (C's abs(INT_MIN) is UB; ours is loud and defined);
+    // Sign is -1/0/1.
+    let p = wrap("Abs", &[("x", "int32")], &[("y", "int32")]);
+    let t = run(&p, "x\n-7\n7\n0\n-2147483648\n");
+    assert_eq!(t, ["0,7", "1,7", "2,0", "3,2147483647"], "{t:?}");
+    let p = wrap("Sign", &[("x", "int32")], &[("s", "int32")]);
+    let t = run(&p, "x\n-9\n0\n3\n");
+    assert_eq!(t, ["0,-1", "1,0", "2,1"], "{t:?}");
 
     // PID with ki=kd=0 is pure proportional control.
     let p = wrap(

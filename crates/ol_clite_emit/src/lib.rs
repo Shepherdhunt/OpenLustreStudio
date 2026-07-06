@@ -833,7 +833,7 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
     // Array iterators are always the whole RHS (typecheck enforces it) and
     // emit as a `for` loop rather than an expression.
     if let Expr::Iterate { kind, node, init, arrays } = &eq.rhs {
-        emit_iterator(&eq.lhs[0], *kind, node, init.as_deref(), arrays, ctx, out);
+        emit_iterator(&eq.lhs, *kind, node, init.as_deref(), arrays, ctx, out);
         return;
     }
 
@@ -891,9 +891,10 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
 /// Emit an array iterator as a `for` loop. The iterated `F` is a stateless
 /// function, so each step is a plain `F_step(&in, &out)` — no state pointer.
 /// `map` writes the result array element by element; `fold` threads an
-/// accumulator and assigns the scalar result once.
+/// accumulator and assigns the scalar result once; `mapfold` does both
+/// (`lhs[0]` takes the final accumulator, `lhs[1]` the mapped array).
 fn emit_iterator(
-    lhs: &str,
+    lhs_names: &[String],
     kind: ol_ir::IterKind,
     f_name: &str,
     init: Option<&Expr>,
@@ -901,6 +902,7 @@ fn emit_iterator(
     ctx: &mut EmitCtx,
     out: &mut String,
 ) {
+    let lhs = lhs_names[0].as_str();
     let seq = ctx.iter_seq;
     ctx.iter_seq += 1;
     let callee = match ctx.project.find_node(f_name) {
@@ -915,6 +917,37 @@ fn emit_iterator(
     let i = format!("__it{seq}i");
     let inp = format!("__it{seq}in");
     let outp = format!("__it{seq}out");
+
+    if matches!(kind, ol_ir::IterKind::MapFold) {
+        // acc = seed; for k { in = (acc, a[k]); F_step; acc = out.0;
+        //   arr[k] = out.1; } lhs0 = acc;
+        if lhs_names.len() != 2 || callee.outputs.len() != 2 {
+            let _ = writeln!(out, "  /* malformed mapfold (checked upstream) */");
+            return;
+        }
+        let acc = format!("__it{seq}acc");
+        let (stmts, seed) = init
+            .map(|e| lower_anf(e, ctx))
+            .unwrap_or_else(|| (vec![], "0".into()));
+        for s in stmts {
+            out.push_str(&s);
+        }
+        let acc_ty = callee.outputs[0].ty.c_name();
+        let _ = writeln!(out, "  {acc_ty} {acc} = {seed};");
+        let arr = lower_operand(&arrays[0], ctx);
+        let arr_lhs = ctx.scope.ref_var(&lhs_names[1]);
+        let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {{");
+        let _ = writeln!(out, "    {f_name}_Input {inp};");
+        let _ = writeln!(out, "    {f_name}_Output {outp};");
+        let _ = writeln!(out, "    {inp}.{} = {acc};", c_ident(&callee.inputs[0].name));
+        let _ = writeln!(out, "    {inp}.{} = {arr}[{i}];", c_ident(&callee.inputs[1].name));
+        let _ = writeln!(out, "    {f_name}_step(&{inp}, &{outp});");
+        let _ = writeln!(out, "    {acc} = {outp}.{};", c_ident(&callee.outputs[0].name));
+        let _ = writeln!(out, "    {arr_lhs}[{i}] = {outp}.{};", c_ident(&callee.outputs[1].name));
+        let _ = writeln!(out, "  }}");
+        let _ = writeln!(out, "  {} = {acc};", ctx.scope.ref_var(lhs));
+        return;
+    }
 
     if matches!(kind, ol_ir::IterKind::Fold) {
         // acc = seed; for k { in.acc=acc; in.elem=a[k]; F_step; acc=out; } lhs=acc;

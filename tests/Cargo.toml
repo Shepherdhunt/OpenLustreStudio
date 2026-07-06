@@ -163,3 +163,7 @@ path = "doc_generator.rs"
 [[test]]
 name = "case_and_fby"
 path = "case_and_fby.rs"
+
+[[test]]
+name = "mapfold"
+path = "mapfold.rs"

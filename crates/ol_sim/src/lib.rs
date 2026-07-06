@@ -1090,6 +1090,38 @@ fn eval(
                     }
                     Ok(acc)
                 }
+                IterKind::MapFold => {
+                    // Combined: thread the accumulator like fold while
+                    // collecting F's second output like map; the value is the
+                    // tuple (final accumulator, mapped array) the two-name
+                    // lhs destructures.
+                    let seed = init.as_ref().ok_or_else(|| {
+                        SimError::EvalError("mapfold without an accumulator seed".into())
+                    })?;
+                    let mut acc =
+                        eval(seed, env, state, call_states, project, site_clocks, cov)?;
+                    let mut out = Vec::with_capacity(n);
+                    for elem in &arrs[0] {
+                        match call_function_values(
+                            callee,
+                            vec![acc, elem.clone()],
+                            project,
+                            cov,
+                        )? {
+                            Value::Tuple(mut items) if items.len() == 2 => {
+                                out.push(items.pop().expect("len 2"));
+                                acc = items.pop().expect("len 1");
+                            }
+                            other => {
+                                return Err(SimError::EvalError(format!(
+                                    "mapfold's `{f_name}` must produce \
+                                     (accumulator, element), got {other:?}"
+                                )))
+                            }
+                        }
+                    }
+                    Ok(Value::Tuple(vec![acc, Value::Array(out)]))
+                }
             }
         }
     }

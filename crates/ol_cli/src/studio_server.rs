@@ -2664,6 +2664,7 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "merge" => (vec!["bool clock", "T", "T"], "T"),
         "map" => (vec!["array(s)"], "array of F's output"),
         "fold" => (vec!["seed", "array"], "F's output"),
+        "mapfold" => (vec!["seed", "array"], "(accumulator, array)"),
         "if_then_else" => (vec!["bool", "T", "T"], "T"),
         "bit_and" | "bit_or" | "bit_xor" => (n("integer"), "integer"),
         "shift_left" | "shift_right" => (vec!["integer", "integer"], "integer"),
@@ -2825,6 +2826,9 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             OpDef { id: "fold", label: "fold(F)", pins: 2, out_type: "int32",
                     param: Some("iterator"), enabled: true,
                     hint: "reduce an array to a scalar: acc = F(acc, element)" },
+            OpDef { id: "mapfold", label: "mapfold(F)", pins: 2, out_type: "int32",
+                    param: Some("iterator"), enabled: true,
+                    hint: "fold and map in one pass: (acc, elem_out) = F(acc, elem) — param `F:N`" },
         ]),
     ]
 }
@@ -2971,7 +2975,7 @@ fn resolve_iterator_drop(
     op_id: &str,
     param: Option<&str>,
     eq_index: usize,
-) -> Result<(Vec<String>, String, ol_ir::Type), String> {
+) -> Result<(Vec<String>, String, Vec<ol_ir::Type>), String> {
     let raw = param.ok_or("map/fold needs the iterated function name (e.g. `Scale:4` for map)")?;
     let (f_name, len_opt) = match raw.split_once(':') {
         Some((f, n)) => (f.trim(), Some(n.trim())),
@@ -2982,6 +2986,25 @@ fn resolve_iterator_drop(
         .ok_or_else(|| format!("unknown function `{f_name}`"))?;
     if !matches!(f.kind, ol_ir::NodeKind::Function) {
         return Err(format!("`{f_name}` must be a stateless `function` to iterate"));
+    }
+    // mapfold(F, seed, a): F is (acc, elem) -> (acc, elem_out); the drop
+    // produces TWO result locals (final accumulator, mapped array).
+    if op_id == "mapfold" {
+        if f.inputs.len() != 2 || f.outputs.len() != 2 {
+            return Err(format!(
+                "mapfold needs `{f_name}` to take (accumulator, element) and return \
+                 (accumulator, element_out)"
+            ));
+        }
+        let n: u32 = len_opt
+            .and_then(|s| s.parse().ok())
+            .ok_or("mapfold needs the array length, e.g. `Step:4`")?;
+        let pins = vec![format!("p{eq_index}_1"), format!("p{eq_index}_2")];
+        let body = format!("mapfold({f_name}, {}, {})", pins[0], pins[1]);
+        return Ok((pins, body, vec![
+            f.outputs[0].ty.clone(),
+            ol_ir::Type::Array { elem: Box::new(f.outputs[1].ty.clone()), len: n },
+        ]));
     }
     if f.outputs.len() != 1 {
         return Err(format!("`{f_name}` must have exactly one output"));
@@ -2997,7 +3020,7 @@ fn resolve_iterator_drop(
             .ok_or("map needs the array length, e.g. `Scale:4`")?;
         let pins: Vec<String> = (1..=k).map(|i| format!("p{eq_index}_{i}")).collect();
         let body = format!("map({f_name}, {})", pins.join(", "));
-        Ok((pins, body, ol_ir::Type::Array { elem: Box::new(out_elem), len: n }))
+        Ok((pins, body, vec![ol_ir::Type::Array { elem: Box::new(out_elem), len: n }]))
     } else {
         // fold(F, seed, array): F is (accumulator, element) -> accumulator.
         if f.inputs.len() != 2 {
@@ -3007,7 +3030,7 @@ fn resolve_iterator_drop(
         }
         let pins = vec![format!("p{eq_index}_1"), format!("p{eq_index}_2")];
         let body = format!("fold({f_name}, {}, {})", pins[0], pins[1]);
-        Ok((pins, body, out_elem))
+        Ok((pins, body, vec![out_elem]))
     }
 }
 
@@ -3073,7 +3096,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Some(n) => n.equations.len(),
         None => return bad(&format!("node `{host_name}` not found")),
     };
-    let (_pins, body_text, out_ty) = if op_id == "map" || op_id == "fold" {
+    let (_pins, body_text, out_tys) = if op_id == "map" || op_id == "fold" || op_id == "mapfold" {
         match resolve_iterator_drop(&project, &op_id, param.as_deref(), eq_index) {
             Ok(v) => v,
             Err(e) => return bad(&e),
@@ -3085,7 +3108,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
             Err(e) => return bad(&e),
         };
         match ol_stdlib::parse_type(&out_type) {
-            Ok(t) => (pins, body_text, t),
+            Ok(t) => (pins, body_text, vec![t]),
             Err(e) => return bad(&format!("internal out-type error: {e}")),
         }
     };
@@ -3098,28 +3121,40 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
             Ok(n) => n,
             Err(e) => return bad(&e),
         };
-        let known: std::collections::HashSet<String> = node
+        let mut known: std::collections::HashSet<String> = node
             .inputs
             .iter()
             .map(|p| p.name.clone())
             .chain(node.outputs.iter().map(|p| p.name.clone()))
             .chain(node.locals.iter().map(|l| l.name.clone()))
             .collect();
-        let base = format!("{op_id}{eq_index}");
-        let mut lhs_name = base.clone();
-        let mut n = 2;
-        while known.contains(&lhs_name) {
-            lhs_name = format!("{base}_{n}");
-            n += 1;
+        // One fresh typed local per result (mapfold produces two: the final
+        // accumulator, then the mapped array as `…_arr`).
+        let mut lhs_names: Vec<String> = Vec::new();
+        for (k, ty) in out_tys.into_iter().enumerate() {
+            let base = if k == 0 {
+                format!("{op_id}{eq_index}")
+            } else {
+                format!("{op_id}{eq_index}_arr")
+            };
+            let mut lhs_name = base.clone();
+            let mut n = 2;
+            while known.contains(&lhs_name) {
+                lhs_name = format!("{base}_{n}");
+                n += 1;
+            }
+            known.insert(lhs_name.clone());
+            node.locals.push(ol_ir::Local { name: lhs_name.clone(), ty });
+            node.diagram.positions.insert(
+                lhs_name.clone(),
+                ol_ir::NodePos { x: x + 320.0, y: y + 44.0 * k as f64, ..Default::default() },
+            );
+            lhs_names.push(lhs_name);
         }
-        node.locals.push(ol_ir::Local { name: lhs_name.clone(), ty: out_ty });
-        node.equations.push(ol_ir::Equation { lhs: vec![lhs_name.clone()], rhs });
+        node.equations.push(ol_ir::Equation { lhs: lhs_names, rhs });
         node.diagram
             .positions
             .insert(format!("eq{eq_index}"), ol_ir::NodePos { x, y, ..Default::default() });
-        node.diagram
-            .positions
-            .insert(lhs_name, ol_ir::NodePos { x: x + 320.0, y, ..Default::default() });
     }
     if let Err(e) = save_raw(ctx, &project) {
         return (500, "application/json", json_error(&e).into_bytes());

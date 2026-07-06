@@ -685,16 +685,19 @@
     <div class="edit-form">
       <h4>Compile C-Lite</h4>
       <div class="row">
-        <label>target OS</label>
-        <select id="compile-os"><option>host (this machine)</option><option disabled>cross-compile — roadmap</option></select>
         <label>compiler</label>
-        <select id="compile-cc">
-          <option value="auto">auto-detect</option>
+        <select id="compile-cc" onchange="document.getElementById('compile-cc-custom').style.display = this.value === 'custom' ? '' : 'none'">
+          <option value="auto">auto-detect (host)</option>
           <option value="msvc">MSVC (cl)</option>
           <option value="gcc">gcc</option>
           <option value="clang">clang</option>
           <option value="cc">cc</option>
+          <option value="custom">cross / custom command…</option>
         </select>
+      </div>
+      <div class="row" id="compile-cc-custom" style="display:none">
+        <label>command</label>
+        <input id="compile-cc-cmd" style="flex:1" placeholder="arm-none-eabi-gcc (GCC-style driver; the binary targets its target)">
       </div>
       <div class="row">
         <label>output dir</label><input id="compile-dir" style="flex:1" placeholder="(default: <workspace>\build)">
@@ -1629,10 +1632,17 @@ async function removeProbe(i) {
 async function cliteCompile() {
   const st = document.getElementById("compile-status");
   st.textContent = "compiling…";
+  // "custom" sends the typed command (a cross toolchain driver such as
+  // arm-none-eabi-gcc); the server invokes it GCC-style.
+  let cc = document.getElementById("compile-cc").value;
+  if (cc === "custom") {
+    cc = document.getElementById("compile-cc-cmd").value.trim();
+    if (!cc) { st.textContent = "enter the cross/custom compiler command"; return; }
+  }
   const r = await fetch("/api/clite/compile", {
     method: "POST",
     body: JSON.stringify({
-      compiler: document.getElementById("compile-cc").value,
+      compiler: cc,
       out_dir: document.getElementById("compile-dir").value.trim(),
     }),
   });
