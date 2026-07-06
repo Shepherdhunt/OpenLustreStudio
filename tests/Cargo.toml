@@ -155,3 +155,7 @@ path = "composite_constants.rs"
 [[test]]
 name = "float_intrinsics"
 path = "float_intrinsics.rs"
+
+[[test]]
+name = "doc_generator"
+path = "doc_generator.rs"

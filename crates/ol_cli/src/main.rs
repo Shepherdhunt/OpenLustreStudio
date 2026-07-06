@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod doc_gen;
 mod lustre_import;
 mod model_diff;
 mod scenario;
@@ -117,6 +118,17 @@ enum Cmd {
         model: PathBuf,
         #[arg(long, value_name = "DIR")]
         with_stdlib: Option<PathBuf>,
+    },
+    /// Render the model into a self-contained design-document HTML: per
+    /// operator its interface, schematic, behavior (Lustre), state machine,
+    /// contract, and requirements, plus the types/constants and the
+    /// traceability matrix. Deterministic output — the same model always
+    /// produces the identical document.
+    Doc {
+        model: PathBuf,
+        /// The HTML file to write.
+        #[arg(short, long)]
+        out: PathBuf,
     },
     /// Semantic diff of two model files: design changes (nodes, ports,
     /// equations, types, constants, state machines, contracts,
@@ -340,6 +352,14 @@ fn main() -> Result<()> {
         ),
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
+        }
+        Cmd::Doc { model, out } => {
+            let project = load(&model)?;
+            let html = doc_gen::generate_html(&project);
+            std::fs::write(&out, html)
+                .with_context(|| format!("writing {}", out.display()))?;
+            println!("design document written to {}", out.display());
+            Ok(())
         }
         Cmd::Diff { old, new } => cmd_diff(&old, &new),
         Cmd::Trace { model, out, with_stdlib, strict } => {

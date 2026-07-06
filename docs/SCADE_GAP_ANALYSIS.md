@@ -19,7 +19,12 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Semantic model diff (2026-07-03):**
+**Landed recently (newest first):** **Design-document generator
+(2026-07-06):** `openlustre doc` / Project ▸ Design Document — deterministic
+self-contained HTML report (interfaces, schematic SVGs, Lustre behavior,
+state machines, contracts, traceability matrix). **Float32 intrinsics
+(2026-07-06):** the `sqrtf` family end to end. Before that:
+**Semantic model diff (2026-07-03):**
 `openlustre diff <old> <new>` — design changes only (nodes/ports/equations/
 types/constants/machines/contracts/requirements), layout invisible, nonzero
 exit on differences (`crates/ol_cli/src/model_diff.rs`). Before that:
@@ -199,7 +204,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace and ReqIF export remain roadmap | done (node-level) |
-| Documentation generator | Render IR + diagrams + contracts to a design-document HTML/PDF | P2 |
+| ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
 | FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
 
 ## 4. The structural gap: qualification
@@ -240,6 +245,27 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (doc) — the design-document generator
+
+The SCADE Report Generator role. `openlustre doc <model> -o design.html`
+(and **Project ▸ Design Document** in the Studio, served at `/api/doc`)
+renders the model into one self-contained HTML file — no external assets,
+no timestamps, byte-identical for the same model, so the report can live
+under configuration management next to the model. Content per operator:
+requirement badges, interface tables, a **schematic SVG** (boxes +
+Manhattan wires derived the same way the canvas derives them, using stored
+canvas positions when the model has them and a column layout otherwise),
+the behavior as formatted Lustre, the operator-owned state machine as a
+states/transitions/equations table, and the CoCoSpec contract
+(assume/guarantee/modes). Project-wide: types, constants, and the
+requirements traceability matrix with an untraced list. Both entry points
+load the model *without* state-machine lowering, so the report shows the
+authored automaton, never `__sm_*` plumbing. Tests:
+`tests/doc_generator.rs` (content + determinism),
+`design_document_endpoint_serves_the_report` (studio_editing.rs), and a
+doc_gen unit test pinning self-containedness; screenshot-verified in
+Chromium.
 
 ### 2026-07-06 — single-precision float intrinsics (`sqrtf` family)
 

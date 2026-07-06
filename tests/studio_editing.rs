@@ -597,3 +597,14 @@ fn requirements_annotations_round_trip_and_trace_emits_the_matrix() {
         .unwrap();
     assert!(!out.status.success(), "--strict must fail with untraced operators");
 }
+
+/// Project ▸ Design Document serves the report from the running Studio.
+#[test]
+fn design_document_endpoint_serves_the_report() {
+    let g = start_server_on_copy();
+    let (s, body) = request(g.port, "GET", "/api/doc", "").expect("doc");
+    assert_eq!(s, 200, "{body}");
+    assert!(body.contains("design document"), "{}", &body[..200.min(body.len())]);
+    assert!(body.contains("<h2 id=\"op-ReleaseLogic\">"), "operator section missing");
+    assert!(body.contains("Contract: ReleaseLogic_contract"), "contract section missing");
+}

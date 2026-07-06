@@ -241,6 +241,18 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(body) => (200, "text/plain; charset=utf-8", body.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
         },
+        // The design document (the SCADE Report Generator role) — the same
+        // HTML `openlustre doc` writes, served for Project ▸ Design Document.
+        // Loaded WITHOUT state-machine lowering (like the CLI): the report
+        // shows the authored automaton, not its generated plumbing.
+        ("GET", "/api/doc") => match ol_ir::load_project(&ctx.model()) {
+            Ok(project) => (
+                200,
+                "text/html; charset=utf-8",
+                crate::doc_gen::generate_html(&project).into_bytes(),
+            ),
+            Err(e) => (500, "text/plain", e.to_string().into_bytes()),
+        },
         ("POST", "/api/build") => build_model_response(ctx, body),
         ("GET", "/api/clite/header") => match build_clite(ctx) {
             Ok((h, _)) => (200, "text/plain; charset=utf-8", h.into_bytes()),
