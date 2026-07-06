@@ -254,7 +254,7 @@ fn operations_catalog_has_the_scade_families() {
         .iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec![
         "Mathematics", "Float Math", "Float Math (32-bit)", "Comparisons", "Logical",
-        "Structures/Arrays", "Time/Statefuls", "Choice", "Bitwise", "Higher Order",
+        "Structures/Arrays", "Time/Statefuls", "Choice", "Bitwise", "Debug", "Higher Order",
     ]);
     let math = &cat["categories"][0]["items"];
     let ids: Vec<&str> = math.as_array().unwrap()
@@ -439,6 +439,10 @@ fn variadic_operations_declare_contracts_and_resize_their_pins() {
         r#"{"node":"Gate","name":"enable","side":"input","type":"bool"}"#);
     post_ok(port, "/api/edit/update_equation",
         r#"{"node":"Gate","index":0,"lhs":"and0","body":"enable and p0_2 and p0_3 and p0_4"}"#);
+    // The 12-pin ceiling also holds on resize — a deliberate product limit.
+    let (s13, body13) = request(port, "POST", "/api/edit/set_operation_inputs",
+        r#"{"node":"Gate","index":0,"inputs":13}"#).unwrap();
+    assert_eq!(s13, 400, "13 pins via resize must be rejected: {body13}");
     post_ok(port, "/api/edit/set_operation_inputs",
         r#"{"node":"Gate","index":0,"inputs":6}"#);
     let d = get_json(port, "/api/diagram?node=Gate");

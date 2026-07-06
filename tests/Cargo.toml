@@ -171,3 +171,7 @@ path = "mapfold.rs"
 [[test]]
 name = "array_ops"
 path = "array_ops.rs"
+
+[[test]]
+name = "printout"
+path = "printout.rs"

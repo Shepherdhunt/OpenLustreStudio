@@ -344,6 +344,20 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             };
             (s, 100)
         }
+        // A printout is a debug side-effect: the proof view sees only its
+        // value (`true`); the surface text round-trips.
+        Expr::Printout { args } => {
+            if lustre {
+                ("true".to_string(), 100)
+            } else {
+                let parts = args
+                    .iter()
+                    .map(|a| format_expr_prec(a, 0, false))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (format!("printout({parts})"), 100)
+            }
+        }
         // Array structure operators print function-style in both views —
         // the map/fold convention (Kind 2 proving of these is roadmap).
         Expr::ArrayOp { op, args } => {

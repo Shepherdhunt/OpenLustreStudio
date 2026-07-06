@@ -42,7 +42,8 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
         }
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
-        | Expr::ArrayOp { args, .. } => {
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 same_cycle_reads(a, out);
             }

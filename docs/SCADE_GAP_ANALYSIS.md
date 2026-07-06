@@ -19,7 +19,14 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **concat/reverse (2026-07-06):** array
+**Landed recently (newest first):** **printout block + product-limit
+decisions (2026-07-06):** a `printout` Debug block — user-wired signals in
+(1–12 pins), the special bool **`terminal_out`** output; stderr in the IR
+sim, `-DOL_DEBUG`-only `fprintf` in generated C, `true` in the Kind 2 view.
+Decisions recorded: **single-sheet diagrams per operator** and the **12-pin
+variadic ceiling** (always one output) are deliberate limits distinguishing
+this tool from SCADE; **ReqIF is out** in favor of a future SysML 2.0 model
+association carrying requirements. Before that: **concat/reverse (2026-07-06):** array
 structure operators as `Expr::ArrayOp` — whole-rhs like iterators (E0146),
 shape rules under E0148 (arrays only, matching element types, lengths
 summed for concat), element-loop C, Structures/Arrays toolbox chips,
@@ -222,7 +229,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
 | ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-07-03**: wires route orthogonally by default (horizontal out, one mid-channel vertical, horizontal in; feedback wires hook around below; parallel wires stagger a few px so channels don't collapse); View ▸ "orthogonal wires" toggles back to Béziers. Junction dots at fan-outs remain cosmetic roadmap | done |
 | ~~P1 — Zoom/pan, copy/paste~~ | Standard | **Landed 2026-07-03**: viewBox zoom (Ctrl+wheel around the cursor, View-menu items, Ctrl+= / − / 0, status-bar %), middle-button pan, marquee multi-select on empty canvas, and Ctrl+C/Ctrl+V duplicating the selected blocks as one journaled edit (`/api/edit/duplicate_equations` — fresh `_copy` locals, internal wiring rewritten, external reads kept) | done |
-| **P2 — Multi-sheet diagrams** | One operator can span sheets | Page list per node in `DiagramLayout` | Medium |
+| ~~Multi-sheet diagrams~~ | One operator can span sheets | **Decided out (2026-07-06)**: one sheet per operator/node is a deliberate product limit that keeps OpenLustre Studio distinct from SCADE — decompose into sub-operators instead | won't do |
 | ~~P2 — Per-family gate silhouettes~~ | Distinct shapes per operator family (gates, delays, switches) | **Landed 2026-07-03**: AND (flat back, round nose), OR (shield), XOR (second back arc), NOT (triangle + bubble) draw as true IEC/SCADE silhouettes fitted to the same bounding box (pins/labels/resize unchanged); everything else keeps its compact symbol box | done |
 
 ## 3. Language and toolchain gaps
@@ -235,7 +242,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
-| ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace and ReqIF export remain roadmap | done (node-level) |
+| ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace remains roadmap; **ReqIF export is decided out (2026-07-06)** — the planned direction is associating a **SysML 2.0 model** with operators, with requirements always carried by the SysML model | done (node-level) |
 | ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
 | FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
 
@@ -277,6 +284,35 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (printout) — the terminal printout block, and three product decisions
+
+**`printout`** (Debug toolbox family): the user wires 1–12 declared scalar
+signals into the block and its single output is the *special*
+**`terminal_out`** (bool, always true) — created automatically on drop,
+never user-named. Semantics per backend, chosen so autocoded artifacts stay
+honest: the IR simulator prints `terminal_out | speed=3 armed=true` to
+**stderr** each cycle (the stdout CSV trace is untouched, so golden traces
+and equivalence runs never see it); the generated C prints only under
+`-DOL_DEBUG` (production C-Lite stays free of I/O — the log-probe rule); the
+Kind 2 view sees only the block's value, the constant `true`. Inputs must be
+declared bool/integer/float variables — **E0149** covers expressions,
+unknown names, and unprintable types. Tests: `tests/printout.rs`
+(parse/typecheck, clean traces + debug-only C with a no-printf-outside-guard
+scan, dual-backend equivalence, and the Studio drop creating `terminal_out`
+with the 12-pin cap).
+
+Three product decisions, recorded where the roadmap used to carry them:
+
+1. **Single-sheet diagrams** per operator/node — deliberate; decompose into
+   sub-operators rather than spilling one diagram across sheets.
+2. **The 12-input ceiling** on variadic operations (2–12, always a single
+   output) — already enforced on drop *and* on resize, both paths now
+   pinned by tests.
+3. **No ReqIF export** — the requirements story heads toward associating a
+   **SysML 2.0 model** with operators; requirements will always ride in the
+   SysML model. Node-level requirement IDs and `openlustre trace` remain
+   the interchange until then.
 
 ### 2026-07-06 (arrays) — `concat` and `reverse`
 

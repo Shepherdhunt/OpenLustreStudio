@@ -960,6 +960,21 @@ fn eval(
             };
             Ok(Value::Float(r))
         }
+        // The printout block: values to stderr (never the CSV trace on
+        // stdout), `true` on the terminal_out wire.
+        Expr::Printout { args } => {
+            let mut parts: Vec<String> = Vec::with_capacity(args.len());
+            for a in args {
+                let label = match a {
+                    Expr::Var { name } => name.clone(),
+                    _ => "?".into(),
+                };
+                let v = eval(a, env, state, call_states, project, site_clocks, cov)?;
+                parts.push(format!("{label}={}", v.to_csv()));
+            }
+            eprintln!("terminal_out | {}", parts.join(" "));
+            Ok(Value::Bool(true))
+        }
         Expr::ArrayOp { op, args } => {
             let mut arrs: Vec<Vec<Value>> = Vec::with_capacity(args.len());
             for a in args {

@@ -258,7 +258,8 @@ fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clo
         }
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
-        | Expr::ArrayOp { args, .. } => {
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             args.iter().find_map(|a| natural_clock(a, var_clocks))
         }
         Expr::Tuple { items } | Expr::Array { items } => {
@@ -358,7 +359,9 @@ fn check_expr(
             check_expr(arg, expected, var_clocks, eq, info)
         }
         // Stateless applications: every operand shares the site's clock.
-        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+        Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 check_expr(a, expected, var_clocks, eq, info);
             }

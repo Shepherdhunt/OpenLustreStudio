@@ -300,7 +300,9 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
             }
         }
         // A `<math.h>` function, not a project node — only its operands walk.
-        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+        Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 walk_call_targets(a, f);
             }
@@ -393,7 +395,9 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
                 walk_calls_assign(a, map, idx);
             }
         }
-        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+        Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 walk_calls_assign(a, map, idx);
             }
@@ -696,7 +700,9 @@ fn collect_stateful(
                 collect_stateful(a, call_sites, project, out);
             }
         }
-        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+        Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 collect_stateful(a, call_sites, project, out);
             }
@@ -1300,6 +1306,36 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
         // as a sub-expression — typecheck guarantees they are the whole RHS.
         Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),
         Expr::ArrayOp { .. } => (vec![], "/* array op is not an expression */ 0".into()),
+        // The terminal write happens only in debug builds; production C-Lite
+        // stays free of I/O. The expression's value is the terminal_out wire.
+        Expr::Printout { args } => {
+            let mut fmt_parts: Vec<String> = Vec::new();
+            let mut val_parts: Vec<String> = Vec::new();
+            for a in args {
+                let Expr::Var { name } = a else { continue };
+                let r = ctx.scope.ref_var(name);
+                match ctx.types.get(name) {
+                    Some(Type::Bool) => {
+                        fmt_parts.push(format!("{name}=%s"));
+                        val_parts.push(format!("{r} ? \"true\" : \"false\""));
+                    }
+                    Some(t) if t.is_float() => {
+                        fmt_parts.push(format!("{name}=%g"));
+                        val_parts.push(format!("(double){r}"));
+                    }
+                    _ => {
+                        fmt_parts.push(format!("{name}=%lld"));
+                        val_parts.push(format!("(long long){r}"));
+                    }
+                }
+            }
+            let stmt = format!(
+                "#ifdef OL_DEBUG\n  fprintf(stderr, \"terminal_out | {}\\n\", {});\n#endif\n",
+                fmt_parts.join(" "),
+                val_parts.join(", ")
+            );
+            (vec![stmt], "true".into())
+        }
         // Sampling is pure evaluation here: the equation guard (or the merge
         // ternary) already decides which cycles reach this expression.
         Expr::When { arg, .. } => lower_anf(arg, ctx),
@@ -1422,7 +1458,8 @@ fn collect_pre_vars(
         }
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
-        | Expr::ArrayOp { args, .. } => {
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 collect_pre_vars(a, env, out, seen);
             }

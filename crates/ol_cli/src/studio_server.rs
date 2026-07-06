@@ -790,6 +790,7 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         Expr::Cast { to, .. } => op(&type_str(to)),
         Expr::Case { .. } => op("CASE"),
         Expr::ArrayOp { op: aop, .. } => op(aop.name()),
+        Expr::Printout { .. } => op("PRINT"),
         Expr::FloatIntrinsic { op: fop, single, .. } => {
             if *single { op(&fop.single_name()) } else { op(fop.name()) }
         }
@@ -2660,6 +2661,7 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "implies" => (vec!["bool", "bool"], "bool"),
         "record_field" => (vec!["structure"], "field type"),
         "array_index" => (vec!["array"], "element type"),
+        "printout" => (n("scalar signal"), "terminal_out : bool"),
         "concat" => (vec!["array", "array"], "array (lengths summed)"),
         "reverse" => (vec!["array"], "array"),
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
@@ -2828,6 +2830,14 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("shift_left", "shift left (<<)", 2, "int32"),
             op("shift_right", "shift right (>>)", 2, "int32"),
         ]),
+        // Terminal/debug blocks: visible in simulation and -DOL_DEBUG runs,
+        // invisible to production C and to Kind 2.
+        ("Debug", vec![
+            OpDef { id: "printout", label: "printout → terminal", pins: 1, out_type: "bool",
+                    param: None, enabled: true,
+                    hint: "prints its wired signals each cycle; drop with 1–12 pins; the \
+                           special output is terminal_out (bool, always true)" },
+        ]),
         ("Higher Order", vec![
             OpDef { id: "map", label: "map(F)", pins: 1, out_type: "int32",
                     param: Some("iterator"), enabled: true,
@@ -2962,6 +2972,7 @@ fn operation_body(
                 .ok_or("array index needs integer parameter `index`")?;
             format!("{a}[{i}]")
         }
+        "printout" => format!("printout({})", pins.join(", ")),
         // The param is the RESULT array type (e.g. `int32[8]`), since the
         // operand types are unknown until the red pins are wired.
         "concat" | "reverse" => {
@@ -3094,6 +3105,14 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     // everything else has a fixed contract.
     let pin_count = match req.get("inputs").and_then(|v| v.as_u64()) {
         None => opdef.pins as usize,
+        // printout takes 1..=12 signals; associative operations 2..=12.
+        Some(n) if op_id == "printout" => {
+            let n = n as usize;
+            if !(1..=MAX_VARIADIC_INPUTS).contains(&n) {
+                return bad(&format!("printout takes 1 to {MAX_VARIADIC_INPUTS} inputs"));
+            }
+            n
+        }
         Some(n) => {
             if variadic_sep(&op_id).is_none() {
                 return bad(&format!("`{op_id}` has a fixed number of inputs ({})", opdef.pins));
@@ -3156,7 +3175,11 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         // accumulator, then the mapped array as `…_arr`).
         let mut lhs_names: Vec<String> = Vec::new();
         for (k, ty) in out_tys.into_iter().enumerate() {
-            let base = if k == 0 {
+            let base = if op_id == "printout" {
+                // The user's signals go in; the special output is always
+                // named terminal_out (suffixed only on a second block).
+                "terminal_out".to_string()
+            } else if k == 0 {
                 format!("{op_id}{eq_index}")
             } else {
                 format!("{op_id}{eq_index}_arr")

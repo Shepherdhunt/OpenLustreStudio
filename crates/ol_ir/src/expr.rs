@@ -201,6 +201,15 @@ pub enum Expr {
         op: ArrayOpKind,
         args: Vec<Expr>,
     },
+    /// A terminal printout block: each cycle it writes its inputs' values to
+    /// the terminal and yields `true` on its special `terminal_out` output.
+    /// Args are declared *variable names* (the log-probe rule). The IR
+    /// simulator prints to stderr — never polluting the CSV trace — and the
+    /// generated C prints only under `-DOL_DEBUG`, keeping production C-Lite
+    /// free of I/O; the Kind 2 view sees the constant `true`.
+    Printout {
+        args: Vec<Expr>,
+    },
     /// SCADE's `case`: multi-way selection on an enum value. Surface syntax
     /// is `case(sel, VariantA: eA, VariantB: eB, _: dflt)` — each arm names
     /// a variant of `sel`'s enum type, and without a `_` default the arms
@@ -582,7 +591,7 @@ impl Expr {
                         walk(d, f);
                     }
                 }
-                Expr::ArrayOp { args, .. } => {
+                Expr::ArrayOp { args, .. } | Expr::Printout { args } => {
                     for a in args {
                         walk(a, f);
                     }
@@ -687,7 +696,7 @@ impl Expr {
                     a.rename_var(from, to);
                 }
             }
-            Expr::ArrayOp { args, .. } => {
+            Expr::ArrayOp { args, .. } | Expr::Printout { args } => {
                 for a in args {
                     a.rename_var(from, to);
                 }

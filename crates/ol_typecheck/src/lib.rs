@@ -576,7 +576,9 @@ fn check_pre_initialization(
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
         }
-        Expr::FloatIntrinsic { args, .. } | Expr::ArrayOp { args, .. } => {
+        Expr::FloatIntrinsic { args, .. }
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
@@ -701,6 +703,63 @@ pub fn infer_expr_type(
             } else {
                 None
             }
+        }
+        // printout: declared scalar variables in, the special bool
+        // `terminal_out` value out. E0149 covers every misuse.
+        Expr::Printout { args } => {
+            if args.is_empty() || args.len() > 12 {
+                diags.push(
+                    Diagnostic::error(
+                        "E0149",
+                        format!("printout takes 1 to 12 inputs, got {}", args.len()),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            let mut ok = true;
+            for a in args {
+                let Expr::Var { name } = a else {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0149",
+                            "printout inputs must be declared variables (wire a signal \
+                             to each pin), not expressions",
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    ok = false;
+                    continue;
+                };
+                match env.get(name) {
+                    Some(t) if matches!(tctx.resolve(t), Type::Bool)
+                        || tctx.resolve(t).is_numeric() => {}
+                    Some(t) => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0149",
+                                format!(
+                                    "printout input `{name}` has type {t:?} — only \
+                                     bool/integer/float signals print in this profile"
+                                ),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        ok = false;
+                    }
+                    None => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0149",
+                                format!("printout input `{name}` is not a declared variable"),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        ok = false;
+                    }
+                }
+            }
+            if ok { Some(Type::Bool) } else { None }
         }
         // concat/reverse: array-shape algebra. E0148 covers every misuse.
         Expr::ArrayOp { op, args } => {
@@ -1813,7 +1872,8 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         Expr::Arrow { init, .. } => collect_immediate_deps(init, out),
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
-        | Expr::ArrayOp { args, .. } => {
+        | Expr::ArrayOp { args, .. }
+        | Expr::Printout { args } => {
             for a in args {
                 collect_immediate_deps(a, out);
             }

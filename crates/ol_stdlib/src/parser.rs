@@ -776,6 +776,23 @@ impl Parser {
                         }
                         return Ok(Expr::fold(iter_node, init, array));
                     }
+                    // Terminal printout: 1..=12 declared-variable inputs, the
+                    // special `terminal_out` bool value.
+                    if name == "printout" {
+                        if args.is_empty() || args.len() > 12 {
+                            return Err(ParseError::Expected {
+                                expected: "printout(v1, …, v12) with 1 to 12 inputs".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        if let Some(bad) = args.iter().find(|a| !matches!(a, Expr::Var { .. })) {
+                            return Err(ParseError::Expected {
+                                expected: "declared variable names as printout inputs".into(),
+                                found: ol_ir_expr_describe(bad),
+                            });
+                        }
+                        return Ok(Expr::Printout { args });
+                    }
                     // Array structure operators: concat(a, b) / reverse(a).
                     if name == "concat" || name == "reverse" {
                         let op = if name == "concat" {
