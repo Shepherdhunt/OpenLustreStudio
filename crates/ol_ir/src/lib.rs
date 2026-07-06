@@ -28,7 +28,7 @@ pub mod clocks;
 pub use clocks::{infer_clocks, node_uses_clocks, Clock, ClockError, ClockInfo};
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{ArrayOpKind, BinOp, CaseArm, Expr, FieldInit, FloatOp, IterKind, Literal, UnaryOp};
-pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe};
+pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe, SysmlRef};
 pub use order::evaluation_order;
 pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
 pub use slice::slice_for_root;

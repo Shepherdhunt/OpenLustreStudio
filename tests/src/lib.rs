@@ -56,6 +56,7 @@ pub fn build_release_logic_project() -> Project {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     let helper = NodeDef {
@@ -72,6 +73,7 @@ pub fn build_release_logic_project() -> Project {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     let contract = serde_json::json!({

@@ -516,25 +516,50 @@ fn cmd_diff(old: &Path, new: &Path) -> Result<()> {
 /// gate on "every operator names the requirement it implements".
 fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, strict: bool) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
-    let mut rows: Vec<(String, String)> = Vec::new();
+    // (requirement, operator, element): element is `operator` for node-level
+    // annotations, or the contract clause (`guarantee g`, `mode M`, …) for
+    // clause-level ones — the rung below the operator.
+    let mut rows: Vec<(String, String, String)> = Vec::new();
     let mut untraced: Vec<String> = Vec::new();
     for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+        let (contracts, _) = ol_contract_ir::parse_contracts(&pkg.contracts);
         for n in &pkg.nodes {
             if n.requirements.is_empty() {
                 untraced.push(n.name.clone());
             }
             for r in &n.requirements {
-                rows.push((r.clone(), n.name.clone()));
+                rows.push((r.clone(), n.name.clone(), "operator".into()));
+            }
+            let Some(cname) = &n.contract else { continue };
+            let Some(c) = contracts.iter().find(|c| &c.name == cname) else { continue };
+            for (i, a) in c.assumptions.iter().enumerate() {
+                let label = a.name.clone().unwrap_or_else(|| format!("#{i}"));
+                for r in &a.requirements {
+                    rows.push((r.clone(), n.name.clone(), format!("assume {label}")));
+                }
+            }
+            for (i, g) in c.guarantees.iter().enumerate() {
+                let label = g.name.clone().unwrap_or_else(|| format!("#{i}"));
+                for r in &g.requirements {
+                    rows.push((r.clone(), n.name.clone(), format!("guarantee {label}")));
+                }
+            }
+            for m in &c.modes {
+                for r in &m.requirements {
+                    rows.push((r.clone(), n.name.clone(), format!("mode {}", m.name)));
+                }
             }
         }
     }
     rows.sort();
     rows.dedup();
-    let mut csv = String::from("requirement,operator\n");
-    for (req, node) in &rows {
-        // Commas in a requirement ID would corrupt the matrix; quote them out.
-        let field = if req.contains(',') { format!("\"{}\"", req.replace('"', "\"\"")) } else { req.clone() };
-        csv.push_str(&format!("{field},{node}\n"));
+    let mut csv = String::from("requirement,operator,element\n");
+    for (req, node, element) in &rows {
+        // Commas in a field would corrupt the matrix; quote them out.
+        let q = |f: &str| {
+            if f.contains(',') { format!("\"{}\"", f.replace('"', "\"\"")) } else { f.to_string() }
+        };
+        csv.push_str(&format!("{},{node},{}\n", q(req), q(element)));
     }
     match out {
         Some(p) => {
@@ -543,8 +568,26 @@ fn cmd_trace(model: &Path, out: Option<&Path>, with_stdlib: Option<&Path>, stric
         }
         None => print!("{csv}"),
     }
-    let req_count = rows.iter().map(|(r, _)| r).collect::<std::collections::BTreeSet<_>>().len();
+    let req_count = rows.iter().map(|(r, _, _)| r).collect::<std::collections::BTreeSet<_>>().len();
     println!("-- {} requirement(s), {} link(s)", req_count, rows.len());
+    // The SysML 2.0 associations ride along in the report: once SysML
+    // models carry the requirements, these links are the trace anchors.
+    let mut sysml_links: Vec<String> = Vec::new();
+    for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+        for n in &pkg.nodes {
+            if let Some(sr) = &n.sysml {
+                let label = match &sr.element {
+                    Some(e) => format!("{}::{e}", sr.model),
+                    None => sr.model.clone(),
+                };
+                sysml_links.push(format!("{} -> {label}", n.name));
+            }
+        }
+    }
+    if !sysml_links.is_empty() {
+        sysml_links.sort();
+        println!("-- sysml association(s): {}", sysml_links.join("; "));
+    }
     if !untraced.is_empty() {
         untraced.sort();
         println!("-- untraced operator(s): {}", untraced.join(", "));
@@ -684,6 +727,7 @@ pub(crate) fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
                 "equation_count": n.equations.len(),
                 "contract": n.contract,
                 "requirements": n.requirements,
+                "sysml": n.sysml,
             })
         })
         .collect();
@@ -1182,6 +1226,7 @@ fn starter_project() -> ol_ir::Project {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     Project {
         name: "welcome".into(),

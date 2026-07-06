@@ -272,6 +272,7 @@ pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
         diagram: Default::default(),
         probes: Vec::new(),
         requirements: Vec::new(),
+        sysml: None,
     };
     Ok(LoweredMachine {
         state_types: lo.enums,

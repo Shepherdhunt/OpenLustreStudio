@@ -50,6 +50,7 @@ fn srflipflop_library_block_loads_lowers_and_simulates() {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let project = build_with_stdlib(node, "Latched");
     let report = ol_typecheck::check_project(&project);

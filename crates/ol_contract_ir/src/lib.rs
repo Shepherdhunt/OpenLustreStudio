@@ -14,12 +14,19 @@ use ol_ir::{Expr, Port, Type};
 pub struct Assumption {
     pub name: Option<String>,
     pub expr: Expr,
+    /// Requirement IDs this clause traces to — the clause-level rung of the
+    /// traceability matrix (`openlustre trace`'s `element` column).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Guarantee {
     pub name: Option<String>,
     pub expr: Expr,
+    /// Requirement IDs this clause traces to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +43,9 @@ pub struct Mode {
     pub requires: Vec<Expr>,
     #[serde(default)]
     pub ensures: Vec<Expr>,
+    /// Requirement IDs this mode traces to.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requirements: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

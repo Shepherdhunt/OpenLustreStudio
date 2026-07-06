@@ -116,6 +116,24 @@ pub struct NodeDef {
     /// traceability annotations `openlustre trace` compiles into a matrix.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirements: Vec<String>,
+    /// The SysML 2.0 model element this operator realizes. Groundwork for
+    /// the planned association: the reference travels with the operator
+    /// (trace matrix, design document, semantic diff) and the Studio checks
+    /// the model file exists; parsing the SysML itself is future work.
+    /// Requirements will always ride in the associated SysML model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sysml: Option<SysmlRef>,
+}
+
+/// A reference into a SysML 2.0 model: the model file (relative to the
+/// project) and, optionally, the qualified name of the element within it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SysmlRef {
+    /// The `.sysml` file, relative to the project directory.
+    pub model: String,
+    /// Qualified element name inside the model (e.g. "Pkg::ReleaseFunction").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
 }
 
 impl NodeDef {

@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     // Pure helper to show off the function/operator distinction.
@@ -82,6 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     let contract = serde_json::json!({

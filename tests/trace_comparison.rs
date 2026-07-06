@@ -56,6 +56,7 @@ fn build_edge_counter_project() -> Project {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     Project {
         name: "edge_counter".into(),

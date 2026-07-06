@@ -70,6 +70,7 @@ fn array_node() -> NodeDef {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     }
 }
 
@@ -109,6 +110,7 @@ fn record_node() -> NodeDef {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     }
 }
 
@@ -136,6 +138,7 @@ fn enum_node() -> NodeDef {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     }
 }
 

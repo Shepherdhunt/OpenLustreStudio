@@ -474,6 +474,7 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let sm = StateMachineDef {
         name: "LampSM".into(),

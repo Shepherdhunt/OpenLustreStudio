@@ -371,6 +371,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_requirements") => {
             apply_edit_response(ctx, body, edit_set_requirements)
         }
+        ("POST", "/api/edit/set_sysml") => apply_edit_response(ctx, body, edit_set_sysml),
         ("POST", "/api/edit/remove_probe") => apply_edit_response(ctx, body, edit_remove_probe),
         ("POST", "/api/edit/undo") => history_response(ctx, true),
         ("POST", "/api/edit/redo") => history_response(ctx, false),
@@ -502,6 +503,28 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
     }
     for d in &contract.diagnostics {
         diagnostics.push(crate::diag_to_json(d, "contract"));
+    }
+    // SysML groundwork: the associated model file should exist on disk
+    // (relative to the project). A dangling reference is a loud warning.
+    if let Some(dir) = ctx.model().parent().map(|p| p.to_path_buf()) {
+        for pkg in project.packages.iter().filter(|p| p.name != "stdlib") {
+            for n in &pkg.nodes {
+                if let Some(sr) = &n.sysml {
+                    if !dir.join(&sr.model).exists() {
+                        let d = ol_ir::Diagnostic::warning(
+                            "W0170",
+                            format!(
+                                "sysml association of `{}` points at `{}`, which does \
+                                 not exist in the project",
+                                n.name, sr.model
+                            ),
+                        )
+                        .with_context(format!("node {}", n.name));
+                        diagnostics.push(crate::diag_to_json(&d, "sysml"));
+                    }
+                }
+            }
+        }
     }
     let packages: Vec<serde_json::Value> = project
         .packages
@@ -1223,6 +1246,7 @@ fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     if project.packages.is_empty() {
         project.packages.push(ol_ir::Package {
@@ -3900,6 +3924,30 @@ fn edit_set_requirements(
     }
     let node = find_node_mut(project, &node_name)?;
     node.requirements = ids;
+    Ok(())
+}
+
+/// Set (or clear) an operator's SysML 2.0 association. An empty `model`
+/// clears it; `element` is the optional qualified element name.
+fn edit_set_sysml(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let model = req
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let element = req
+        .get("element")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let node = find_node_mut(project, &node_name)?;
+    node.sysml = if model.is_empty() {
+        None
+    } else {
+        Some(ol_ir::SysmlRef { model, element })
+    };
     Ok(())
 }
 

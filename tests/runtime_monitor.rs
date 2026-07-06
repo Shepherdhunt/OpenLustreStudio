@@ -48,6 +48,7 @@ fn build_faulty_latch_project() -> Project {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     // Contract: one named guarantee.

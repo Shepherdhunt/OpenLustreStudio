@@ -1139,9 +1139,14 @@ async function refresh() {
     sum.innerHTML = '<span class="kind">' + escapeHTML(n.kind[0]) + "</span> " + escapeHTML(n.name);
     // Traceability at a glance: hover shows the requirement IDs this
     // operator implements (right-click ▸ Requirements… edits them).
+    const hover = [];
     if (n.requirements && n.requirements.length) {
-      sum.title = "requirements: " + n.requirements.join(", ");
+      hover.push("requirements: " + n.requirements.join(", "));
     }
+    if (n.sysml) {
+      hover.push("sysml: " + n.sysml.model + (n.sysml.element ? "::" + n.sysml.element : ""));
+    }
+    if (hover.length) sum.title = hover.join("\n");
     sum.onclick = () => { selectNode(n); state.diagramStack = []; loadDiagram(n.name); };
     if (editable) sum.oncontextmenu = ev => operatorTreeMenu(ev, n.name);
     // Drag an operator from the tree onto another operator's canvas to
@@ -3053,10 +3058,35 @@ function operatorTreeMenu(ev, name) {
   item("Add Local…", () => openPortDialog("local"));
   sep();
   item("Requirements…", () => editRequirements(name));
+  item("SysML Model…", () => editSysml(name));
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";
   m.style.top = ev.clientY + "px";
   m.style.display = "block";
+}
+
+/// Associate a SysML 2.0 model element with the operator (groundwork: the
+/// reference travels with the operator; SysML parsing is future work).
+async function editSysml(name) {
+  const node = findNode(name);
+  const cur = node && node.sysml ? node.sysml : null;
+  const model = prompt(
+    "SysML 2.0 model file for `" + name + "` (relative path, e.g. models/system.sysml; empty clears):",
+    cur ? cur.model : ""
+  );
+  if (model === null) return;
+  let element = "";
+  if (model.trim()) {
+    element = prompt(
+      "Qualified element `" + name + "` realizes (optional, e.g. Pkg::ReleaseFunction):",
+      cur && cur.element ? cur.element : ""
+    );
+    if (element === null) return;
+  }
+  await postEdit("/api/edit/set_sysml", { node: name, model: model.trim(), element: element.trim() });
+  document.getElementById("diagram-status").textContent = model.trim()
+    ? name + " realizes " + model.trim() + (element.trim() ? "::" + element.trim() : "")
+    : name + " has no SysML association";
 }
 
 /// Edit an operator's requirement annotations (traceability IDs) as a

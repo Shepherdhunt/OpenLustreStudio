@@ -19,7 +19,19 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **printout block + product-limit
+**Landed recently (newest first):** **SysML 2.0 association groundwork +
+clause-level trace links (2026-07-06):** operators can name the SysML 2.0
+model (and element) they realize — `NodeDef.sysml` (`SysmlRef {model,
+element}`), edited via right-click ▸ SysML Model… (journaled), shown on tree
+hover and in the design document (“realizes SysML”), reported by `openlustre
+trace` (`-- sysml association(s):` footer) and `openlustre diff`; a dangling
+file reference is a **W0170** warning in the inspect. This is the anchor for
+the planned SysML-models-carry-the-requirements flow. Requirement IDs now
+also attach to **individual contract clauses** (`requirements` on
+Assumption/Guarantee/Mode): the trace matrix grew an `element` column
+(`requirement,operator,element` — `operator`, `assume L`, `guarantee L`,
+`mode M`), and the design document tags clause lines with `-- [SRS-x]` and
+lists clause rows in the traceability matrix. Before that: **printout block + product-limit
 decisions (2026-07-06):** a `printout` Debug block — user-wired signals in
 (1–12 pins), the special bool **`terminal_out`** output; stderr in the IR
 sim, `-DOL_DEBUG`-only `fprintf` in generated C, `true` in the Kind 2 view.
@@ -242,7 +254,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. Unique-cause only (coupled conditions reported uncovered); masking MC/DC is roadmap. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
-| ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. Contract-clause-level trace remains roadmap; **ReqIF export is decided out (2026-07-06)** — the planned direction is associating a **SysML 2.0 model** with operators, with requirements always carried by the SysML model | done (node-level) |
+| ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. **2026-07-06**: clause-level links landed — `requirements` on each contract Assumption/Guarantee/Mode, matrix grew an `element` column (`operator` / `assume L` / `guarantee L` / `mode M`), doc tags clause lines. **ReqIF export is decided out (2026-07-06)** — instead, **SysML 2.0 association groundwork landed**: `NodeDef.sysml` names the SysML model/element an operator realizes (Studio-edited, W0170 on dangling file, in trace/diff/doc); requirements will always ride in the SysML model | done |
 | ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
 | FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
 
@@ -284,6 +296,38 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (sysml+clauses) — SysML 2.0 association groundwork, clause-level trace links
+
+Two traceability slices, both following from the "ReqIF is out, SysML 2.0 is
+the plan" decision:
+
+**SysML association**: `NodeDef.sysml: Option<SysmlRef>` (`{model, element}`,
+serde-default so old models load) names the SysML 2.0 model file — and
+optionally the qualified element — an operator *realizes*. Edited via
+right-click ▸ SysML Model… (journaled, undoable; empty model clears), shown
+on tree hover and in the design document ("realizes SysML:
+`models/sys.sysml::Pkg::Rel`"), reported by `openlustre trace` as a
+`-- sysml association(s):` footer and by `openlustre diff` as a
+`sysml (none) -> …` change. The inspect warns **W0170** when the referenced
+file doesn't exist next to the model. Parsing the SysML file (and lifting
+its requirements) is the future half; the reference is the anchor.
+
+**Clause-level requirement links**: contract `Assumption`/`Guarantee`/`Mode`
+each carry `requirements: Vec<String>` now, so a requirement can trace to
+the *specific clause* that enforces it, not just the operator. The trace
+matrix grew an `element` column — `requirement,operator,element` where
+element is `operator`, `assume L`, `guarantee L`, or `mode M` (unnamed
+clauses fall back to `#index`; comma-bearing fields are CSV-quoted). The
+design document tags annotated clause lines with `-- [SRS-x]` and lists
+clause rows in the traceability matrix.
+
+Tests: `tests/studio_editing.rs`
+(`sysml_association_round_trip_warns_traces_and_clears` — set/inspect/W0170
+appear-and-clear/diff/trace/doc/clear/undo; the requirements test now covers
+the 3-column matrix with guarantee- and mode-level rows and the doc clause
+tags). GUI path browser-verified (context menu → prompts → status line +
+hover title).
 
 ### 2026-07-06 (printout) — the terminal printout block, and three product decisions
 

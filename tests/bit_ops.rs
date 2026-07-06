@@ -57,6 +57,7 @@ fn bit_ops_typecheck_and_simulate_correctly() {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let project = Project {
         name: "bits".into(),
@@ -106,6 +107,7 @@ fn bit_ops_reject_non_integer_operands() {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let report = ol_typecheck::check_project(&Project {
         name: "bad".into(),
@@ -178,6 +180,7 @@ fn arinc429_decoders_extract_the_right_fields() {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     let mut project = Project {
@@ -236,6 +239,7 @@ fn generated_c_for_bit_ops_compiles_and_matches_ir_simulator() {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let project = Project {
         name: "bits".into(),

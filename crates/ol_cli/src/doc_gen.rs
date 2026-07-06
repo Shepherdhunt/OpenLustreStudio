@@ -98,15 +98,36 @@ pub fn generate_html(project: &Project) -> String {
 
     // --- Traceability matrix -------------------------------------------------
     body.push_str("<h2 id=\"trace\">Requirements traceability</h2>\n");
-    let mut by_req: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut by_req: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut untraced: Vec<&str> = Vec::new();
     for pkg in &user_pkgs {
+        let (contracts, _) = ol_contract_ir::parse_contracts(&pkg.contracts);
         for n in &pkg.nodes {
             if n.requirements.is_empty() {
                 untraced.push(&n.name);
             }
             for r in &n.requirements {
-                by_req.entry(r).or_default().push(&n.name);
+                by_req.entry(r.clone()).or_default().push(n.name.clone());
+            }
+            // Clause-level links: the rung below the operator.
+            let Some(cname) = &n.contract else { continue };
+            let Some(c) = contracts.iter().find(|c| &c.name == cname) else { continue };
+            for (i, a) in c.assumptions.iter().enumerate() {
+                let label = a.name.clone().unwrap_or_else(|| format!("#{i}"));
+                for r in &a.requirements {
+                    by_req.entry(r.clone()).or_default().push(format!("{} (assume {label})", n.name));
+                }
+            }
+            for (i, g) in c.guarantees.iter().enumerate() {
+                let label = g.name.clone().unwrap_or_else(|| format!("#{i}"));
+                for r in &g.requirements {
+                    by_req.entry(r.clone()).or_default().push(format!("{} (guarantee {label})", n.name));
+                }
+            }
+            for m in &c.modes {
+                for r in &m.requirements {
+                    by_req.entry(r.clone()).or_default().push(format!("{} (mode {})", n.name, m.name));
+                }
             }
         }
     }
@@ -117,7 +138,11 @@ pub fn generate_html(project: &Project) -> String {
         for (req, nodes) in &by_req {
             let links = nodes
                 .iter()
-                .map(|n| format!("<a href=\"#op-{0}\">{0}</a>", esc(n)))
+                .map(|n| {
+                    // Link the operator part; clause suffixes stay as text.
+                    let (op, rest) = n.split_once(' ').unwrap_or((n.as_str(), ""));
+                    format!("<a href=\"#op-{0}\">{0}</a> {rest}", esc(op))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             let _ = write!(body, "<tr><td><code>{}</code></td><td>{links}</td></tr>\n", esc(req));
@@ -165,10 +190,21 @@ fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
         esc(&n.name),
         n.kind
     );
-    if !n.requirements.is_empty() {
+    if !n.requirements.is_empty() || n.sysml.is_some() {
         out.push_str("<p>");
         for r in &n.requirements {
             let _ = write!(out, "<span class=\"req\">{}</span>", esc(r));
+        }
+        if let Some(sr) = &n.sysml {
+            let label = match &sr.element {
+                Some(e) => format!("{}::{e}", sr.model),
+                None => sr.model.clone(),
+            };
+            let _ = write!(
+                out,
+                "<span class=\"meta\">realizes SysML: <code>{}</code></span>",
+                esc(&label)
+            );
         }
         out.push_str("</p>\n");
     }
@@ -269,14 +305,27 @@ fn render_node(n: &NodeDef, pkg: &ol_ir::Package, out: &mut String) {
         if let Some(c) = contracts.iter().find(|c| &c.name == cname) {
             let _ = write!(out, "<h3>Contract: {}</h3>\n", esc(&c.name));
             out.push_str("<pre>");
+            let tag = |reqs: &[String]| {
+                if reqs.is_empty() { String::new() } else { format!("  -- [{}]", reqs.join(", ")) }
+            };
             for a in &c.assumptions {
-                let _ = write!(out, "assume {};\n", esc(&ol_lustre_emit::format_expr(&a.expr)));
+                let _ = write!(
+                    out,
+                    "assume {};{}\n",
+                    esc(&ol_lustre_emit::format_expr(&a.expr)),
+                    esc(&tag(&a.requirements))
+                );
             }
             for g in &c.guarantees {
-                let _ = write!(out, "guarantee {};\n", esc(&ol_lustre_emit::format_expr(&g.expr)));
+                let _ = write!(
+                    out,
+                    "guarantee {};{}\n",
+                    esc(&ol_lustre_emit::format_expr(&g.expr)),
+                    esc(&tag(&g.requirements))
+                );
             }
             for m in &c.modes {
-                let _ = write!(out, "mode {} (\n", esc(&m.name));
+                let _ = write!(out, "mode {} ({}\n", esc(&m.name), esc(&tag(&m.requirements)));
                 for r in &m.requires {
                     let _ = write!(out, "  require {};\n", esc(&ol_lustre_emit::format_expr(r)));
                 }

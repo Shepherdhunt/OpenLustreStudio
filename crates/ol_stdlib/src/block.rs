@@ -190,6 +190,7 @@ impl LibBlock {
             diagram: Default::default(),
             probes: Vec::new(),
             requirements: Vec::new(),
+        sysml: None,
         };
 
         Ok(LoweredBlock {
@@ -301,6 +302,7 @@ impl LibBlock {
                 Ok(Assumption {
                     name: None,
                     expr: self.parse_body(s, "contract.assumptions")?,
+                    requirements: vec![],
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -311,6 +313,7 @@ impl LibBlock {
                 Ok(Guarantee {
                     name: None,
                     expr: self.parse_body(s, "contract.guarantees")?,
+                    requirements: vec![],
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -330,6 +333,7 @@ impl LibBlock {
                 name: m.name.clone(),
                 requires,
                 ensures,
+                requirements: vec![],
             });
         }
         Ok(Some(ContractDef {

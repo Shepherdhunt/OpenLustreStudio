@@ -54,6 +54,7 @@ fn build_edge_counter_project() -> Project {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
 
     Project {
@@ -180,6 +181,7 @@ fn merge_into_does_not_clobber_existing_node() {
                 diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
             }],
             ..Default::default()
         }],

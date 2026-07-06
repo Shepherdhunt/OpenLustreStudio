@@ -216,6 +216,16 @@ fn diff_node(old: &NodeDef, new: &NodeDef, out: &mut Vec<String>) {
             new.requirements.join(", ")
         ));
     }
+    if old.sysml != new.sysml {
+        let show = |r: &Option<ol_ir::SysmlRef>| match r {
+            None => "(none)".to_string(),
+            Some(r) => match &r.element {
+                Some(e) => format!("{}::{e}", r.model),
+                None => r.model.clone(),
+            },
+        };
+        push(format!("sysml {} -> {}", show(&old.sysml), show(&new.sysml)));
+    }
 }
 
 fn ports(ps: &[ol_ir::Port]) -> BTreeMap<&str, String> {
@@ -239,6 +249,7 @@ mod tests {
             diagram: Default::default(),
             probes: vec![],
             requirements: vec![],
+        sysml: None,
         }
     }
 

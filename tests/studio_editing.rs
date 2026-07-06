@@ -571,6 +571,23 @@ fn requirements_annotations_round_trip_and_trace_emits_the_matrix() {
     let on_disk = std::fs::read_to_string(g.tmp.join("model.json")).unwrap();
     assert!(on_disk.contains("SRS-107"), "requirements not saved");
 
+    // Clause-level links: requirement IDs on individual contract clauses
+    // (the rung below the operator). Annotate a guarantee and a mode of the
+    // release-logic contract directly in the model file.
+    let mut model: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(g.tmp.join("model.json")).unwrap()).unwrap();
+    let contract = model["packages"].as_array_mut().unwrap().iter_mut()
+        .flat_map(|p| p["contracts"].as_array_mut().unwrap())
+        .find(|c| c["name"] == "ReleaseLogic_contract").expect("contract");
+    let guarantee = contract["guarantees"].as_array_mut().unwrap().iter_mut()
+        .find(|c| c["name"] == "release_implies_arm").expect("guarantee");
+    guarantee["requirements"] = serde_json::json!(["SRS-077"]);
+    let mode = contract["modes"].as_array_mut().unwrap().iter_mut()
+        .find(|m| m["name"] == "SafeInhibit").expect("mode");
+    mode["requirements"] = serde_json::json!(["SRS-078"]);
+    std::fs::write(g.tmp.join("model.json"), serde_json::to_string_pretty(&model).unwrap())
+        .unwrap();
+
     // `openlustre trace` compiles the matrix and reports untraced operators.
     let out = Command::new(env!("CARGO"))
         .args(["run", "-q", "-p", "ol_cli", "--", "trace"])
@@ -583,11 +600,19 @@ fn requirements_annotations_round_trip_and_trace_emits_the_matrix() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(out.status.success(), "{text}");
-    assert!(text.contains("requirement,operator"), "{text}");
-    assert!(text.contains("SRS-042,Interlock"), "{text}");
-    assert!(text.contains("SRS-107,Interlock"), "{text}");
+    assert!(text.contains("requirement,operator,element"), "{text}");
+    assert!(text.contains("SRS-042,Interlock,operator"), "{text}");
+    assert!(text.contains("SRS-107,Interlock,operator"), "{text}");
+    // Clause-level rows name the clause they hang from.
+    assert!(text.contains("SRS-077,ReleaseLogic,guarantee release_implies_arm"), "{text}");
+    assert!(text.contains("SRS-078,ReleaseLogic,mode SafeInhibit"), "{text}");
     // The release-logic model's own operators carry no annotations yet.
     assert!(text.contains("untraced operator(s):"), "{text}");
+
+    // The design document tags the annotated clauses.
+    let (s, doc) = request(port, "GET", "/api/doc", "").unwrap();
+    assert_eq!(s, 200);
+    assert!(doc.contains("-- [SRS-077]"), "clause tag missing from doc");
 
     // --strict gates on full coverage.
     let out = Command::new(env!("CARGO"))
@@ -596,6 +621,105 @@ fn requirements_annotations_round_trip_and_trace_emits_the_matrix() {
         .output()
         .unwrap();
     assert!(!out.status.success(), "--strict must fail with untraced operators");
+}
+
+/// SysML 2.0 association groundwork: an operator can name the SysML model
+/// (and element) it realizes. The Studio edits it, the inspect warns when the
+/// file is missing (W0170), `trace` reports the associations, `diff` sees the
+/// change, and an empty model clears it.
+#[test]
+fn sysml_association_round_trip_warns_traces_and_clears() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+    let inspect = || {
+        let (s, b) = request(port, "GET", "/api/inspect", "").unwrap();
+        assert_eq!(s, 200);
+        serde_json::from_str::<serde_json::Value>(&b).unwrap()
+    };
+    let release_logic = |ins: &serde_json::Value| {
+        ins["project"]["packages"].as_array().unwrap().iter()
+            .flat_map(|p| p["nodes"].as_array().unwrap())
+            .find(|n| n["name"] == "ReleaseLogic").expect("ReleaseLogic in inspect").clone()
+    };
+
+    post("/api/edit/set_sysml",
+        r#"{"node":"ReleaseLogic","model":" models/sys.sysml ","element":"Pkg::Rel"}"#);
+
+    // The association round-trips (trimmed), and the missing file is a loud
+    // W0170 warning in the inspect.
+    let ins = inspect();
+    let node = release_logic(&ins);
+    assert_eq!(node["sysml"]["model"], "models/sys.sysml");
+    assert_eq!(node["sysml"]["element"], "Pkg::Rel");
+    let w0170 = ins["diagnostics"].as_array().unwrap().iter()
+        .find(|d| d["code"] == "W0170");
+    let w = w0170.expect("missing sysml file must warn");
+    assert_eq!(w["source"], "sysml");
+    assert!(w["message"].as_str().unwrap().contains("models/sys.sysml"), "{w}");
+
+    // `openlustre diff` against the pristine example reports the association.
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/release_logic/model/release_logic.json");
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "diff"])
+        .arg(&src)
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "models differ, diff must exit nonzero");
+    assert!(
+        text.contains("sysml (none) -> models/sys.sysml::Pkg::Rel"),
+        "diff must report the sysml change: {text}"
+    );
+
+    // Creating the file clears the warning.
+    std::fs::create_dir_all(g.tmp.join("models")).unwrap();
+    std::fs::write(g.tmp.join("models/sys.sysml"), "package Pkg { part def Rel; }\n").unwrap();
+    let ins = inspect();
+    assert!(
+        !ins["diagnostics"].as_array().unwrap().iter().any(|d| d["code"] == "W0170"),
+        "warning must clear once the file exists"
+    );
+
+    // `trace` reports the association alongside the requirements matrix, and
+    // the design document labels the operator with it.
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "trace"])
+        .arg(g.tmp.join("model.json"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "{text}");
+    assert!(
+        text.contains("-- sysml association(s): ReleaseLogic -> models/sys.sysml::Pkg::Rel"),
+        "{text}"
+    );
+    let (s, doc) = request(port, "GET", "/api/doc", "").unwrap();
+    assert_eq!(s, 200);
+    assert!(doc.contains("realizes SysML"), "doc label missing");
+    assert!(doc.contains("models/sys.sysml::Pkg::Rel"), "doc association missing");
+
+    // An empty model clears the association; unknown nodes are loud.
+    post("/api/edit/set_sysml", r#"{"node":"ReleaseLogic","model":""}"#);
+    let ins = inspect();
+    assert!(release_logic(&ins).get("sysml").map_or(true, |s| s.is_null()), "cleared");
+    let (s, _) = request(port, "POST", "/api/edit/set_sysml",
+        r#"{"node":"Nope","model":"m.sysml"}"#).unwrap();
+    assert_eq!(s, 400);
+
+    // The whole thing is journaled: undo restores the association.
+    post("/api/edit/undo", "{}");
+    let ins = inspect();
+    assert_eq!(release_logic(&ins)["sysml"]["model"], "models/sys.sysml");
 }
 
 /// Project ▸ Design Document serves the report from the running Studio.

@@ -40,6 +40,7 @@ fn dummy_node(name: &str, contract: Option<&str>) -> NodeDef {
         diagram: Default::default(),
             probes: vec![],
         requirements: vec![],
+        sysml: None,
     }
 }
 

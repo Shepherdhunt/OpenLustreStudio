@@ -61,6 +61,7 @@ fn build_project() -> Project {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     Project {
         name: "composite_consts".into(),
@@ -162,6 +163,7 @@ fn array_constant_lookup_agrees_across_backends() {
                 diagram: Default::default(),
                 probes: vec![],
         requirements: vec![],
+        sysml: None,
             }],
             ..Default::default()
         }],
@@ -275,6 +277,7 @@ fn make_array_and_record_emit_real_c() {
         diagram: Default::default(),
         probes: vec![],
         requirements: vec![],
+        sysml: None,
     };
     let project = Project {
         name: "make".into(),
