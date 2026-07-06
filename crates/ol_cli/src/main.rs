@@ -743,7 +743,9 @@ fn cmd_emit_lustre(
         );
     }
     std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
-    let lus = ol_lustre_emit::emit_project(&project);
+    // Layout pragmas ride along as comments, so the emitted Lustre re-imports
+    // with its diagram geometry; Kind 2 and other tools ignore them.
+    let lus = ol_lustre_emit::emit_project_with_layout(&project);
     std::fs::write(out.join("model.lus"), &lus)?;
     let target = if legacy { Target::Legacy } else { Target::Modern };
     let con = ol_cocospec_emit::emit_project(&project, target);

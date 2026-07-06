@@ -24,6 +24,51 @@ pub fn emit_project(project: &Project) -> String {
     out
 }
 
+/// Like [`emit_project`], plus one `(*@layout … @*)` pragma per node that
+/// carries diagram geometry. The pragma is an ordinary Lustre block comment —
+/// invisible to Kind 2 and every other Lustre tool — but `openlustre`'s
+/// importer reads it back, so a `.lus` file round-trips *with its drawing*:
+///
+/// ```text
+/// (*@layout AvgFilter {"grid":8,"positions":{"a":{"x":16,"y":16},"eq0":{"x":230,"y":16}}} @*)
+/// ```
+pub fn emit_project_with_layout(project: &Project) -> String {
+    let mut out = emit_project(project);
+    let mut any = false;
+    for node in project.all_nodes() {
+        if let Some(p) = layout_pragma(node) {
+            if !any {
+                out.push('\n');
+                let _ = writeln!(out, "-- Diagram geometry (read back by `openlustre` on import):");
+                any = true;
+            }
+            let _ = writeln!(out, "{p}");
+        }
+    }
+    out
+}
+
+/// The layout pragma for one node, or `None` when it carries no geometry.
+/// The payload is the node's `DiagramLayout` as JSON — the same shape the
+/// model file stores — inside a self-identifying block comment.
+pub fn layout_pragma(node: &NodeDef) -> Option<String> {
+    if node.diagram.positions.is_empty() && node.diagram.grid.is_none() {
+        return None;
+    }
+    #[derive(serde::Serialize)]
+    struct Payload<'a> {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        grid: Option<u32>,
+        positions: &'a std::collections::BTreeMap<String, ol_ir::NodePos>,
+    }
+    let json = serde_json::to_string(&Payload {
+        grid: node.diagram.grid,
+        positions: &node.diagram.positions,
+    })
+    .ok()?;
+    Some(format!("(*@layout {} {json} @*)", node.name))
+}
+
 pub fn emit_package(pkg: &Package, out: &mut String) {
     if !pkg.types.is_empty() {
         let _ = writeln!(out, "-- package: {} (types)", pkg.name);

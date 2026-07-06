@@ -558,7 +558,8 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
 
 fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
     let project = load(ctx)?;
-    let lus = ol_lustre_emit::emit_project(&project);
+    // With layout pragmas: text lifted from the pane re-imports with its drawing.
+    let lus = ol_lustre_emit::emit_project_with_layout(&project);
     let con = ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern);
     Ok(format!("{lus}\n{con}"))
 }
@@ -648,7 +649,9 @@ fn build_model_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
         return (200, "application/json", v.to_string().into_bytes());
     }
 
-    let lus = ol_lustre_emit::emit_project(&sliced);
+    // The per-operator projection carries its layout pragmas, so the `.lus`
+    // file alone round-trips back into the Studio with the drawing intact.
+    let lus = ol_lustre_emit::emit_project_with_layout(&sliced);
     let con = ol_cocospec_emit::emit_project(&sliced, ol_cocospec_emit::Target::Modern);
     let full = format!("{lus}\n{con}");
     let path = operator_lus_path(ctx, &main);

@@ -19,7 +19,14 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Control-law library (2026-07-06):**
+**Landed recently (newest first):** **Layout pragmas in Lustre
+(2026-07-06):** emitted `.lus` files carry `(*@layout <Node> {json} @*)`
+block-comment pragmas (positions/sizes/wrap/grid — the model's
+`DiagramLayout` as JSON); the importer reads them back, so a `.lus` file
+round-trips *with its drawing* while Kind 2 and every other Lustre tool see
+ordinary comments. The per-operator `.lus` projections, `emit-lustre`, and
+the Lustre pane carry them; the Kind 2 proving text stays comment-free.
+**Control-law library (2026-07-06):**
 `libraries/control/control.yaml` — RateLimiter, FirstOrderLag, Hysteresis,
 Debounce, PIDController, each with a CoCoSpec contract, behaviorally
 simulation-tested, in the embedded palette (46 blocks now).
@@ -248,6 +255,32 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (layout) — diagram geometry rides in the Lustre as pragmas
+
+The role SCADE's separate layout files play, solved the classic Lustre way:
+annotations that are comments to every other tool. Emitted Lustre now ends
+with one self-identifying pragma per drawn node —
+
+```text
+(*@layout AvgFilter {"grid":8,"positions":{"a":{"x":16,"y":16},"eq0":{"x":230,"y":16,"w":120}}} @*)
+```
+
+— the node's `DiagramLayout` (positions, user-set sizes, text-wrap flags,
+grid pitch) as JSON inside a block comment. `File ▸ Import Lustre` (and
+`parse_lustre` generally) reads the pragmas from the raw source before
+comment stripping and applies each to its named node, so **a `.lus` file
+round-trips with its drawing**: author on the canvas → build writes
+`<op>.lus` with pragmas → import that file into a fresh project → the boxes
+land where they were drawn. Emitters that carry pragmas: the per-operator
+`.lus` projections, `openlustre emit-lustre`, and the Studio's Lustre pane
+(`emit_project_with_layout`); the Kind 2 proving path keeps comment-free
+text. Malformed pragmas, pragmas naming undeclared nodes, and unterminated
+pragmas are loud import errors — silent geometry loss is what this feature
+exists to prevent. Files without pragmas import with the automatic column
+layout, as before. Tests: `layout_pragma_round_trips_the_drawing`,
+`malformed_and_misdirected_layout_pragmas_are_loud`
+(crates/ol_cli/src/lustre_import.rs).
 
 ### 2026-07-06 (control) — the control-law block family
 

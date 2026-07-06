@@ -20,7 +20,18 @@ pub struct Imported {
 }
 
 /// Parse every `type` / `const` / `node` / `function` declaration in `src`.
+///
+/// `(*@layout <Node> {json} @*)` pragmas — the comments
+/// [`ol_lustre_emit::emit_project_with_layout`] writes — are read back and
+/// applied to the matching node's diagram, so a `.lus` file round-trips
+/// *with its drawing*. Every other tool sees an ordinary block comment.
 pub fn parse_lustre(src: &str) -> Result<Imported, String> {
+    let mut imp = parse_declarations(src)?;
+    apply_layout_pragmas(src, &mut imp.nodes)?;
+    Ok(imp)
+}
+
+fn parse_declarations(src: &str) -> Result<Imported, String> {
     let cleaned = strip_comments(src);
     let mut s = cleaned.as_str();
     let mut imp = Imported::default();
@@ -52,6 +63,43 @@ pub fn parse_lustre(src: &str) -> Result<Imported, String> {
         return Err("no `node`, `function`, `type`, or `const` declarations found".into());
     }
     Ok(imp)
+}
+
+// --- layout pragmas ----------------------------------------------------------
+
+/// Find every `(*@layout <Node> {json} @*)` pragma in the raw source and
+/// apply its geometry to the matching imported node. Malformed pragmas and
+/// pragmas naming a node the file doesn't declare are loud errors — silent
+/// geometry loss is exactly what this feature exists to prevent.
+fn apply_layout_pragmas(src: &str, nodes: &mut [NodeDef]) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct Payload {
+        #[serde(default)]
+        grid: Option<u32>,
+        #[serde(default)]
+        positions: std::collections::BTreeMap<String, ol_ir::NodePos>,
+    }
+    let mut rest = src;
+    while let Some(at) = rest.find("(*@layout") {
+        let after = &rest[at + "(*@layout".len()..];
+        let end = after
+            .find("@*)")
+            .ok_or("unterminated `(*@layout` pragma (missing `@*)`)")?;
+        let body = after[..end].trim();
+        let (name, json) = body
+            .split_once(char::is_whitespace)
+            .ok_or("`(*@layout` pragma needs a node name and a JSON payload")?;
+        let payload: Payload = serde_json::from_str(json.trim())
+            .map_err(|e| format!("layout pragma for `{name}`: bad JSON payload: {e}"))?;
+        let node = nodes
+            .iter_mut()
+            .find(|n| n.name == name)
+            .ok_or_else(|| format!("layout pragma names `{name}`, which this file does not declare"))?;
+        node.diagram.grid = payload.grid;
+        node.diagram.positions = payload.positions;
+        rest = &after[end + "@*)".len()..];
+    }
+    Ok(())
 }
 
 // --- declarations ------------------------------------------------------------
@@ -523,5 +571,69 @@ mod tests {
     #[test]
     fn empty_input_is_an_error() {
         assert!(parse_lustre("   -- just a comment\n").is_err());
+    }
+
+    #[test]
+    fn layout_pragma_round_trips_the_drawing() {
+        // A node with canvas geometry, emitted with layout pragmas…
+        let mut project: ol_ir::Project = serde_json::from_value(serde_json::json!({
+            "name": "p",
+            "packages": [{
+                "name": "user",
+                "nodes": [{
+                    "name": "Avg",
+                    "kind": "Function",
+                    "inputs": [{"name": "a", "ty": {"kind": "Int32"}}],
+                    "outputs": [{"name": "y", "ty": {"kind": "Int32"}}],
+                    "equations": [{"lhs": ["y"],
+                        "rhs": {"expr": "Binary", "op": "Add",
+                                "lhs": {"expr": "Var", "name": "a"},
+                                "rhs": {"expr": "Const", "lit": {"lit": "Int", "value": 1}}}}]
+                }]
+            }]
+        }))
+        .unwrap();
+        let node = &mut project.packages[0].nodes[0];
+        node.diagram.grid = Some(8);
+        node.diagram.positions.insert(
+            "eq0".into(),
+            ol_ir::NodePos { x: 96.0, y: 48.0, w: Some(120.0), ..Default::default() },
+        );
+        node.diagram.positions.insert(
+            "a".into(),
+            ol_ir::NodePos { x: 16.0, y: 16.0, wrap: true, ..Default::default() },
+        );
+        let lus = ol_lustre_emit::emit_project_with_layout(&project);
+        assert!(lus.contains("(*@layout Avg"), "{lus}");
+
+        // …re-imports with the geometry intact, including sizes and wrap.
+        let imp = parse_lustre(&lus).expect("round-trip import");
+        let n = &imp.nodes[0];
+        assert_eq!(n.diagram.grid, Some(8));
+        let eq0 = &n.diagram.positions["eq0"];
+        assert_eq!((eq0.x, eq0.y, eq0.w), (96.0, 48.0, Some(120.0)));
+        assert!(n.diagram.positions["a"].wrap);
+
+        // Files without pragmas import with an empty (automatic) layout.
+        let plain = parse_lustre("node N(x: bool) returns (y: bool);\nlet\n  y = x;\ntel\n")
+            .unwrap();
+        assert!(plain.nodes[0].diagram.positions.is_empty());
+    }
+
+    #[test]
+    fn malformed_and_misdirected_layout_pragmas_are_loud() {
+        let base = "node N(x: bool) returns (y: bool);\nlet\n  y = x;\ntel\n";
+        // Bad JSON payload.
+        let e = parse_lustre(&format!("{base}(*@layout N {{not json}} @*)\n")).unwrap_err();
+        assert!(e.contains("bad JSON payload"), "{e}");
+        // Pragma naming an undeclared node.
+        let e = parse_lustre(&format!(
+            "{base}(*@layout Ghost {{\"positions\":{{}}}} @*)\n"
+        ))
+        .unwrap_err();
+        assert!(e.contains("does not declare"), "{e}");
+        // Unterminated pragma.
+        let e = parse_lustre(&format!("{base}(*@layout N {{}}")).unwrap_err();
+        assert!(e.contains("unterminated"), "{e}");
     }
 }

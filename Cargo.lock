@@ -239,6 +239,8 @@ name = "ol_lustre_emit"
 version = "0.1.0"
 dependencies = [
  "ol_ir",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
