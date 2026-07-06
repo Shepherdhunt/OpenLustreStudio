@@ -226,6 +226,7 @@
   svg text { fill: #1e1e1e; font-size: 11px; font-family: "Segoe UI", sans-serif; }
   svg .wire { stroke: #4a4a4a; stroke-width: 1.2; fill: none; }
   svg .wire:hover { stroke-width: 2.4; }
+  svg .junction { fill: #4a4a4a; pointer-events: none; }
   svg .wire.invalid { stroke: #d11a1a; stroke-width: 2; stroke-dasharray: 7 4; }
   svg .label { fill: #777; font-size: 9px; }
   .problems {
@@ -635,7 +636,7 @@
   </div>
 
   <div class="dlg" id="dlg-fsm">
-    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry; add <code class="inline">with history</code> (<code class="inline">Active: refine Spin with history</code>) to resume where it left off instead. <strong>Signals:</strong> declare boolean events in the signals field and mark states with <code class="inline">emit name</code> (e.g. <code class="inline">Green: go = true; emit crossing</code>) — a signal is true exactly while an emitting state is active and any guard or state equation can read it.</p>
+    <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry; add <code class="inline">with history</code> (<code class="inline">Active: refine Spin with history</code>) to resume where it left off instead. <strong>Parallel regions</strong> nest inline with dotted paths: <code class="inline">Active.motor.Lo: level = 1</code> puts sub-state <code class="inline">Lo</code> in region <code class="inline">motor</code> of <code class="inline">Active</code> (first sub-state declared = the region's initial state; several regions under one state run in parallel); <code class="inline">Active.motor: history</code> makes that region resume on re-entry. Sub-state transitions go in the same transitions box, unqualified. <strong>Signals:</strong> declare boolean events in the signals field and mark states with <code class="inline">emit name</code> (e.g. <code class="inline">Green: go = true; emit crossing</code>) — a signal is true exactly while an emitting state is active and any guard or state equation can read it.</p>
     <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
     <div id="fsm-host"></div>
     <div class="edit-form">
@@ -1989,6 +1990,20 @@ function renderDiagram() {
       svg += '<text class="wire-label" x="' + r.lx + '" y="' + r.ly +
         '" text-anchor="middle">' + escapeHTML(v + ": " + t) + '</text>';
     }
+  }
+  // Junction dots: a source feeding several destinations gets a solid dot on
+  // the shared exit stub (every route leaves horizontally for at least 8 px),
+  // so the fan-out reads as one net rather than coincident lines.
+  const fanout = {};
+  for (const w of d.wires) {
+    const fromId = collapsed.has(w.from) ? collapsed.get(w.from) : w.from;
+    if (pos[fromId] && pos[w.to]) fanout[fromId] = (fanout[fromId] || 0) + 1;
+  }
+  for (const id of Object.keys(fanout)) {
+    if (fanout[id] < 2) continue;
+    const a = pos[id];
+    svg += '<circle class="junction" cx="' + (a.x + a.w + 6) + '" cy="' +
+      (a.y + (a.h || DIAG.BOXH) / 2) + '" r="2.6"/>';
   }
   for (const it of items) {
     const p = pos[it.id];
@@ -3589,6 +3604,10 @@ function renderFsm(m) {
     const parts = st.equations.map(e => e.lhs + " = " + e.body)
       .concat((st.emits || []).map(s => "emit " + s));
     if (st.refines) parts.unshift("refine " + st.refines + (st.refine_history ? " (history)" : ""));
+    if (st.regions && st.regions.length) {
+      const subs = st.regions.reduce((n, r) => n + (r.states || []).length, 0);
+      parts.unshift("∥ " + st.regions.length + " region(s), " + subs + " sub-state(s)");
+    }
     const eqs = parts.join("; ");
     svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
       escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
@@ -3605,38 +3624,105 @@ function parsePortsSpec(text) {
   });
 }
 
+// Parse one state line's `; `-separated segments into {eqs, emits, refines,
+// refineHistory}, or null on a syntax error (with a status message).
+function fsmParseSegments(name, rest) {
+  const eqs = [];
+  const emits = [];
+  let refines = null, refineHistory = false;
+  for (const seg of rest.split(";").map(x => x.trim()).filter(Boolean)) {
+    // `refine Machine [with history]` delegates this state to another machine.
+    const rm = seg.match(/^refine\s+(\w+)(\s+with\s+history)?$/);
+    if (rm) { refines = rm[1]; refineHistory = !!rm[2]; continue; }
+    // `emit signal` raises a declared signal while this state is active.
+    const em = seg.match(/^emit\s+(\w+)$/);
+    if (em) { emits.push(em[1]); continue; }
+    const ei = seg.indexOf("=");
+    if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr`, `emit signal`, or `refine Machine [with history]` — got: " + seg); return null; }
+    eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
+  }
+  return { eqs, emits, refines, refineHistory };
+}
+
 // Parse the textual editor into the structured payload, or null on a syntax
 // error (with a status message). Shared by create and update.
+//
+// State-line grammar:
+//   Name: segments                        top-level state
+//   Parent.region.Sub: segments           sub-state in a parallel region of
+//                                         Parent (region created on first
+//                                         mention; its FIRST sub-state is
+//                                         the region's initial state)
+//   Parent.region: history                the region resumes where it left
+//                                         off on re-entry (SCADE history)
+// Paths nest (Sub.inner.X declares a region inside a sub-state). State
+// names are global — transitions reference them unqualified.
 function fsmBuildPayload() {
   const statesText = document.getElementById("fsm-states").value;
   const transText = document.getElementById("fsm-transitions").value;
-  const states = {};
-  const order = [];
+  const states = {};      // flat: any state name -> its object (for transitions)
+  const top = [];         // top-level states in declaration order
+  const regions = {};     // "Parent.region" -> the region object
   for (const line of statesText.split("\n")) {
     const t = line.trim();
     if (!t) continue;
     const ci = t.indexOf(":");
     if (ci < 0) { setFsmStatus(false, "state line needs `Name: lhs = expr` or `Name: refine Machine` — got: " + t); return null; }
-    const name = t.slice(0, ci).trim();
-    const eqs = [];
-    const emits = [];
-    let refines = null, refineHistory = false;
-    for (const seg of t.slice(ci + 1).split(";").map(x => x.trim()).filter(Boolean)) {
-      // `refine Machine [with history]` delegates this state to another machine.
-      const rm = seg.match(/^refine\s+(\w+)(\s+with\s+history)?$/);
-      if (rm) { refines = rm[1]; refineHistory = !!rm[2]; continue; }
-      // `emit signal` raises a declared signal while this state is active.
-      const em = seg.match(/^emit\s+(\w+)$/);
-      if (em) { emits.push(em[1]); continue; }
-      const ei = seg.indexOf("=");
-      if (ei < 0) { setFsmStatus(false, "state `" + name + "`: each part is `lhs = expr`, `emit signal`, or `refine Machine [with history]` — got: " + seg); return null; }
-      eqs.push({ lhs: seg.slice(0, ei).trim(), body: seg.slice(ei + 1).trim() });
+    const path = t.slice(0, ci).trim().split(".").map(x => x.trim());
+    const rest = t.slice(ci + 1);
+
+    if (path.length === 2) {
+      // `Parent.region: history` — a region attribute line.
+      if (rest.trim() !== "history" && rest.trim() !== "with history") {
+        setFsmStatus(false, "`" + path.join(".") + ":` — a Parent.region line only takes `history`; sub-states are `Parent.region.Sub: …`");
+        return null;
+      }
+      const key = path.join(".");
+      if (!states[path[0]]) { setFsmStatus(false, "region `" + key + "`: state `" + path[0] + "` is not declared (declare the parent state first)"); return null; }
+      if (!regions[key]) {
+        regions[key] = { initial_state: "", states: [], history: true };
+        states[path[0]].regions = states[path[0]].regions || [];
+        states[path[0]].regions.push(regions[key]);
+      } else {
+        regions[key].history = true;
+      }
+      continue;
     }
-    const st = { name, equations: eqs, transitions: [] };
-    if (refines) { st.refines = refines; if (refineHistory) st.refine_history = true; }
-    if (emits.length) st.emits = emits;
+    if (path.length % 2 === 0) {
+      setFsmStatus(false, "state path `" + path.join(".") + "` must be `Name`, `Parent.region.Sub`, or `Parent.region: history`");
+      return null;
+    }
+
+    const name = path[path.length - 1];
+    if (states[name]) { setFsmStatus(false, "state `" + name + "` is declared twice (state names are global)"); return null; }
+    const parsed = fsmParseSegments(name, rest);
+    if (!parsed) return null;
+    const st = { name, equations: parsed.eqs, transitions: [] };
+    if (parsed.refines) { st.refines = parsed.refines; if (parsed.refineHistory) st.refine_history = true; }
+    if (parsed.emits.length) st.emits = parsed.emits;
     states[name] = st;
-    order.push(name);
+
+    if (path.length === 1) {
+      top.push(st);
+    } else {
+      // Walk Parent.region(.Sub.region)*: every ancestor state must exist.
+      const parent = path[path.length - 3];
+      if (!states[parent]) { setFsmStatus(false, "sub-state `" + name + "`: parent state `" + parent + "` is not declared yet (declare it first)"); return null; }
+      const key = path.slice(0, path.length - 1).join(".");
+      if (!regions[key]) {
+        regions[key] = { initial_state: name, states: [], history: false };
+        states[parent].regions = states[parent].regions || [];
+        states[parent].regions.push(regions[key]);
+      }
+      if (!regions[key].initial_state) regions[key].initial_state = name;
+      regions[key].states.push(st);
+    }
+  }
+  for (const key of Object.keys(regions)) {
+    if (!regions[key].states.length) {
+      setFsmStatus(false, "region `" + key + "` declares history but has no sub-states");
+      return null;
+    }
   }
   for (const line of transText.split("\n")) {
     const t = line.trim();
@@ -3655,7 +3741,7 @@ function fsmBuildPayload() {
     outputs: parsePortsSpec(document.getElementById("fsm-outputs").value),
     signals: document.getElementById("fsm-signals").value
       .split(",").map(s => s.trim()).filter(Boolean),
-    states: order.map(n => states[n]),
+    states: top,
   };
 }
 
@@ -3751,19 +3837,33 @@ function fsmLoadIntoForm(m) {
   const ports = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ");
   document.getElementById("fsm-inputs").value = ports(m.inputs);
   document.getElementById("fsm-outputs").value = ports(m.outputs);
-  document.getElementById("fsm-states").value = (m.states || [])
-    .map(s => {
-      const parts = [];
-      if (s.refines) parts.push("refine " + s.refines + (s.refine_history ? " with history" : ""));
-      for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
-      for (const sig of (s.emits || [])) parts.push("emit " + sig);
-      return s.name + ": " + parts.join("; ");
-    })
-    .join("\n");
+  // Emit one line per state; nested parallel regions come out as dotted
+  // paths (`Parent.rN.Sub`) with the region's initial sub-state first and a
+  // `Parent.rN: history` attribute line when the region keeps history.
+  const stateLines = [];
+  const emitState = (s, prefix) => {
+    const parts = [];
+    if (s.refines) parts.push("refine " + s.refines + (s.refine_history ? " with history" : ""));
+    for (const e of (s.equations || [])) parts.push(e.lhs + " = " + e.body);
+    for (const sig of (s.emits || [])) parts.push("emit " + sig);
+    stateLines.push(prefix + s.name + ": " + parts.join("; "));
+    (s.regions || []).forEach((r, i) => {
+      const rp = prefix + s.name + ".r" + (i + 1);
+      if (r.history) stateLines.push(rp + ": history");
+      // The grammar reads the first declared sub-state as the initial one.
+      const subs = [...(r.states || [])];
+      subs.sort((a, b) => (a.name === r.initial_state ? -1 : b.name === r.initial_state ? 1 : 0));
+      for (const sub of subs) emitState(sub, rp + ".");
+    });
+  };
+  for (const s of (m.states || [])) emitState(s, "");
+  document.getElementById("fsm-states").value = stateLines.join("\n");
   const trans = [];
-  for (const s of (m.states || [])) {
+  const emitTrans = (s) => {
     for (const t of (s.transitions || [])) trans.push(s.name + " -> " + t.target + " when " + t.guard);
-  }
+    for (const r of (s.regions || [])) for (const sub of (r.states || [])) emitTrans(sub);
+  };
+  for (const s of (m.states || [])) emitTrans(s);
   document.getElementById("fsm-transitions").value = trans.join("\n");
   fsmPreview();
 }
@@ -3806,7 +3906,13 @@ function fsmPreview() {
     const ci = t.indexOf(":");
     if (ci < 0) { html += '<span class="err">' + escapeHTML(t) + " — needs `Name: …`</span>\n"; continue; }
     const nm = t.slice(0, ci).trim();
-    const tag = nm === initial ? ' <span class="kw">(initial)</span>' : "";
+    // A `Parent.region: history` region-attribute line.
+    if (nm.split(".").length === 2 && /^(with\s+)?history$/.test(t.slice(ci + 1).trim())) {
+      html += '<span class="st">region ' + escapeHTML(nm) + '</span>: <span class="kw">history</span>\n';
+      continue;
+    }
+    const tag = nm === initial ? ' <span class="kw">(initial)</span>'
+      : nm.includes(".") ? ' <span class="kw">(parallel)</span>' : "";
     const rest = t.slice(ci + 1).trim();
     const body = rest.split(";").map(seg => {
       seg = seg.trim();

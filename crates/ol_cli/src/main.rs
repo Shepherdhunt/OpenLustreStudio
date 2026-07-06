@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 mod doc_gen;
+mod fmu;
 mod lustre_import;
 mod model_diff;
 mod scenario;
@@ -160,6 +161,27 @@ enum Cmd {
     LibCheck {
         /// Directory of library YAML files (e.g. `libraries`).
         dir: PathBuf,
+    },
+    /// Export an operator as an FMI 2.0 co-simulation FMU (the generated
+    /// C-Lite wrapped in the standard FMI API; one fmi2DoStep = one cycle).
+    /// Deterministic archive: sources always, a linux64 binary when a host
+    /// C compiler is available.
+    Fmu {
+        model: PathBuf,
+        /// The .fmu file to write.
+        #[arg(short, long)]
+        out: PathBuf,
+        /// Root operator (defaults to the project's main).
+        #[arg(long)]
+        node: Option<String>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Also write the archive's contents as a directory tree here.
+        #[arg(long, value_name = "DIR")]
+        keep_sources: Option<PathBuf>,
+        /// Skip the host-compiler shared-library build (source-only FMU).
+        #[arg(long)]
+        no_binary: bool,
     },
     /// GUI / IDE integration commands. Emit stable JSON describing the loaded
     /// project so a future Tauri / web / VS Code front end can drive every
@@ -367,6 +389,18 @@ fn main() -> Result<()> {
             cmd_trace(&model, out.as_deref(), with_stdlib.as_deref(), strict)
         }
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
+        Cmd::Fmu { model, out, node, with_stdlib, keep_sources, no_binary } => {
+            let project = load_with_stdlib(&model, with_stdlib.as_deref())?;
+            fmu::export(
+                &project,
+                &out,
+                &fmu::FmuOptions {
+                    node: node.as_deref(),
+                    keep_sources: keep_sources.as_deref(),
+                    no_binary,
+                },
+            )
+        }
         Cmd::Studio { cmd } => match cmd {
             StudioCmd::Inspect {
                 model,

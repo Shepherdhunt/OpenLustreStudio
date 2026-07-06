@@ -175,3 +175,7 @@ path = "array_ops.rs"
 [[test]]
 name = "printout"
 path = "printout.rs"
+
+[[test]]
+name = "fmu_export"
+path = "fmu_export.rs"

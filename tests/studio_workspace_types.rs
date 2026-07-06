@@ -650,6 +650,67 @@ fn state_machine_signals_and_refine_history_round_trip_the_api() {
     assert_eq!(bd["ok"], true, "refining operator builds: {bd}");
 }
 
+/// Inline parallel regions through the Studio API: a state carries two
+/// regions that run in parallel (each driving one output), one with history.
+/// The structure round-trips `/api/fsm` and the owning operator builds.
+#[test]
+fn state_machine_inline_parallel_regions_round_trip_and_build() {
+    let g = start_server_on_workspace("ws_sm_regions");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"ModesOp","kind":"operator"}"#);
+    for p in [r#"{"node":"ModesOp","side":"input","name":"go","type":"bool"}"#,
+              r#"{"node":"ModesOp","side":"input","name":"stop","type":"bool"}"#,
+              r#"{"node":"ModesOp","side":"input","name":"tick","type":"bool"}"#,
+              r#"{"node":"ModesOp","side":"output","name":"level","type":"int32"}"#,
+              r#"{"node":"ModesOp","side":"output","name":"beep","type":"bool"}"#] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    // Idle drives both outputs; Active delegates each to one of two PARALLEL
+    // regions — motor (Lo/Hi, with history) drives `level`, beeper (Q/L)
+    // drives `beep`.
+    post_ok(port, "/api/edit/add_state_machine",
+        r#"{"name":"ModesSM","operator":"ModesOp","initial_state":"Idle",
+            "inputs":[{"name":"go","type":"bool"},{"name":"stop","type":"bool"},{"name":"tick","type":"bool"}],
+            "outputs":[{"name":"level","type":"int32"},{"name":"beep","type":"bool"}],
+            "states":[
+              {"name":"Idle","equations":[{"lhs":"level","body":"0"},{"lhs":"beep","body":"false"}],
+               "transitions":[{"guard":"go","target":"Active"}]},
+              {"name":"Active","equations":[],"transitions":[{"guard":"stop","target":"Idle"}],
+               "regions":[
+                 {"initial_state":"Lo","history":true,"states":[
+                   {"name":"Lo","equations":[{"lhs":"level","body":"1"}],"transitions":[{"guard":"tick","target":"Hi"}]},
+                   {"name":"Hi","equations":[{"lhs":"level","body":"2"}],"transitions":[{"guard":"tick","target":"Lo"}]}
+                 ]},
+                 {"initial_state":"Q","states":[
+                   {"name":"Q","equations":[{"lhs":"beep","body":"false"}],"transitions":[{"guard":"tick","target":"L"}]},
+                   {"name":"L","equations":[{"lhs":"beep","body":"true"}],"transitions":[{"guard":"tick","target":"Q"}]}
+                 ]}
+               ]}
+            ]}"#);
+
+    // The nested structure round-trips through the editor endpoint.
+    let m = get_json(port, "/api/fsm?name=ModesSM");
+    let active = m["states"].as_array().unwrap().iter().find(|s| s["name"] == "Active").unwrap();
+    let regions = active["regions"].as_array().unwrap();
+    assert_eq!(regions.len(), 2, "{active}");
+    assert_eq!(regions[0]["history"], true);
+    assert_eq!(regions[0]["initial_state"], "Lo");
+    assert_eq!(regions[1]["history"], false);
+    let subs: Vec<&str> = regions[1]["states"].as_array().unwrap().iter()
+        .map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(subs, vec!["Q", "L"], "{regions:?}");
+
+    // The operator builds: both regions lower into its body.
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"ModesOp"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "{bd}");
+    let lustre = bd["lustre"].as_str().unwrap();
+    assert!(lustre.contains("__sm_r1_state") && lustre.contains("__sm_r2_state"),
+        "two nested region state locals: {lustre}");
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

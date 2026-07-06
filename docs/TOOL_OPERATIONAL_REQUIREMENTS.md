@@ -232,6 +232,20 @@ error, and the subset the tool itself emits round-trips (an operator's own
 **Evidence:** parser unit tests in `crates/ol_cli/src/lustre_import.rs` and
 the workspace import test in `studio_workspace_types.rs`.
 
+### TOR-13 — FMU export equivalence
+
+`openlustre fmu` shall export an operator as an FMI 2.0 co-simulation FMU
+whose behavior, driven through the standard fmi2 API, is identical to the
+IR simulator's cycle-for-cycle: one `fmi2DoStep` advances the Lustre
+program by exactly one cycle regardless of the communication step size.
+The archive shall be deterministic (an unchanged model re-exports
+byte-identically, with a content-hashed GUID) and shall reject
+compound-typed interfaces loudly rather than mis-declare them.
+
+**Evidence:** `tests/fmu_export.rs` (archive validity, determinism, typed
+model description, compound-port rejection, and the fmi2-driven trace
+equality against `ol_sim`).
+
 ## 3. Usage constraints
 
 1. **Independent output verification is mandatory** for certification-adjacent

@@ -12,14 +12,29 @@ cannot code your way to a qualification certificate), and prioritizes the former
 ## 0. Status snapshot — resume here
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
-`main`). **Full check**: `cargo test --workspace --no-fail-fast` (56 result
-groups green as of 2026-06-16 on Windows/MSVC). The Studio GUI is one embedded
+`main`). **Full check**: `cargo test --workspace --no-fail-fast` (64 result
+groups green as of 2026-07-06 on Linux/gcc; 56 groups were green 2026-06-16
+on Windows/MSVC) plus `openlustre lib-check libraries` (48 blocks / 48
+contracts) — the workspace builds with zero warnings across all targets. The Studio GUI is one embedded
 HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 `crates/ol_cli/src/studio_server.rs` (`openlustre studio serve <dir>`); the IR
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **SysML 2.0 requirements lifting +
+**Landed recently (newest first):** **FMU export + inline parallel regions +
+junction dots (2026-07-06):** `openlustre fmu <model> -o out.fmu` exports an
+operator as an **FMI 2.0 co-simulation FMU** (`crates/ol_cli/src/fmu.rs`) —
+the verified C-Lite wrapped in self-contained FMI glue, one `fmi2DoStep` =
+one cycle, scalar interfaces (compound ports are a loud error), a
+deterministic store-only zip (content-hashed GUID; re-export is
+byte-identical), sources always plus `binaries/linux64/<id>.so` when a host
+compiler exists; equivalence-tested against the IR simulator through the
+fmi2 API. The FSM editor's **parallel regions** are now authorable inline
+with dotted paths (`Active.motor.Lo: level = 1`; first sub-state = the
+region's initial; `Active.motor: history` for resume-on-re-entry) — the
+last automata gap. Wire **fan-outs draw a junction dot** on the shared exit
+stub. Zero build warnings across all targets. Before
+that: **SysML 2.0 requirements lifting +
 masking MC/DC (2026-07-06):** the associated `.sysml` file is now **read**
 (`crates/ol_cli/src/sysml.rs` — a tolerant subset reader for the SysML v2
 textual notation: `requirement def/usage` with `<'SRS-x'>` short names and
@@ -226,7 +241,7 @@ symbols; typed wire labels.
    matching C's float functions (`sqrtf`, `fminf`, …), a "Float Math
    (32-bit)" toolbox family, and a float32 dual-backend equivalence test.
 3. ~~Tool Operational Requirements document~~ — **landed 2026-07-03**:
-   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` (TOR-1…12, each claim mapped to
+   `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` (TOR-1…13, each claim mapped to
    its verification tests; usage constraints; documented exclusions). The
    verification-by-equivalence story (§4) is complete.
 4. ~~Editor polish~~ — **all landed 2026-07-03**: orthogonal wire routing,
@@ -270,7 +285,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~P0 — Pin-to-pin wire drawing~~ | Drag from an output pin to an input pin creates a connection | **Landed 2026-06-13**: operation blocks render as SCADE gates with one input pin per operand on the left edge (red when unbound) and an output pin on the right; dragging a source pin onto a specific input pin binds that operand. AND/OR/etc. drop with their minimum two pins and grow to twelve. See §6 | done |
 | ~~P1 — Undo/redo~~ | Standard | **Landed 2026-06-11**: server edit-journal (100 deep), Edit menu + Ctrl+Z / Ctrl+Y | done |
 | ~~P1 — Multi-select / delete~~ | Select several, right-click, delete | **Landed 2026-06-13**: ctrl/shift-click multi-select, right-click context menu (Properties, Delete), Delete/Backspace key; Ctrl+Z restores | done |
-| ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-07-03**: wires route orthogonally by default (horizontal out, one mid-channel vertical, horizontal in; feedback wires hook around below; parallel wires stagger a few px so channels don't collapse); View ▸ "orthogonal wires" toggles back to Béziers. Junction dots at fan-outs remain cosmetic roadmap | done |
+| ~~P1 — Orthogonal wire routing~~ | Manhattan-routed wires with junctions | **Landed 2026-07-03**: wires route orthogonally by default (horizontal out, one mid-channel vertical, horizontal in; feedback wires hook around below; parallel wires stagger a few px so channels don't collapse); View ▸ "orthogonal wires" toggles back to Béziers. **2026-07-06**: junction dots at fan-outs — a source feeding several destinations gets a solid dot on the shared exit stub | done |
 | ~~P1 — Zoom/pan, copy/paste~~ | Standard | **Landed 2026-07-03**: viewBox zoom (Ctrl+wheel around the cursor, View-menu items, Ctrl+= / − / 0, status-bar %), middle-button pan, marquee multi-select on empty canvas, and Ctrl+C/Ctrl+V duplicating the selected blocks as one journaled edit (`/api/edit/duplicate_equations` — fresh `_copy` locals, internal wiring rewritten, external reads kept) | done |
 | ~~Multi-sheet diagrams~~ | One operator can span sheets | **Decided out (2026-07-06)**: one sheet per operator/node is a deliberate product limit that keeps OpenLustre Studio distinct from SCADE — decompose into sub-operators instead | won't do |
 | ~~P2 — Per-family gate silhouettes~~ | Distinct shapes per operator family (gates, delays, switches) | **Landed 2026-07-03**: AND (flat back, round nose), OR (shield), XOR (second back arc), NOT (triangle + bubble) draw as true IEC/SCADE silhouettes fitted to the same bounding box (pins/labels/resize unchanged); everything else keeps its compact symbol box | done |
@@ -281,13 +296,13 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 |---|---|---|
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
-| Hierarchical/parallel automata | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). **2026-07-06**: **signals** landed (declare in the machine, `emit name` in states, same-cycle broadcast readable in guards/equations, merged across refinement) and **`refine M with history`** is authorable in the editor. Remaining: a state's inline nested-region authoring beyond `refine` (multi-region parallel states in the textual grammar) | P3 (was P2) |
+| ~~Hierarchical/parallel automata~~ | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). **2026-07-06**: **signals** (declare in the machine, `emit name` in states, same-cycle broadcast, merged across refinement), **`refine M with history`**, and **inline parallel regions in the textual grammar** (`Active.motor.Lo: level = 1` dotted paths; `Active.motor: history`; first sub-state = the region's initial) — the automata story is complete | done |
 | ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. **2026-07-06: masking MC/DC landed** — the decision's boolean shape is recorded, coupled conditions are grouped, and a controlling-in-both-trials pair covers what unique-cause structurally cannot; reports count masking-covered conditions. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. **2026-07-06**: clause-level links landed — `requirements` on each contract Assumption/Guarantee/Mode, matrix grew an `element` column (`operator` / `assume L` / `guarantee L` / `mode M`), doc tags clause lines. **ReqIF export is decided out (2026-07-06)** — instead, **SysML 2.0 association groundwork landed**: `NodeDef.sysml` names the SysML model/element an operator realizes (Studio-edited, W0170 on dangling file, in trace/diff/doc); requirements will always ride in the SysML model | done |
 | ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
-| FMU export | Co-simulation entry ticket for the broader MBSE world | P3 |
+| ~~FMU export~~ | **Landed 2026-07-06**: `openlustre fmu <model> -o out.fmu [--node N]` — an FMI 2.0 co-simulation FMU wrapping the verified C-Lite (one `fmi2DoStep` = one synchronous cycle; scalar interfaces, compound ports are a loud error). Deterministic archive (store-only zip, fixed timestamps, content-hashed GUID — re-export is byte-identical), `sources/` always, `binaries/linux64/<id>.so` when a host compiler exists, `--keep-sources` explodes the tree for inspection. Equivalence-tested: driving the FMU through the standard fmi2 API reproduces the IR simulator's trace cell for cell | done |
 
 ## 4. The structural gap: qualification
 
@@ -308,7 +323,7 @@ qualification-by-pedigree**, and it is already half-built:
    2026-07-06** — the coverage story has no remaining exclusion).
 4. **Tool Operational Requirements document** — **done 2026-07-03**:
    `docs/TOOL_OPERATIONAL_REQUIREMENTS.md` enumerates the tool's claims
-   (TOR-1…12) with each mapped to its verification evidence in the test
+   (TOR-1…13) with each mapped to its verification evidence in the test
    suite, plus usage constraints and documented exclusions. The
    verification-by-equivalence story is complete: dual-backend execution,
    formal contract proofs, coverage evidence, and now the TOR document.
@@ -328,6 +343,62 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (fmu) — FMI 2.0 co-simulation export
+
+`openlustre fmu <model> -o out.fmu [--node N] [--with-stdlib DIR]
+[--keep-sources DIR] [--no-binary]` (`crates/ol_cli/src/fmu.rs`). The FMU
+wraps the same generated C every other backend uses: state machines lower,
+the project slices to the root operator, `ol_clite_emit` emits, and a
+self-contained FMI 2.0 glue file (standard types and signatures declared
+inline — no external headers needed) implements the full co-simulation API
+over the `_Input/_Output/_State` structs. **One `fmi2DoStep` = one
+synchronous cycle**, regardless of the communication step size. Inputs and
+outputs map to typed scalar variables (Boolean/Integer/Real) with
+sequential value references; compound-typed ports are a loud error with
+guidance. Out-of-range value references return `fmi2Error`, optional
+capabilities (FMU state, directional derivatives) decline honestly.
+
+The archive is **deterministic**: a hand-rolled store-only zip with fixed
+timestamps and a GUID hashed from the generated content — an unchanged
+model re-exports byte-identically, so the .fmu can live under
+configuration management (same rule as the design document). `sources/`
+ships always; `binaries/linux64/<id>.so` builds when a host `cc`/`gcc`/
+`clang` exists (`--no-binary` skips it).
+
+Tests (`tests/fmu_export.rs`): archive validity (zip magic, EOCD, stored
+entries), determinism (two exports byte-identical), typed
+modelDescription.xml, the compound-port rejection, and the equivalence
+claim — a C driver compiled from the kept sources drives the FMU through
+`fmi2Instantiate → Set{Boolean,Integer,Real} → DoStep → Get…` and its
+5-cycle trace equals the IR simulator's exactly (bool/int32/float64 ports,
+stateful `pre`). The built .so was also loaded and driven externally
+(ctypes) as a real importer would.
+
+### 2026-07-06 (regions+dots) — inline parallel regions in the editor, junction dots
+
+The IR, lowering, and server API supported nested parallel `Region`s all
+along; the textual editor could not author them. Now it can: dotted paths
+in the states box — `Active.motor.Lo: level = 1` declares sub-state `Lo`
+in region `motor` of `Active`; several regions under one state run in
+parallel (each must drive the outputs it owns in every sub-state — the
+existing cover rule); the **first declared sub-state is the region's
+initial state**; `Active.motor: history` makes the region resume on
+re-entry; paths nest for regions inside sub-states. Sub-state transitions
+go in the same transitions box, unqualified (state names are global).
+Loading a machine back regenerates the dotted lines with synthetic region
+names (`r1`, `r2`, initial-first order) and re-saves cleanly; the keyword
+preview marks `(parallel)` states and `history` lines; the diagram labels
+a composite state with its region/sub-state count. Tests:
+`state_machine_inline_parallel_regions_round_trip_and_build`
+(tests/studio_workspace_types.rs) plus a browser round-trip (author with
+dots → save → structured JSON correct → reload → identical dotted text →
+re-save validates).
+
+Junction dots: every wire leaves its source horizontally for at least
+8 px, so a source with fan-out ≥ 2 draws one solid dot on the shared stub
+— coincident lines now read as one net. Browser-verified on the
+release-logic diagram.
 
 ### 2026-07-06 (sysml-reqs) — the associated SysML model's requirements feed the trace
 
