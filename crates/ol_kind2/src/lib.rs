@@ -216,6 +216,80 @@ fn json_to_property(v: &serde_json::Value) -> Option<PropertyResult> {
 /// `instantValues` list of `[step, value]` pairs. Returns `None` if the JSON
 /// does not match this shape (unparseable counterexamples are surfaced as
 /// raw JSON by the caller).
+/// Extract the INPUT streams of a counterexample's top scope as a replayable
+/// trace: `(input names, one row of values per cycle)`. This is what the
+/// Studio feeds back into the simulator so a falsified property can be
+/// stepped through interactively. Kind 2 prints reals as fractions
+/// (`-1/2`); those convert to decimals so the simulator can parse them.
+/// `None` when the JSON has no recognizable input streams.
+pub fn counterexample_input_trace(
+    cex: &serde_json::Value,
+) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    let scopes = cex.as_array()?;
+    let top = scopes.first()?;
+    let streams = top.get("streams")?.as_array()?;
+    let mut names: Vec<String> = Vec::new();
+    let mut columns: Vec<Vec<String>> = Vec::new();
+    let mut cycles = 0usize;
+    for s in streams {
+        if s.get("class").and_then(|c| c.as_str()) != Some("input") {
+            continue;
+        }
+        let name = s.get("name").and_then(|n| n.as_str())?.to_string();
+        let mut vals: Vec<String> = Vec::new();
+        for entry in s.get("instantValues").and_then(|v| v.as_array())? {
+            let pair = entry.as_array()?;
+            if pair.len() < 2 {
+                continue;
+            }
+            let step = pair[0].as_u64().unwrap_or(0) as usize;
+            let raw = pair[1]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| pair[1].to_string());
+            while vals.len() <= step {
+                vals.push(String::new());
+            }
+            vals[step] = fraction_to_decimal(&raw);
+        }
+        cycles = cycles.max(vals.len());
+        names.push(name);
+        columns.push(vals);
+    }
+    if names.is_empty() || cycles == 0 {
+        return None;
+    }
+    // Hold the last seen value through any gap (Kind 2 omits unchanged
+    // instants in some printers) so every row is complete.
+    let rows: Vec<Vec<String>> = (0..cycles)
+        .map(|c| {
+            columns
+                .iter()
+                .map(|vals| {
+                    (0..=c)
+                        .rev()
+                        .find_map(|k| vals.get(k).filter(|v| !v.is_empty()).cloned())
+                        .unwrap_or_else(|| "0".to_string())
+                })
+                .collect()
+        })
+        .collect();
+    Some((names, rows))
+}
+
+/// `a/b` (Kind 2's rational real syntax) → a decimal string; anything else
+/// passes through unchanged.
+fn fraction_to_decimal(v: &str) -> String {
+    if let Some((num, den)) = v.split_once('/') {
+        if let (Ok(n), Ok(d)) = (num.trim().parse::<f64>(), den.trim().parse::<f64>()) {
+            if d != 0.0 {
+                return format!("{}", n / d);
+            }
+        }
+    }
+    v.to_string()
+}
+
 pub fn render_counterexample_waveform(cex: &serde_json::Value) -> Option<String> {
     let scopes = cex.as_array()?;
     if scopes.is_empty() {

@@ -314,6 +314,7 @@
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-orth" checked onchange="renderDiagram()"> orthogonal wires</label></div>
+      <div class="mi" onclick="autoLayoutDiagram()">Auto-layout Diagram</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="setZoom((state.zoom||1)*1.2)">Zoom In <span class="shortcut">Ctrl+=</span></div>
       <div class="mi" onclick="setZoom((state.zoom||1)/1.2)">Zoom Out <span class="shortcut">Ctrl+-</span></div>
@@ -417,6 +418,7 @@
         <button onclick="simStop()">Stop / Reset</button>
         <span class="build-note">cycle <span id="step-cycle">0</span></span>
       </div>
+      <details open style="margin-top:6px"><summary class="build-note">waveforms</summary><div id="step-waves" style="overflow-x:auto"></div></details>
       <details style="margin-top:6px"><summary class="build-note">trace history</summary><div id="step-trace"></div></details>
     </div>
     <div class="dock-pane" id="dock-tests" style="display:none">
@@ -639,8 +641,9 @@
 
   <div class="dlg" id="dlg-fsm">
     <p>A state machine <strong>belongs to one operator</strong> and is its body: it reads that operator's inputs and drives its outputs. Author it as text — states, transitions, and the variables each state drives — and it lowers to dataflow automatically. Every output must be assigned in every state (SCADE strictness), or the build reports it. <strong>Hierarchy:</strong> a state can <code class="inline">refine</code> another machine (e.g. <code class="inline">Active: refine Spin</code>) — that machine runs nested while the state is active, restarting on entry; add <code class="inline">with history</code> (<code class="inline">Active: refine Spin with history</code>) to resume where it left off instead. <strong>Parallel regions</strong> nest inline with dotted paths: <code class="inline">Active.motor.Lo: level = 1</code> puts sub-state <code class="inline">Lo</code> in region <code class="inline">motor</code> of <code class="inline">Active</code> (first sub-state declared = the region's initial state; several regions under one state run in parallel); <code class="inline">Active.motor: history</code> makes that region resume on re-entry. Sub-state transitions go in the same transitions box, unqualified. <strong>Signals:</strong> declare boolean events in the signals field and mark states with <code class="inline">emit name</code> (e.g. <code class="inline">Green: go = true; emit crossing</code>) — a signal is true exactly while an emitting state is active and any guard or state equation can read it.</p>
-    <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button></div>
-    <div id="fsm-host"></div>
+    <div class="row">view machine <select id="fsm-select"></select> <button onclick="fsmView()">Show diagram</button>
+      <span class="build-note">drag states to arrange · drag the ○ handle onto a state for a transition · double-click canvas to add a state · right-click a state to edit</span></div>
+    <div id="fsm-host" style="overflow:auto; max-height:420px"></div>
     <div class="edit-form">
       <div class="row" style="justify-content:space-between">
         <h4 id="fsm-form-title">New state machine</h4>
@@ -1413,6 +1416,7 @@ function simRun() {
   state.sim.running = true;
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
+  document.getElementById("step-waves").innerHTML = "";
   document.getElementById("step-cycle").textContent = "0";
   buildWatchTable();
   setMenuEnabled("mi-sim-step", true);
@@ -1435,6 +1439,7 @@ function simStop() {
   state.sim.running = false;
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
+  document.getElementById("step-waves").innerHTML = "";
   document.getElementById("step-cycle").textContent = "0";
   // Reset the computed cells; keep the sticky input values for the next run.
   document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
@@ -3031,6 +3036,16 @@ function showCtxMenu(x, y) {
       html += '<div class="ctx-item" onclick="resetBoxSize()">Reset size</div>';
     }
   }
+  // Alignment on a multi-selection, SCADE-Editor style.
+  if (n > 1) {
+    html += '<div class="ctx-sep"></div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'left\')">Align left edges</div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'top\')">Align top edges</div>';
+  }
+  if (n > 2) {
+    html += '<div class="ctx-item" onclick="alignSelected(\'vdist\')">Distribute vertically</div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'hdist\')">Distribute horizontally</div>';
+  }
   html += '<div class="ctx-sep"></div>' +
     '<div class="ctx-item" onclick="deleteSelected()">Delete' +
     (n > 1 ? " (" + n + " items)" : "") + "</div>";
@@ -3038,6 +3053,50 @@ function showCtxMenu(x, y) {
   m.style.left = x + "px";
   m.style.top = y + "px";
   m.style.display = "block";
+}
+
+/// Align / distribute the multi-selected boxes and persist the layout.
+/// `left`/`top` snap to the selection's minimum edge; `vdist`/`hdist` spread
+/// the boxes evenly between the selection's extremes, keeping their order.
+function alignSelected(mode) {
+  hideCtxMenu();
+  const ids = state.selected.filter(id => state.diagPos[id]);
+  if (ids.length < 2) return;
+  const ps = ids.map(id => state.diagPos[id]);
+  if (mode === "left") {
+    const x = Math.min(...ps.map(p => p.x));
+    ps.forEach(p => p.x = x);
+  } else if (mode === "top") {
+    const y = Math.min(...ps.map(p => p.y));
+    ps.forEach(p => p.y = y);
+  } else if (mode === "vdist" || mode === "hdist") {
+    const key = mode === "vdist" ? "y" : "x";
+    const sorted = [...ps].sort((a, b) => a[key] - b[key]);
+    const lo = sorted[0][key], hi = sorted[sorted.length - 1][key];
+    const step = (hi - lo) / (sorted.length - 1);
+    sorted.forEach((p, i) => p[key] = Math.round(lo + i * step));
+  }
+  renderDiagram();
+  saveLayout();
+}
+
+/// View ▸ Auto-layout: drop every stored position (one journaled edit) and
+/// return to the automatic column layout — the SCADE "clean up the sheet".
+async function autoLayoutDiagram() {
+  const d = state.diagramData;
+  if (!d) return;
+  const r = await fetch("/api/edit/set_layout", {
+    method: "POST",
+    body: JSON.stringify({ node: d.node, positions: {}, grid: gridPitch() }),
+  });
+  if (!r.ok) {
+    document.getElementById("diagram-status").textContent =
+      "auto-layout failed (" + await r.text() + ")";
+    return;
+  }
+  await loadDiagram(d.node);
+  document.getElementById("diagram-status").textContent =
+    "automatic layout applied — Ctrl+Z restores the old arrangement";
 }
 
 // Per-box text-wrap toggle (right-click ▸ Wrap text). A wrapped box renders its
@@ -3419,21 +3478,57 @@ async function proveRun() {
     return;
   }
   let html = "";
+  state.proveResults = data.properties || [];
   if (data.properties.length) {
     html += "<table><thead><tr><th>property</th><th>status</th></tr></thead><tbody>";
-    for (const p of data.properties) {
+    data.properties.forEach((p, i) => {
       const ok = (p.status || "").toLowerCase() === "valid";
       html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
         (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td></tr>";
       if (p.waveform) {
-        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre></td></tr>";
+        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre>" +
+          (p.cex_inputs
+            ? '<button onclick="replayCex(' + i + ')" title="Load this counterexample\'s inputs into the watch table and step through it">▶ Replay in simulator</button>'
+            : "") +
+          "</td></tr>";
       }
-    }
+    });
     html += "</tbody></table>";
   } else {
     html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
   }
   host.innerHTML = html;
+}
+
+/// Step a falsified property's counterexample through the simulator: the
+/// trace's input values load into the watch table cycle by cycle, so the
+/// engineer sees exactly how the model walks into the violation — and can
+/// keep stepping past it (the last row's inputs stay sticky).
+async function replayCex(idx) {
+  const p = (state.proveResults || [])[idx];
+  if (!p || !p.cex_inputs) return;
+  const e = entryNode();
+  if (!e) {
+    setSimStatus("no main operator to replay into");
+    showDock("simulation");
+    return;
+  }
+  const inputNames = new Set(e.inputs.map(x => x.name));
+  const cols = p.cex_inputs.columns;
+  if (!cols.every(c => inputNames.has(c))) {
+    setSimStatus("counterexample inputs don't match the main operator (" + cols.join(", ") + ")");
+    showDock("simulation");
+    return;
+  }
+  state.sim.built = true; // the prover just consumed the model — it builds
+  simRun();
+  for (const row of p.cex_inputs.rows) {
+    cols.forEach((c, i) => { state.sim.values[c] = row[i]; });
+    buildWatchTable();
+    await stepOnce();
+  }
+  setSimStatus("SIMULATION RUNNING — replayed counterexample for " + p.name +
+    " (" + p.cex_inputs.rows.length + " cycle(s); step to continue past it)");
 }
 
 // --- Types: the SCADE-style types file --------------------------------------------
@@ -3581,56 +3676,431 @@ async function fsmView() {
   renderFsm(m);
 }
 
-function renderFsm(m) {
-  // States on a circle; transitions as labelled arcs.
-  const n = m.states.length;
-  const R = Math.max(120, n * 38), CX = R + 90, CY = R + 50;
-  const W = CX * 2, H = CY * 2;
-  const pos = {};
+// --- The graphical automaton editor -------------------------------------------
+//
+// SCADE-style: states are draggable rounded boxes (nested parallel regions
+// render inside their parent, sub-states auto-placed), transitions are
+// arrows with guard labels, the initial state carries the dot-arrow marker.
+// Editing gestures: drag a state to move it (positions persist in the model
+// file), drag the ▸ handle onto another state to draw a transition,
+// double-click empty canvas to add a state, right-click a state for
+// edit / initial / region / delete. Structural edits round-trip through
+// `update_state_machine` (validated + journaled); the textual form below
+// stays in sync as the machine's text view.
+
+const FSM = { W: 132, H: 52, SUBW: 108, SUBH: 40, HDR: 20, RPAD: 6 };
+
+/// Recursive box size for one state: a leaf is fixed; a composite grows to
+/// hold its regions (sub-states laid out in a row per region).
+function fsmStateSize(st) {
+  if (!st.regions || !st.regions.length) return { w: FSM.W, h: FSM.H };
+  let w = FSM.W, h = FSM.HDR + 6;
+  for (const r of st.regions) {
+    let rw = FSM.RPAD, rh = 0;
+    for (const sub of r.states) {
+      const s = fsmStateSize(sub);
+      rw += s.w + FSM.RPAD;
+      rh = Math.max(rh, s.h);
+    }
+    w = Math.max(w, rw + 10);
+    h += rh + 2 * FSM.RPAD + 14;
+  }
+  return { w, h };
+}
+
+/// Compute every state's rectangle: top-level from persisted positions (grid
+/// default for the rest), sub-states packed inside their region containers.
+function fsmComputeRects(m) {
+  const rects = {}; // name -> {x, y, w, h, top: bool}
+  const regions = []; // {x, y, w, h, history, label, initial}
+  const place = (st, x, y, top) => {
+    const size = fsmStateSize(st);
+    rects[st.name] = { x, y, w: size.w, h: size.h, top };
+    let ry = y + FSM.HDR + 4;
+    (st.regions || []).forEach((r, ri) => {
+      let rw = FSM.RPAD, rh = 0;
+      for (const sub of r.states) {
+        const s = fsmStateSize(sub);
+        rw += s.w + FSM.RPAD;
+        rh = Math.max(rh, s.h);
+      }
+      const region = {
+        x: x + 5, y: ry, w: Math.max(rw, size.w - 10), h: rh + 2 * FSM.RPAD + 10,
+        history: r.history, label: "∥ r" + (ri + 1), initial: r.initial_state,
+      };
+      regions.push(region);
+      let sx = region.x + FSM.RPAD;
+      for (const sub of r.states) {
+        place(sub, sx, ry + 12 + FSM.RPAD, false);
+        sx += rects[sub.name].w + FSM.RPAD;
+      }
+      ry += region.h + 4;
+    });
+  };
   m.states.forEach((st, i) => {
-    const a = (2 * Math.PI * i) / n - Math.PI / 2;
-    pos[st.name] = { x: CX + R * Math.cos(a), y: CY + R * Math.sin(a) };
+    const p = (m.positions || {})[st.name];
+    const x = p ? p.x : 40 + (i % 3) * 230;
+    const y = p ? p.y : 30 + Math.floor(i / 3) * 150;
+    place(st, x, y, true);
   });
-  let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  return { rects, regions };
+}
+
+/// One state's body text lines (equations, emits, refine).
+function fsmStateLines(st) {
+  const parts = [];
+  if (st.refines) parts.push("refine " + st.refines + (st.refine_history ? " (hist)" : ""));
+  for (const e of (st.equations || [])) parts.push(e.lhs + " = " + e.body);
+  for (const s of (st.emits || [])) parts.push("emit " + s);
+  return parts;
+}
+
+function renderFsm(m) {
+  state.fsmModel = m;
+  const { rects, regions } = fsmComputeRects(m);
+  state.fsmRects = rects;
+  let maxX = 700, maxY = 260;
+  for (const r of Object.values(rects)) {
+    maxX = Math.max(maxX, r.x + r.w + 60);
+    maxY = Math.max(maxY, r.y + r.h + 40);
+  }
+  let svg = '<svg id="fsm-svg" width="' + maxX + '" height="' + maxY +
+    '" xmlns="http://www.w3.org/2000/svg" style="font-size:11px">';
   svg += '<defs><marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
          '<path d="M0,0 L7,3 L0,6 z" fill="#4a4a4a"/></marker></defs>';
-  for (const st of m.states) {
-    for (const t of st.transitions) {
-      const a = pos[st.name], b = pos[t.target];
+  // A transparent backplate catches double-clicks for "add state".
+  svg += '<rect width="' + maxX + '" height="' + maxY + '" fill="transparent" data-fsm-bg="1"/>';
+
+  // Region containers first (under their sub-states).
+  for (const r of regions) {
+    svg += '<rect x="' + r.x + '" y="' + r.y + '" width="' + r.w + '" height="' + r.h +
+      '" fill="#fbfcfe" stroke="#9ab" stroke-dasharray="4 3" rx="4"/>';
+    svg += '<text x="' + (r.x + 5) + '" y="' + (r.y + 10) + '" fill="#9ab">' + r.label +
+      (r.history ? ' <tspan fill="#a05a00" font-weight="bold">H</tspan>' : '') + '</text>';
+  }
+
+  // Transitions between any two placed states; self-loops arc on the right.
+  const edgePoint = (a, b) => {
+    // Where the line from a's centre toward b's centre leaves a's box.
+    const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
+    const bx = b.x + b.w / 2, by = b.y + b.h / 2;
+    const dx = bx - ax, dy = by - ay;
+    if (dx === 0 && dy === 0) return { x: ax, y: ay };
+    const sx = dx !== 0 ? (a.w / 2) / Math.abs(dx) : Infinity;
+    const sy = dy !== 0 ? (a.h / 2) / Math.abs(dy) : Infinity;
+    const s = Math.min(sx, sy);
+    return { x: ax + dx * s, y: ay + dy * s };
+  };
+  const walkTrans = (st) => {
+    const a = rects[st.name];
+    for (const t of (st.transitions || [])) {
+      const b = rects[t.target];
       if (!a || !b) continue;
       if (st.name === t.target) {
-        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (a.x + 28) + ' ' + (a.y - 12) +
-               ' C ' + (a.x + 75) + ' ' + (a.y - 55) + ', ' + (a.x + 75) + ' ' + (a.y + 30) +
-               ', ' + (a.x + 30) + ' ' + (a.y + 14) + '"/>';
-        svg += '<text class="label" x="' + (a.x + 60) + '" y="' + (a.y - 18) + '">' + escapeHTML(t.guard) + '</text>';
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (a.x + a.w) + ' ' + (a.y + 8) +
+          ' C ' + (a.x + a.w + 44) + ' ' + (a.y - 12) + ', ' + (a.x + a.w + 44) + ' ' + (a.y + a.h + 12) +
+          ', ' + (a.x + a.w) + ' ' + (a.y + a.h - 8) + '"/>';
+        svg += '<text class="label" x="' + (a.x + a.w + 26) + '" y="' + (a.y + a.h / 2) + '">' +
+          escapeHTML(t.guard) + '</text>';
       } else {
-        const mx = (a.x + b.x) / 2 + (a.y - b.y) * 0.18;
-        const my = (a.y + b.y) / 2 + (b.x - a.x) * 0.18;
-        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + a.x + ' ' + a.y +
-               ' Q ' + mx + ' ' + my + ' ' + b.x + ' ' + b.y + '"/>';
-        svg += '<text class="label" x="' + mx + '" y="' + my + '">' + escapeHTML(t.guard) + '</text>';
+        const p1 = edgePoint(a, b), p2 = edgePoint(b, a);
+        const mx = (p1.x + p2.x) / 2 + (p1.y - p2.y) * 0.15;
+        const my = (p1.y + p2.y) / 2 + (p2.x - p1.x) * 0.15;
+        svg += '<path class="wire" marker-end="url(#arr)" d="M ' + p1.x + ' ' + p1.y +
+          ' Q ' + mx + ' ' + my + ' ' + p2.x + ' ' + p2.y + '"/>';
+        svg += '<text class="label" x="' + mx + '" y="' + (my - 3) + '" text-anchor="middle">' +
+          escapeHTML(t.guard) + '</text>';
       }
     }
-  }
-  for (const st of m.states) {
-    const p = pos[st.name];
+    for (const r of (st.regions || [])) for (const sub of r.states) walkTrans(sub);
+  };
+  m.states.forEach(walkTrans);
+
+  // Initial markers: dot → arrow into the machine's initial state, and into
+  // each region's initial sub-state.
+  const initialMark = (name) => {
+    const r = rects[name];
+    if (!r) return;
+    svg += '<circle cx="' + (r.x - 18) + '" cy="' + (r.y + 12) + '" r="4" fill="#107c10"/>' +
+      '<line x1="' + (r.x - 14) + '" y1="' + (r.y + 12) + '" x2="' + (r.x - 1) + '" y2="' + (r.y + 12) +
+      '" stroke="#107c10" stroke-width="1.6" marker-end="url(#arr)"/>';
+  };
+  initialMark(m.initial_state);
+  for (const r of regions) initialMark(r.initial);
+
+  // State boxes (composites drew their regions above; leaves show text).
+  const drawState = (st, top) => {
+    const r = rects[st.name];
     const initial = st.name === m.initial_state;
-    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="30" class="box"' +
-      (initial ? ' stroke="#107c10" stroke-width="2.4"' : '') + '/>';
-    svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
-    const parts = st.equations.map(e => e.lhs + " = " + e.body)
-      .concat((st.emits || []).map(s => "emit " + s));
-    if (st.refines) parts.unshift("refine " + st.refines + (st.refine_history ? " (history)" : ""));
-    if (st.regions && st.regions.length) {
-      const subs = st.regions.reduce((n, r) => n + (r.states || []).length, 0);
-      parts.unshift("∥ " + st.regions.length + " region(s), " + subs + " sub-state(s)");
+    svg += '<g class="fsm-state" data-state="' + escapeAttr(st.name) + '" data-top="' + (top ? 1 : 0) +
+      '" style="cursor:' + (top ? "move" : "pointer") + '">';
+    svg += '<rect x="' + r.x + '" y="' + r.y + '" width="' + r.w + '" height="' + r.h +
+      '" rx="8" fill="' + (st.regions && st.regions.length ? "none" : "#fff") + '" stroke="' +
+      (initial ? "#107c10" : "#2b579a") + '" stroke-width="' + (initial ? 2.4 : 1.4) + '"/>';
+    svg += '<text x="' + (r.x + r.w / 2) + '" y="' + (r.y + 14) + '" text-anchor="middle" font-weight="bold" fill="#2b3a4a">' +
+      escapeHTML(st.name) + '</text>';
+    if (!st.regions || !st.regions.length) {
+      fsmStateLines(st).slice(0, 2).forEach((ln, i) => {
+        svg += '<text x="' + (r.x + r.w / 2) + '" y="' + (r.y + 28 + i * 12) +
+          '" text-anchor="middle" fill="#556" font-size="9px">' +
+          escapeHTML(ln.length > 24 ? ln.slice(0, 23) + "…" : ln) + '</text>';
+      });
     }
-    const eqs = parts.join("; ");
-    svg += '<text class="label" x="' + p.x + '" y="' + (p.y + 46) + '" text-anchor="middle">' +
-      escapeHTML(eqs.length > 38 ? eqs.slice(0, 37) + "…" : eqs) + '</text>';
-  }
+    // The transition handle: drag it onto another state to draw an arrow.
+    svg += '<circle class="fsm-handle" data-from="' + escapeAttr(st.name) + '" cx="' + (r.x + r.w) +
+      '" cy="' + (r.y + r.h / 2) + '" r="5" fill="#fff" stroke="#2b579a" stroke-width="1.4">' +
+      '<title>drag onto another state to add a transition</title></circle>';
+    svg += '</g>';
+    for (const reg of (st.regions || [])) for (const sub of reg.states) drawState(sub, false);
+  };
+  m.states.forEach(st => drawState(st, true));
   svg += "</svg>";
-  document.getElementById("fsm-host").innerHTML = svg;
+  const host = document.getElementById("fsm-host");
+  host.innerHTML = svg;
+
+  // --- gestures: drag-to-move, handle-drag-to-transition, dblclick, context.
+  const svgEl = document.getElementById("fsm-svg");
+  const pt = ev => {
+    const b = svgEl.getBoundingClientRect();
+    return { x: ev.clientX - b.left, y: ev.clientY - b.top };
+  };
+  svgEl.addEventListener("pointerdown", ev => {
+    // Only the left button arms a gesture — a right-click opens the context
+    // menu and must never leave a stale drag behind.
+    if (ev.button !== 0) {
+      state.fsmDrag = null;
+      return;
+    }
+    const handle = ev.target.closest(".fsm-handle");
+    if (handle) {
+      state.fsmDrag = { kind: "wire", from: handle.dataset.from, start: pt(ev) };
+      ev.preventDefault();
+      return;
+    }
+    const g = ev.target.closest("g.fsm-state");
+    if (g && g.dataset.top === "1") {
+      const r = state.fsmRects[g.dataset.state];
+      state.fsmDrag = { kind: "move", name: g.dataset.state, dx: pt(ev).x - r.x, dy: pt(ev).y - r.y, moved: false };
+      ev.preventDefault();
+    }
+  });
+  svgEl.addEventListener("pointermove", ev => {
+    const d = state.fsmDrag;
+    if (!d) return;
+    if (d.kind === "move") {
+      const p = pt(ev);
+      const r = state.fsmRects[d.name];
+      r.x = Math.max(24, p.x - d.dx);
+      r.y = Math.max(4, p.y - d.dy);
+      d.moved = true;
+      // Live feedback: move just the box group (full re-render on release).
+      const g = svgEl.querySelector('g.fsm-state[data-state="' + cssEscape(d.name) + '"] rect');
+      if (g) { g.setAttribute("x", r.x); g.setAttribute("y", r.y); }
+    }
+  });
+  svgEl.addEventListener("pointerup", async ev => {
+    const d = state.fsmDrag;
+    state.fsmDrag = null;
+    if (!d) return;
+    if (d.kind === "move" && d.moved) {
+      await fsmSaveLayout();
+      renderFsm(state.fsmModel);
+    } else if (d.kind === "wire") {
+      const g = ev.target.closest("g.fsm-state");
+      if (g && g.dataset.state !== d.from) {
+        const guard = prompt("Transition " + d.from + " → " + g.dataset.state + " when:", "true");
+        if (guard === null) return;
+        await fsmStructuralEdit(mm => {
+          fsmFindState(mm, d.from).transitions.push({ guard: guard.trim() || "true", target: g.dataset.state });
+        });
+      }
+    }
+  });
+  svgEl.addEventListener("dblclick", async ev => {
+    if (!ev.target.closest("g.fsm-state") && ev.target.dataset.fsmBg) {
+      const name = prompt("New state name:");
+      if (!name || !/^\w+$/.test(name.trim())) return;
+      const p = pt(ev);
+      await fsmAddState(name.trim(), p.x, p.y);
+    }
+  });
+  svgEl.addEventListener("contextmenu", ev => {
+    const g = ev.target.closest("g.fsm-state");
+    if (!g) return;
+    ev.preventDefault();
+    fsmStateMenu(ev, g.dataset.state, g.dataset.top === "1");
+  });
+}
+
+function cssEscape(s) { return s.replace(/["\\]/g, "\\$&"); }
+
+/// Find a state by name anywhere in the machine's tree.
+function fsmFindState(m, name) {
+  const walk = (states) => {
+    for (const st of states) {
+      if (st.name === name) return st;
+      for (const r of (st.regions || [])) {
+        const hit = walk(r.states);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk(m.states);
+}
+
+/// The update_state_machine payload for the current graphical model —
+/// port types render back to their surface syntax.
+function fsmPayloadFromModel(m) {
+  const ports = ps => (ps || []).map(p => ({ name: p.name, type: typeName(p.type) }));
+  return {
+    name: m.name,
+    operator: m.owner,
+    initial_state: m.initial_state,
+    inputs: ports(m.inputs),
+    outputs: ports(m.outputs),
+    signals: m.signals || [],
+    states: m.states,
+  };
+}
+
+/// Apply `mutate` to a copy of the current machine, save it (validated,
+/// journaled), and re-render. Errors surface in the dialog status line.
+async function fsmStructuralEdit(mutate) {
+  const m = JSON.parse(JSON.stringify(state.fsmModel));
+  mutate(m);
+  const r = await fetch("/api/edit/update_state_machine", {
+    method: "POST", body: JSON.stringify(fsmPayloadFromModel(m)),
+  });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setFsmStatus(false, msg);
+    return false;
+  }
+  setFsmStatus(true, "saved ✓");
+  const fresh = await fetchJSON("/api/fsm?name=" + encodeURIComponent(m.name));
+  fsmLoadIntoForm(fresh);
+  renderFsm(fresh);
+  await refresh();
+  return true;
+}
+
+/// Persist the top-level state positions (layout only — no re-validation).
+async function fsmSaveLayout() {
+  const m = state.fsmModel;
+  const positions = {};
+  for (const st of m.states) {
+    const r = state.fsmRects[st.name];
+    if (r) positions[st.name] = { x: Math.round(r.x), y: Math.round(r.y) };
+  }
+  m.positions = positions;
+  await fetch("/api/edit/set_fsm_layout", {
+    method: "POST", body: JSON.stringify({ machine: m.name, positions }),
+  });
+}
+
+/// A new state must drive every output (SCADE strictness), so it lands with
+/// type-appropriate defaults ready to edit.
+function fsmAddState(name, x, y) {
+  return fsmStructuralEdit(m => {
+    const dflt = ty => {
+      const k = typeKind(ty);
+      if (k === "Bool") return "false";
+      if (k === "Float32" || k === "Float64") return "0.0";
+      return "0";
+    };
+    m.states.push({
+      name,
+      equations: (m.outputs || []).map(o => ({ lhs: o.name, body: dflt(o.type) })),
+      transitions: [],
+    });
+    m.positions = m.positions || {};
+    m.positions[name] = { x, y };
+    state.fsmModel.positions = m.positions;
+  }).then(async ok => {
+    if (ok) await fsmSaveLayout();
+  });
+}
+
+/// Right-click menu on a state box in the automaton editor.
+function fsmStateMenu(ev, name, isTop) {
+  const menu = document.getElementById("ctx-menu");
+  menu.innerHTML = "";
+  const item = (label, fn) => {
+    const el = document.createElement("div");
+    el.className = "ctx-item";
+    el.textContent = label;
+    el.onclick = () => { hideCtxMenu(); fn(); };
+    menu.appendChild(el);
+  };
+  item("Edit state…", () => {
+    const st = fsmFindState(state.fsmModel, name);
+    const cur = fsmStateLines(st).join("; ");
+    const text = prompt("State `" + name + "` — `lhs = expr`, `emit signal`, `refine M [with history]`, separated by `;`:", cur);
+    if (text === null) return;
+    const parsed = fsmParseSegments(name, text);
+    if (!parsed) return;
+    fsmStructuralEdit(m => {
+      const s = fsmFindState(m, name);
+      s.equations = parsed.eqs;
+      s.emits = parsed.emits;
+      s.refines = parsed.refines || undefined;
+      s.refine_history = parsed.refineHistory || undefined;
+    });
+  });
+  if (isTop) {
+    item("Set as initial", () => fsmStructuralEdit(m => { m.initial_state = name; }));
+  }
+  item("Add transition…", () => {
+    const spec = prompt("Transition from `" + name + "` — `Target when guard`:");
+    if (!spec) return;
+    const t = spec.match(/^(\w+)\s+when\s+(.+)$/);
+    if (!t) { setFsmStatus(false, "need `Target when guard`"); return; }
+    fsmStructuralEdit(m => {
+      fsmFindState(m, name).transitions.push({ guard: t[2].trim(), target: t[1] });
+    });
+  });
+  item("Add parallel region…", () => {
+    const sub = prompt("First sub-state of the new region inside `" + name + "`:");
+    if (!sub || !/^\w+$/.test(sub.trim())) return;
+    fsmStructuralEdit(m => {
+      const s = fsmFindState(m, name);
+      s.regions = s.regions || [];
+      s.regions.push({ initial_state: sub.trim(), history: false,
+        states: [{ name: sub.trim(), equations: [], transitions: [] }] });
+    });
+  });
+  item("Delete state", () => fsmStructuralEdit(m => {
+    const drop = (states) => {
+      const i = states.findIndex(s => s.name === name);
+      if (i >= 0) { states.splice(i, 1); return true; }
+      for (const st of states) {
+        for (const r of (st.regions || [])) if (drop(r.states)) return true;
+      }
+      return false;
+    };
+    drop(m.states);
+    // Sweep transitions that pointed at it, drop now-empty regions, and
+    // re-anchor any initial that named it.
+    const sweep = (states) => states.forEach(st => {
+      st.transitions = (st.transitions || []).filter(t => t.target !== name);
+      st.regions = (st.regions || []).filter(r => r.states.length);
+      st.regions.forEach(r => {
+        if (!r.states.some(s => s.name === r.initial_state)) r.initial_state = r.states[0].name;
+        sweep(r.states);
+      });
+      if (!st.regions.length) delete st.regions;
+    });
+    sweep(m.states);
+    if (!m.states.some(s => s.name === m.initial_state) && m.states.length) {
+      m.initial_state = m.states[0].name;
+    }
+  }));
+  menu.style.left = ev.clientX + "px";
+  menu.style.top = ev.clientY + "px";
+  menu.style.display = "block";
 }
 
 function parsePortsSpec(text) {
@@ -4224,6 +4694,82 @@ function renderStepTrace(csv) {
   }
   html += "</tbody></table>";
   document.getElementById("step-trace").innerHTML = html;
+  renderWaveforms(hdr, rows);
+}
+
+/// SCADE-simulator-style strip charts: one lane per traced item across the
+/// stepped cycles. Booleans draw as square waves, numerics as stepped
+/// (sample-and-hold) lines with min/max annotations, enums as value labels
+/// at their change points. Values hold for their whole cycle — the
+/// synchronous semantics — so every lane uses step-after rendering.
+function renderWaveforms(hdr, rows) {
+  const host = document.getElementById("step-waves");
+  if (!host) return;
+  if (!rows.length) { host.innerHTML = ""; return; }
+  const CW = 22, LANE = 34, LBL = 120, TOP = 4;
+  const W = LBL + rows.length * CW + 46, H = hdr.length * LANE + TOP + 6;
+  const x = c => LBL + c * CW; // left edge of cycle c
+  let svg = '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg" style="font-size:10px">';
+  // Cycle grid + numbers along the top lane.
+  for (let c = 0; c <= rows.length; c++) {
+    svg += '<line x1="' + x(c) + '" y1="' + TOP + '" x2="' + x(c) + '" y2="' + (H - 4) +
+      '" stroke="#eef1f5" stroke-width="1"/>';
+    if (c < rows.length) {
+      svg += '<text x="' + (x(c) + CW / 2) + '" y="' + (TOP + 8) + '" text-anchor="middle" fill="#aab">' +
+        (c + 1) + '</text>';
+    }
+  }
+  hdr.forEach((name, ci) => {
+    const y0 = TOP + ci * LANE + 10; // plot band top (below cycle numbers row 0)
+    const yBot = TOP + (ci + 1) * LANE - 4;
+    const vals = rows.map(r => r[ci]);
+    svg += '<line x1="4" y1="' + (yBot + 2) + '" x2="' + (W - 4) + '" y2="' + (yBot + 2) +
+      '" stroke="#e4e9ee"/>';
+    svg += '<text x="4" y="' + ((y0 + yBot) / 2 + 3) + '" fill="#2b3a4a" font-family="Consolas,monospace">' +
+      escapeHTML(name.length > 14 ? name.slice(0, 13) + "…" : name) + '</text>';
+    const isBool = vals.every(v => v === "true" || v === "false");
+    const nums = vals.map(Number);
+    const isNum = !isBool && nums.every(n => isFinite(n));
+    if (isBool) {
+      const yOf = v => (v === "true" ? y0 + 2 : yBot);
+      let d = "";
+      vals.forEach((v, c) => {
+        d += (c ? " L " + x(c) + " " + yOf(v) : "M " + x(0) + " " + yOf(v)) +
+          " L " + x(c + 1) + " " + yOf(v);
+      });
+      svg += '<path d="' + d + '" fill="none" stroke="#2b579a" stroke-width="1.6"/>';
+    } else if (isNum) {
+      const lo = Math.min(...nums), hi = Math.max(...nums);
+      const span = hi - lo || 1;
+      const yOf = n => yBot - ((n - lo) / span) * (yBot - y0 - 2);
+      let d = "";
+      nums.forEach((n, c) => {
+        d += (c ? " L " + x(c) + " " + yOf(n) : "M " + x(0) + " " + yOf(n)) +
+          " L " + x(c + 1) + " " + yOf(n);
+      });
+      svg += '<path d="' + d + '" fill="none" stroke="#107c10" stroke-width="1.6"/>';
+      svg += '<text x="' + (x(rows.length) + 4) + '" y="' + (y0 + 8) + '" fill="#888">' + hi + '</text>';
+      if (hi !== lo) {
+        svg += '<text x="' + (x(rows.length) + 4) + '" y="' + yBot + '" fill="#888">' + lo + '</text>';
+      }
+    } else {
+      // Enum / other: label each value at its change points.
+      let prev = null;
+      vals.forEach((v, c) => {
+        if (v !== prev) {
+          svg += '<line x1="' + x(c) + '" y1="' + y0 + '" x2="' + x(c) + '" y2="' + yBot +
+            '" stroke="#a05a00" stroke-width="1"/>';
+          svg += '<text x="' + (x(c) + 3) + '" y="' + ((y0 + yBot) / 2 + 3) + '" fill="#a05a00">' +
+            escapeHTML(v.length > 10 ? v.slice(0, 9) + "…" : v) + '</text>';
+          prev = v;
+        }
+      });
+      svg += '<line x1="' + x(0) + '" y1="' + yBot + '" x2="' + x(rows.length) + '" y2="' + yBot +
+        '" stroke="#a05a00" stroke-width="1.2"/>';
+    }
+  });
+  svg += "</svg>";
+  host.innerHTML = svg;
 }
 
 function escapeHTML(s) {

@@ -54,6 +54,7 @@ fn toggle_machine() -> StateMachineDef {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     }
 }
 
@@ -234,6 +235,7 @@ fn three_state_traffic_light_simulates_correctly() {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     };
     let mut project = Project {
         name: "tl".into(),
@@ -350,6 +352,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     }
 }
 
@@ -406,6 +409,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     };
     let refmode = StateMachineDef {
         name: "RefMode".into(),
@@ -446,6 +450,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     };
     vec![spin, refmode]
 }
@@ -532,6 +537,7 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
         contract: None,
         signals: vec![],
         owner: Some("Lamp".into()), // operator-owned: merge into Lamp's body
+        diagram: Default::default(),
     };
     let mut project = Project {
         name: "owned".into(),
@@ -670,6 +676,7 @@ fn beacon_machine() -> StateMachineDef {
         contract: None,
         signals: vec!["blink".into()],
         owner: None,
+        diagram: Default::default(),
     }
 }
 
@@ -807,6 +814,7 @@ fn a_sub_machine_signal_is_readable_in_the_parent_after_refinement() {
         contract: None,
         signals: vec!["hot".into()],
         owner: None,
+        diagram: Default::default(),
     };
     let watch = StateMachineDef {
         name: "Watch".into(),
@@ -826,6 +834,7 @@ fn a_sub_machine_signal_is_readable_in_the_parent_after_refinement() {
         contract: None,
         signals: vec![],
         owner: None,
+        diagram: Default::default(),
     };
     let mut project = Project {
         name: "sig".into(),

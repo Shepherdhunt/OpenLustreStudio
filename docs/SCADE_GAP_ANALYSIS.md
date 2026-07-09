@@ -21,7 +21,34 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Operand-slot pins (2026-07-06):** an
+**Landed recently (newest first):** **Graphical interface round (2026-07-09):**
+four SCADE-parity interface gaps closed in one sweep. **(1) The graphical
+automaton editor** — the flagship: an operator's machine now renders and
+EDITS as first-class graphics in the machine dialog: states are draggable
+rounded boxes (positions persist in the model file via
+`StateMachineDef.diagram` + `/api/edit/set_fsm_layout`; a definition
+re-save keeps the drawing and sweeps deleted states), nested parallel
+regions draw inside their parent with the `∥ rN` / history badges,
+transitions are arrows with guard labels (self-loops arc), the initial
+state carries the dot-arrow marker. Gestures: drag the ○ handle onto
+another state → guarded transition; double-click canvas → new state
+pre-filled with type-correct output defaults (the cover rule); right-click
+→ Edit state… / Set as initial / Add transition… / Add parallel region… /
+Delete (with region/initial/transition sweeping). Every structural edit
+round-trips `update_state_machine` (validated, journaled); the textual
+form stays in sync as the text view. **(2) Counterexample replay** —
+falsified Kind 2 properties gain "▶ Replay in simulator": the CEX's input
+streams (`counterexample_input_trace`; fractions→decimals, gaps held)
+step through the watch table cycle by cycle and stay sticky after.
+**(3) Waveforms** — the simulator dock draws SCADE-style strip charts per
+watched item (bool square waves, stepped numeric lines with min/max,
+enum change labels), growing with each step. **(4) Align/distribute**
+(multi-select right-click) and **View ▸ Auto-layout Diagram** (drops
+stored positions as one journaled edit). A stale-drag canvas bug found by
+the browser tests (right-click armed a move) is fixed. **Backlog recorded:
+Fuzz Simulation** — user-selected inputs, type-aware fuzzing scoped to the
+operator + suboperators, user-defined error predicates plus automatic
+crash/violation detection. Before that: **Operand-slot pins (2026-07-06):** an
 operation block now shows **one pin per operand slot** — its full connection
 contract — instead of one pin per distinct free variable. A literal operand
 (`roll < 3.141`) is a labeled value-carrying pin, a repeated variable
@@ -356,6 +383,57 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-09 (gui) — graphical automata, CEX replay, waveforms, layout tools
+
+The four interface gaps from the SCADE-parity review, closed together and
+browser-verified end to end in one Playwright run (render → drag →
+handle-drag transition → context edit → double-click add → waveforms →
+align → auto-layout → replay):
+
+**Graphical automaton editing.** The machine dialog's read-only circle
+sketch became an editor. `StateMachineDef` gained a `diagram` layout
+(state positions, presentational only — lowering and diff ignore it;
+`/api/edit/set_fsm_layout` persists it; `update_state_machine` keeps the
+drawing across definition edits and sweeps entries for deleted states;
+`/api/fsm` serves it). Rendering: recursive state sizing (a composite
+grows to hold its region rows), dashed region containers with `∥ rN`/`H`
+badges, per-region initial markers, edge-to-edge transition arrows with
+guard labels, self-loop arcs. Editing: drag to move (top-level; live
+feedback, persisted on release), ○-handle drag to another state prompts a
+guard and adds the transition, double-click adds a state pre-filled with
+type-correct defaults for every output (SCADE's cover rule would reject an
+empty one), right-click menu edits the state line (`lhs = expr; emit s;
+refine M`), sets the initial, adds transitions/regions, and deletes with
+full sweeping (dangling transitions, emptied regions, re-anchored
+initials). All structural edits go through the validated, journaled
+`update_state_machine`; a rejected edit surfaces the server's message and
+changes nothing.
+
+**Counterexample replay.** `ol_kind2::counterexample_input_trace` extracts
+the top scope's `class: "input"` streams as a steppable trace (rational
+reals like `-1/2` become decimals; omitted instants hold the last value);
+`/api/prove` ships it as `cex_inputs` per property, and the Verify tab's
+"▶ Replay in simulator" steps it through the watch table — ending sticky
+on the last row so the engineer can keep stepping PAST the violation.
+
+**Waveforms.** Each simulator step redraws strip charts under the watch
+table: booleans as square waves, numerics as stepped sample-and-hold lines
+with min/max annotations, enums as labeled change points, cycle-numbered
+grid — the SCADE simulator's plot view in one SVG.
+
+**Layout tools.** Multi-select right-click gains Align left/top edges and
+Distribute vertically/horizontally; View ▸ Auto-layout Diagram clears the
+stored positions (one journaled edit, undoable) back to the automatic
+column layout.
+
+Also fixed: the automaton canvas armed a drag on any pointer button, so a
+right-click left a stale drag that hijacked the next gesture — caught by
+the sequenced browser test, fixed by gating gestures to the left button.
+
+Tests: `state_machine_layout_persists_and_survives_updates`
+(tests/studio_workspace_types.rs), two `counterexample_input_trace` unit
+tests (tests/kind2_adapter.rs), and the 8-step browser verification.
 
 ### 2026-07-06 (pins) — operand-slot pins: the block always shows its full contract
 

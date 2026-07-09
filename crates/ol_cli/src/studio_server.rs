@@ -323,6 +323,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/update_state_machine") => {
             apply_edit_response(ctx, body, edit_update_state_machine)
         }
+        ("POST", "/api/edit/set_fsm_layout") => {
+            apply_edit_response(ctx, body, edit_set_fsm_layout)
+        }
         ("POST", "/api/edit/remove_state_machine") => {
             apply_edit_response(ctx, body, edit_remove_state_machine)
         }
@@ -991,7 +994,7 @@ fn build_diagram(
         // shapes with no slot structure fall back to free-variable pins.
         let mut reads: Vec<String> = Vec::new();
         let mut input_pins: Vec<serde_json::Value> = Vec::new();
-        let mut ghost_pin = |v: &String, input_pins: &mut Vec<serde_json::Value>,
+        let ghost_pin = |v: &String, input_pins: &mut Vec<serde_json::Value>,
                              ghosts: &mut std::collections::BTreeMap<String, String>| {
             let why = ghost_reasons
                 .get(v)
@@ -1575,10 +1578,18 @@ fn prove_run(
                 .counterexample
                 .as_ref()
                 .and_then(ol_kind2::render_counterexample_waveform);
+            // The input streams as a replayable trace, so the Verify tab can
+            // step the falsifying scenario through the simulator.
+            let cex_inputs = p
+                .counterexample
+                .as_ref()
+                .and_then(ol_kind2::counterexample_input_trace)
+                .map(|(columns, rows)| serde_json::json!({ "columns": columns, "rows": rows }));
             serde_json::json!({
                 "name": p.name,
                 "status": p.status,
                 "waveform": waveform,
+                "cex_inputs": cex_inputs,
             })
         })
         .collect();
@@ -1712,6 +1723,7 @@ fn fsm_get(
                             "initial_state": m.initial_state,
                             "signals": m.signals,
                             "states": states,
+                            "positions": m.diagram.positions,
                         });
                         return Ok(value.to_string());
                     }
@@ -1861,6 +1873,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         signals,
         contract: None,
         owner,
+        diagram: Default::default(),
     };
     Ok(machine)
 }
@@ -1980,15 +1993,52 @@ fn edit_update_state_machine(
     project: &mut ol_ir::Project,
     req: &serde_json::Value,
 ) -> Result<(), String> {
-    let machine = parse_state_machine_req(req)?;
+    let mut machine = parse_state_machine_req(req)?;
     validate_state_machine(project, &machine)?;
     for pkg in &mut project.packages {
         if let Some(slot) = pkg.state_machines.iter_mut().find(|m| m.name == machine.name) {
+            // An update replaces the definition, never the drawing: keep the
+            // graphical editor's state positions (dropping entries for
+            // states that no longer exist).
+            machine.diagram = slot.diagram.clone();
+            let names: std::collections::BTreeSet<String> = {
+                let mut v = Vec::new();
+                ol_ir::state_machine::collect_state_names_of(&machine.states, &mut v);
+                v.into_iter().collect()
+            };
+            machine.diagram.positions.retain(|k, _| names.contains(k));
             *slot = machine;
             return Ok(());
         }
     }
     Err(format!("state machine `{}` not found", machine.name))
+}
+
+/// Persist the graphical automaton editor's state positions
+/// (`{machine, positions: {state: {x, y}}}`) — layout only, like
+/// `set_layout` for operator diagrams.
+fn edit_set_fsm_layout(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let name = req_str(req, "machine")?.to_string();
+    let positions = req
+        .get("positions")
+        .and_then(|v| v.as_object())
+        .ok_or("missing object field `positions`")?;
+    let mut map = std::collections::BTreeMap::new();
+    for (id, pos) in positions {
+        let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
+        let y = pos.get("y").and_then(|v| v.as_f64()).ok_or("position missing y")?;
+        map.insert(id.clone(), ol_ir::NodePos { x, y, w: None, h: None, wrap: false });
+    }
+    for pkg in &mut project.packages {
+        if let Some(m) = pkg.state_machines.iter_mut().find(|m| m.name == name) {
+            m.diagram.positions = map;
+            return Ok(());
+        }
+    }
+    Err(format!("state machine `{name}` not found"))
 }
 
 fn edit_remove_state_machine(

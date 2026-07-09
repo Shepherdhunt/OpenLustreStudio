@@ -57,6 +57,7 @@ fn traffic_light_project() -> Project {
         signals: vec![],
         contract: None,
         owner: None,
+        diagram: Default::default(),
     };
     Project {
         name: "tl".into(),
@@ -230,6 +231,7 @@ fn mode_project() -> Project {
         signals: vec![],
         contract: None,
         owner: None,
+        diagram: Default::default(),
     };
     Project {
         name: "mode".into(),

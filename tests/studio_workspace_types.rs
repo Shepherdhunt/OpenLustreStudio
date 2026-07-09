@@ -711,6 +711,50 @@ fn state_machine_inline_parallel_regions_round_trip_and_build() {
         "two nested region state locals: {lustre}");
 }
 
+/// The graphical automaton editor's layout: state positions persist via
+/// `set_fsm_layout`, round-trip through `/api/fsm`, survive a definition
+/// update (a re-save must not lose the drawing), and entries for deleted
+/// states are swept.
+#[test]
+fn state_machine_layout_persists_and_survives_updates() {
+    let g = start_server_on_workspace("ws_sm_layout");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Sw","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Sw","side":"input","name":"flip","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Sw","side":"output","name":"lit","type":"bool"}"#);
+    let machine = |states: &str| -> String {
+        format!(
+            r#"{{"name":"T","operator":"Sw","initial_state":"Off",
+                 "inputs":[{{"name":"flip","type":"bool"}}],
+                 "outputs":[{{"name":"lit","type":"bool"}}],
+                 "states":[{states}]}}"#
+        )
+    };
+    let off = r#"{"name":"Off","equations":[{"lhs":"lit","body":"false"}],"transitions":[{"guard":"flip","target":"On"}]}"#;
+    let on = r#"{"name":"On","equations":[{"lhs":"lit","body":"true"}],"transitions":[{"guard":"flip","target":"Off"}]}"#;
+    let blink = r#"{"name":"Blink","equations":[{"lhs":"lit","body":"true"}],"transitions":[]}"#;
+    post_ok(port, "/api/edit/add_state_machine", &machine(&format!("{off},{on},{blink}")));
+
+    // Drag positions persist and serve back.
+    post_ok(port, "/api/edit/set_fsm_layout",
+        r#"{"machine":"T","positions":{"Off":{"x":40,"y":30},"On":{"x":280,"y":30},"Blink":{"x":160,"y":170}}}"#);
+    let m = get_json(port, "/api/fsm?name=T");
+    assert_eq!(m["positions"]["On"]["x"], 280.0, "{m}");
+    assert_eq!(m["positions"]["Blink"]["y"], 170.0, "{m}");
+
+    // A definition update keeps the drawing — but sweeps deleted states.
+    post_ok(port, "/api/edit/update_state_machine", &machine(&format!("{off},{on}")));
+    let m = get_json(port, "/api/fsm?name=T");
+    assert_eq!(m["positions"]["Off"]["x"], 40.0, "kept: {m}");
+    assert!(m["positions"].get("Blink").is_none(), "deleted state's position swept: {m}");
+
+    // Unknown machine is a loud 400.
+    let (s, _) = request(port, "POST", "/api/edit/set_fsm_layout",
+        r#"{"machine":"Nope","positions":{}}"#).unwrap();
+    assert_eq!(s, 400);
+}
+
 // --- Types file: enums, records, aliases/arrays round-trip ------------------
 
 #[test]

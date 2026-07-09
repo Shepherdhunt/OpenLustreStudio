@@ -273,6 +273,7 @@ impl LibBlock {
             signals: self.signals.clone(),
             contract: contract.as_ref().map(|_| self.contract_name()),
             owner: None,
+            diagram: Default::default(),
         };
         let lowered = lower_state_machine(&sm).map_err(|e| LowerError::StateMachine {
             block: self.name.clone(),

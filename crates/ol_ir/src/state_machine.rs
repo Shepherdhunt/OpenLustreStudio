@@ -116,6 +116,15 @@ pub struct StateMachineDef {
     /// machines (e.g. stdlib library blocks) lower to their own node.
     #[serde(default)]
     pub owner: Option<String>,
+    /// Canvas positions of the machine's states in the graphical automaton
+    /// editor, keyed by state name. Purely presentational — lowering and
+    /// diffing ignore it, exactly like an operator's diagram layout.
+    #[serde(default, skip_serializing_if = "layout_is_empty")]
+    pub diagram: crate::node::DiagramLayout,
+}
+
+fn layout_is_empty(d: &crate::node::DiagramLayout) -> bool {
+    d.positions.is_empty() && d.notes.is_none() && d.grid.is_none()
 }
 
 /// Lowering result: the auto-generated state-enum types (one per region — the
@@ -534,6 +543,12 @@ fn collect_state_names(states: &[StateDef], into: &mut Vec<String>) {
             collect_state_names(&r.states, into);
         }
     }
+}
+
+/// Every state name in the tree (all regions, all depths) — the id space of
+/// the graphical automaton editor's layout.
+pub fn collect_state_names_of(states: &[StateDef], into: &mut Vec<String>) {
+    collect_state_names(states, into);
 }
 
 /// Signals must be unique, must not shadow the machine's interface, locals,

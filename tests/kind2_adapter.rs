@@ -99,3 +99,56 @@ fn waveform_renders_multi_scope_counterexamples_into_one_table() {
     assert!(rendered.contains("b"));
     assert!(rendered.contains("42"));
 }
+
+// --- Counterexample replay: the input streams as a steppable trace ------------
+
+#[test]
+fn input_trace_extracts_only_input_streams_and_converts_fractions() {
+    let cex: serde_json::Value = serde_json::from_str(
+        r#"[{
+            "blockType": "node",
+            "name": "Main",
+            "streams": [
+                { "name": "arm", "type": "bool", "class": "input",
+                  "instantValues": [[0, "false"], [1, "true"], [2, "true"]] },
+                { "name": "gain", "type": "real", "class": "input",
+                  "instantValues": [[0, "-1/2"], [1, "3/4"], [2, "1"]] },
+                { "name": "release", "type": "bool", "class": "output",
+                  "instantValues": [[0, "false"], [1, "false"], [2, "true"]] }
+            ]
+        }]"#,
+    )
+    .unwrap();
+    let (cols, rows) = ol_kind2::counterexample_input_trace(&cex).expect("trace");
+    assert_eq!(cols, vec!["arm", "gain"], "outputs are not replay inputs");
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0], vec!["false", "-0.5"], "fractions become decimals");
+    assert_eq!(rows[1], vec!["true", "0.75"]);
+    assert_eq!(rows[2], vec!["true", "1"]);
+}
+
+#[test]
+fn input_trace_holds_values_through_gaps_and_rejects_no_inputs() {
+    // Kind 2 sometimes omits unchanged instants: the trace must hold the
+    // last seen value so every replay row is complete.
+    let cex: serde_json::Value = serde_json::from_str(
+        r#"[{ "streams": [
+            { "name": "x", "type": "int", "class": "input",
+              "instantValues": [[0, "7"], [3, "9"]] }
+        ]}]"#,
+    )
+    .unwrap();
+    let (cols, rows) = ol_kind2::counterexample_input_trace(&cex).expect("trace");
+    assert_eq!(cols, vec!["x"]);
+    assert_eq!(
+        rows.iter().map(|r| r[0].as_str()).collect::<Vec<_>>(),
+        vec!["7", "7", "7", "9"],
+        "gaps hold the last value"
+    );
+
+    let no_inputs: serde_json::Value = serde_json::from_str(
+        r#"[{ "streams": [ { "name": "y", "class": "output", "instantValues": [[0, "1"]] } ] }]"#,
+    )
+    .unwrap();
+    assert!(ol_kind2::counterexample_input_trace(&no_inputs).is_none());
+}
