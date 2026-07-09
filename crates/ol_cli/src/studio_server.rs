@@ -367,6 +367,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
         }
+        ("POST", "/api/edit/rewire_operand") => {
+            apply_edit_response(ctx, body, edit_rewire_operand)
+        }
         ("POST", "/api/edit/add_probe") => apply_edit_response(ctx, body, edit_add_probe),
         ("POST", "/api/edit/set_requirements") => {
             apply_edit_response(ctx, body, edit_set_requirements)
@@ -979,30 +982,98 @@ fn build_diagram(
         let eq_id = format!("eq{i}");
         let invalid = !eq_problems[i].is_empty();
         let reason = eq_problems[i].join("; ");
-        // The operand pins on the block's left edge, in evaluation order:
-        // each free variable is one input pin (global constants are inlined,
-        // not pins). Bound pins carry a wire from their source variable;
-        // unbound (ghost) pins render red on the block itself.
+        // The operand pins on the block's left edge. A recognized operation
+        // shows ONE PIN PER OPERAND SLOT — the block's full connection
+        // contract, whatever currently fills each slot: a variable pin
+        // carries a wire from its source, a literal or sub-expression pin
+        // shows its value (still a drop target — wiring it replaces the
+        // operand), and an undeclared name is a red unbound pin. Whole-rhs
+        // shapes with no slot structure fall back to free-variable pins.
         let mut reads: Vec<String> = Vec::new();
         let mut input_pins: Vec<serde_json::Value> = Vec::new();
-        for v in eq.rhs.free_vars() {
-            if globals.contains(&v) {
-                continue;
+        let mut ghost_pin = |v: &String, input_pins: &mut Vec<serde_json::Value>,
+                             ghosts: &mut std::collections::BTreeMap<String, String>| {
+            let why = ghost_reasons
+                .get(v)
+                .cloned()
+                .unwrap_or_else(|| format!("`{v}` is not declared as an input, output, or local"));
+            ghosts.insert(v.clone(), why.clone());
+            input_pins.push(serde_json::json!({
+                "name": v, "bound": false, "reason": why, "kind": "var",
+            }));
+        };
+        match operand_slots(&eq.rhs) {
+            Some(slots) => {
+                for (port, slot) in slots.iter().enumerate() {
+                    match slot {
+                        ol_ir::Expr::Var { name: v } if globals.contains(v) => {
+                            // A named constant: a value-carrying pin, no wire.
+                            input_pins.push(serde_json::json!({
+                                "name": v, "bound": true, "kind": "const",
+                            }));
+                        }
+                        ol_ir::Expr::Var { name: v } => {
+                            if known.contains(v.as_str()) {
+                                reads.push(v.clone());
+                                wires.push(serde_json::json!({
+                                    "from": v.clone(), "to": eq_id, "to_port": port,
+                                }));
+                                input_pins.push(serde_json::json!({
+                                    "name": v, "bound": true, "kind": "var",
+                                }));
+                            } else {
+                                ghost_pin(v, &mut input_pins, &mut ghosts);
+                            }
+                        }
+                        ol_ir::Expr::Const { .. } => {
+                            input_pins.push(serde_json::json!({
+                                "name": ol_lustre_emit::format_expr(slot),
+                                "bound": true, "kind": "literal",
+                            }));
+                        }
+                        other => {
+                            // A sub-expression operand: its variables wire
+                            // into this pin; the pin shows the expression.
+                            for v in other.free_vars() {
+                                if globals.contains(&v) {
+                                    continue;
+                                }
+                                if known.contains(v.as_str()) {
+                                    reads.push(v.clone());
+                                    wires.push(serde_json::json!({
+                                        "from": v.clone(), "to": eq_id, "to_port": port,
+                                    }));
+                                } else {
+                                    let why = ghost_reasons.get(&v).cloned().unwrap_or_else(|| {
+                                        format!("`{v}` is not declared as an input, output, or local")
+                                    });
+                                    ghosts.insert(v.clone(), why);
+                                }
+                            }
+                            input_pins.push(serde_json::json!({
+                                "name": ol_lustre_emit::format_expr(other),
+                                "bound": true, "kind": "expr",
+                            }));
+                        }
+                    }
+                }
             }
-            let port = input_pins.len();
-            if known.contains(v.as_str()) {
-                reads.push(v.clone());
-                wires.push(serde_json::json!({
-                    "from": v.clone(), "to": eq_id, "to_port": port,
-                }));
-                input_pins.push(serde_json::json!({ "name": v, "bound": true }));
-            } else {
-                let why = ghost_reasons
-                    .get(&v)
-                    .cloned()
-                    .unwrap_or_else(|| format!("`{v}` is not declared as an input, output, or local"));
-                ghosts.insert(v.clone(), why.clone());
-                input_pins.push(serde_json::json!({ "name": v, "bound": false, "reason": why }));
+            None => {
+                for v in eq.rhs.free_vars() {
+                    if globals.contains(&v) {
+                        continue;
+                    }
+                    let port = input_pins.len();
+                    if known.contains(v.as_str()) {
+                        reads.push(v.clone());
+                        wires.push(serde_json::json!({
+                            "from": v.clone(), "to": eq_id, "to_port": port,
+                        }));
+                        input_pins.push(serde_json::json!({ "name": v, "bound": true }));
+                    } else {
+                        ghost_pin(&v, &mut input_pins, &mut ghosts);
+                    }
+                }
             }
         }
         let mut calls: Vec<String> = Vec::new();
@@ -2785,6 +2856,136 @@ fn flatten_nary(rhs: &ol_ir::Expr) -> Option<(ol_ir::BinOp, Vec<ol_ir::Expr>)> {
     Some((*op, operands))
 }
 
+/// The operand SLOTS of a recognized operation — the connection points the
+/// block presents, one per operand, regardless of what currently fills each
+/// (a variable, a literal, or a sub-expression). `None` for whole-rhs shapes
+/// with no natural slot structure (a bare variable/constant pass-through, a
+/// tuple, an array/record literal): those keep free-variable pins.
+///
+/// This is the graphical contract of the toolbox: an operation ALWAYS shows
+/// every input pin, so anything dropped on the canvas can be connected.
+/// [`set_operand_slot`] mirrors this traversal for pin-drop rewiring.
+fn operand_slots(rhs: &ol_ir::Expr) -> Option<Vec<ol_ir::Expr>> {
+    use ol_ir::Expr as E;
+    // A variadic chain is one block with one slot per chained operand.
+    if let Some((_, ops)) = flatten_nary(rhs) {
+        return Some(ops);
+    }
+    Some(match rhs {
+        E::Binary { lhs, rhs, .. } => vec![(**lhs).clone(), (**rhs).clone()],
+        E::Unary { arg, .. } | E::Pre { arg } | E::Cast { arg, .. } => vec![(**arg).clone()],
+        E::Arrow { init, body } => vec![(**init).clone(), (**body).clone()],
+        E::IfThenElse { cond, then_branch, else_branch } => {
+            vec![(**cond).clone(), (**then_branch).clone(), (**else_branch).clone()]
+        }
+        // Clock positions are variable names in the IR, but they are
+        // connection points all the same — each is a pin (a slot that only
+        // accepts a variable; `set_operand_slot` enforces that).
+        E::When { arg, clock, .. } => vec![(**arg).clone(), ol_ir::Expr::var(clock)],
+        E::Merge { clock, on_true, on_false } => {
+            vec![ol_ir::Expr::var(clock), (**on_true).clone(), (**on_false).clone()]
+        }
+        E::Call { args, .. }
+        | E::FloatIntrinsic { args, .. }
+        | E::ArrayOp { args, .. }
+        | E::Printout { args } => args.clone(),
+        E::Field { base, .. } => vec![(**base).clone()],
+        E::Index { base, index } => vec![(**base).clone(), (**index).clone()],
+        E::Iterate { init, arrays, .. } => init
+            .iter()
+            .map(|b| (**b).clone())
+            .chain(arrays.iter().cloned())
+            .collect(),
+        E::Case { sel, arms, default } => std::iter::once((**sel).clone())
+            .chain(arms.iter().map(|a| a.value.clone()))
+            .chain(default.iter().map(|d| (**d).clone()))
+            .collect(),
+        _ => return None,
+    })
+}
+
+/// Replace operand slot `port` of `rhs` with `new` — the same traversal as
+/// [`operand_slots`], so a wire dropped on pin `port` rewires exactly the
+/// operand that pin displays.
+fn set_operand_slot(rhs: &mut ol_ir::Expr, port: usize, new: ol_ir::Expr) -> Result<(), String> {
+    use ol_ir::Expr as E;
+    if let Some((op, mut ops)) = flatten_nary(rhs) {
+        let slot = ops.get_mut(port).ok_or_else(|| format!("no input pin {port}"))?;
+        *slot = new;
+        let mut it = ops.into_iter();
+        let first = it.next().expect("variadic chains have operands");
+        *rhs = it.fold(first, |acc, e| ol_ir::Expr::bin(op, acc, e));
+        return Ok(());
+    }
+    // Clock slots hold a variable NAME, not an expression: rewiring one
+    // requires the new operand to be a variable.
+    let clock_slot = |clock: &mut String, new: &ol_ir::Expr| -> Result<(), String> {
+        match new {
+            E::Var { name } => {
+                *clock = name.clone();
+                Ok(())
+            }
+            _ => Err("a clock pin only accepts a variable".into()),
+        }
+    };
+    match rhs {
+        E::When { arg, clock, .. } => {
+            return match port {
+                0 => {
+                    **arg = new;
+                    Ok(())
+                }
+                1 => clock_slot(clock, &new),
+                _ => Err(format!("no input pin {port}")),
+            };
+        }
+        E::Merge { clock, on_true, on_false } => {
+            return match port {
+                0 => clock_slot(clock, &new),
+                1 => {
+                    **on_true = new;
+                    Ok(())
+                }
+                2 => {
+                    **on_false = new;
+                    Ok(())
+                }
+                _ => Err(format!("no input pin {port}")),
+            };
+        }
+        _ => {}
+    }
+    let mut slots: Vec<&mut ol_ir::Expr> = match rhs {
+        E::Binary { lhs, rhs, .. } => vec![lhs.as_mut(), rhs.as_mut()],
+        E::Unary { arg, .. } | E::Pre { arg } | E::Cast { arg, .. } => vec![arg.as_mut()],
+        E::Arrow { init, body } => vec![init.as_mut(), body.as_mut()],
+        E::IfThenElse { cond, then_branch, else_branch } => {
+            vec![cond.as_mut(), then_branch.as_mut(), else_branch.as_mut()]
+        }
+        E::Call { args, .. }
+        | E::FloatIntrinsic { args, .. }
+        | E::ArrayOp { args, .. }
+        | E::Printout { args } => args.iter_mut().collect(),
+        E::Field { base, .. } => vec![base.as_mut()],
+        E::Index { base, index } => vec![base.as_mut(), index.as_mut()],
+        E::Iterate { init, arrays, .. } => init
+            .iter_mut()
+            .map(|b| b.as_mut())
+            .chain(arrays.iter_mut())
+            .collect(),
+        E::Case { sel, arms, default } => std::iter::once(sel.as_mut())
+            .chain(arms.iter_mut().map(|a| &mut a.value))
+            .chain(default.iter_mut().map(|d| d.as_mut()))
+            .collect(),
+        _ => return Err("this block has no operand pins — edit its expression instead".into()),
+    };
+    let slot = slots
+        .get_mut(port)
+        .ok_or_else(|| format!("no input pin {port}"))?;
+    **slot = new;
+    Ok(())
+}
+
 /// Human-readable pin contract, e.g. `bool × 2…12 → bool` for a variadic
 /// operation or `bool, T, T → T` for a fixed one.
 fn signature_text(o: &OpDef) -> String {
@@ -3897,6 +4098,41 @@ fn workspace_save_response(ctx: &ServerCtx) -> (u16, &'static str, Vec<u8>) {
 /// (`{node, index, inputs}`): growing appends fresh red ghost pins so the
 /// engineer sees exactly what still needs wiring, shrinking drops the
 /// trailing operands. Bound pins keep their wiring. 2..=12.
+/// Rewire one operand slot of an operation (`{node, index, port, source}`):
+/// the wire-drop editing gesture. The pin at `port` — whatever it currently
+/// holds: a variable, a literal, a sub-expression — is replaced by the
+/// dragged `source`, which must be a declared variable of the node.
+fn edit_rewire_operand(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let index = req_index(req)?;
+    let port = req
+        .get("port")
+        .and_then(|v| v.as_u64())
+        .ok_or("missing integer field `port`")? as usize;
+    let source = req_str(req, "source")?.to_string();
+    let node = find_node_mut(project, &node_name)?;
+    let declared = node
+        .inputs
+        .iter()
+        .map(|p| &p.name)
+        .chain(node.outputs.iter().map(|p| &p.name))
+        .chain(node.locals.iter().map(|l| &l.name))
+        .any(|n| n == &source);
+    if !declared {
+        return Err(format!(
+            "`{source}` is not an input, output, or local of `{node_name}`"
+        ));
+    }
+    let eq = node
+        .equations
+        .get_mut(index)
+        .ok_or_else(|| format!("node `{node_name}` has no equation {index}"))?;
+    set_operand_slot(&mut eq.rhs, port, ol_ir::Expr::var(&source))
+}
+
 fn edit_set_operation_inputs(
     project: &mut ol_ir::Project,
     req: &serde_json::Value,

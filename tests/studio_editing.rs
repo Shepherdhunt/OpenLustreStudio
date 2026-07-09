@@ -224,14 +224,18 @@ fn author_comparison_and_gate_logic_then_generate_code() {
     assert_eq!(pins.len(), 2, "less-than has two input pins");
     assert!(pins.iter().all(|p| p["bound"] == false), "both unbound on drop: {pins:?}");
 
-    // Bind it to `roll < 3.141` (a constant is inlined, not a pin).
+    // Bind it to `roll < 3.141`: the block keeps BOTH pins — the literal
+    // operand renders as a value-carrying pin, so the full connection
+    // contract stays visible and rewireable.
     post("/api/edit/update_equation",
         r#"{"node":"RangeCheck","index":0,"lhs":"less_than0","body":"roll < 3.141"}"#);
     let d = json(port, "/api/diagram?node=RangeCheck");
     let pins = d["equations"][0]["inputs"].as_array().unwrap();
-    assert_eq!(pins.len(), 1, "only `roll` is a pin now: {pins:?}");
+    assert_eq!(pins.len(), 2, "both operand slots stay pins: {pins:?}");
     assert_eq!(pins[0]["name"], "roll");
     assert_eq!(pins[0]["bound"], true);
+    assert_eq!(pins[1]["name"], "3.141");
+    assert_eq!(pins[1]["kind"], "literal");
     // …and that bound pin's wire is tagged with its port index.
     let wires = d["wires"].as_array().unwrap();
     assert!(wires.iter().any(|w| w["from"] == "roll" && w["to"] == "eq0" && w["to_port"] == 0));
@@ -814,6 +818,144 @@ fn sysml_requirements_lift_into_the_trace_matrix() {
     assert!(doc.contains("SysML requirement"), "doc table missing");
     assert!(doc.contains("SRS-201"), "doc id missing");
     assert!(doc.contains("The system shall release only when armed."), "doc text missing");
+}
+
+/// Operand-slot pins: an operation block always exposes one connectable pin
+/// per operand — a variable pin wires to its source, a literal or
+/// sub-expression pin shows its value, a repeated variable gets one pin (and
+/// wire) per slot — and `/api/edit/rewire_operand` replaces exactly the slot
+/// a wire is dropped on. Growing a variadic operation's inputs grows the pin
+/// list.
+#[test]
+fn operand_slot_pins_expose_every_input_and_rewire_by_port() {
+    let g = start_server_on_copy();
+    let port = g.port;
+    let post = |p: &str, b: &str| {
+        let (s, m) = request(port, "POST", p, b).expect(p);
+        assert_eq!(s, 200, "{p}: {m}");
+    };
+    let diagram = || {
+        let (s, b) = request(port, "GET", "/api/diagram?node=Pins", "").unwrap();
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str::<serde_json::Value>(&b).unwrap()
+    };
+    let pins = |d: &serde_json::Value| -> Vec<(String, String, bool)> {
+        d["equations"][0]["inputs"].as_array().unwrap().iter()
+            .map(|p| (
+                p["name"].as_str().unwrap().to_string(),
+                p["kind"].as_str().unwrap_or("").to_string(),
+                p["bound"].as_bool().unwrap(),
+            ))
+            .collect()
+    };
+    let wire_ports = |d: &serde_json::Value| -> Vec<(String, i64)> {
+        let mut v: Vec<(String, i64)> = d["wires"].as_array().unwrap().iter()
+            .filter(|w| w["to"] == "eq0" && w["to_port"].is_i64() || w["to"] == "eq0" && w["to_port"].is_u64())
+            .map(|w| (w["from"].as_str().unwrap().to_string(), w["to_port"].as_i64().unwrap()))
+            .collect();
+        v.sort();
+        v
+    };
+
+    post("/api/edit/add_node", r#"{"name":"Pins","kind":"operator"}"#);
+    for p in [r#"{"node":"Pins","side":"input","name":"x","type":"int32"}"#,
+              r#"{"node":"Pins","side":"input","name":"y","type":"int32"}"#,
+              r#"{"node":"Pins","side":"input","name":"c","type":"bool"}"#,
+              r#"{"node":"Pins","side":"output","name":"z","type":"int32"}"#] {
+        post("/api/edit/add_port", p);
+    }
+    post("/api/edit/add_expression", r#"{"node":"Pins","body":"x + 1"}"#);
+
+    // A literal operand is still a pin: the block shows its full contract.
+    let d = diagram();
+    assert_eq!(
+        pins(&d),
+        vec![("x".into(), "var".into(), true), ("1".into(), "literal".into(), true)],
+        "{d}"
+    );
+    assert_eq!(wire_ports(&d), vec![("x".to_string(), 0)]);
+    let lhs = d["equations"][0]["lhs"][0].as_str().unwrap().to_string();
+
+    // Dropping a wire on the literal pin replaces that operand exactly.
+    post("/api/edit/rewire_operand", r#"{"node":"Pins","index":0,"port":1,"source":"y"}"#);
+    let d = diagram();
+    assert_eq!(d["equations"][0]["body"], "x + y", "{d}");
+    assert_eq!(wire_ports(&d), vec![("x".to_string(), 0), ("y".to_string(), 1)]);
+
+    // A repeated variable keeps one pin (and one wire) per slot.
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"x + x"}}"#));
+    let d = diagram();
+    assert_eq!(
+        pins(&d),
+        vec![("x".into(), "var".into(), true), ("x".into(), "var".into(), true)],
+        "{d}"
+    );
+    assert_eq!(wire_ports(&d), vec![("x".to_string(), 0), ("x".to_string(), 1)]);
+    // …and rewiring port 1 touches only that slot.
+    post("/api/edit/rewire_operand", r#"{"node":"Pins","index":0,"port":1,"source":"y"}"#);
+    assert_eq!(diagram()["equations"][0]["body"], "x + y");
+
+    // A sub-expression operand is one pin; its variables wire into that port.
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"x + y * 2"}}"#));
+    let d = diagram();
+    assert_eq!(
+        pins(&d),
+        vec![("x".into(), "var".into(), true), ("y * 2".into(), "expr".into(), true)],
+        "{d}"
+    );
+    assert_eq!(wire_ports(&d), vec![("x".to_string(), 0), ("y".to_string(), 1)]);
+
+    // Growing the variadic operation grows the pins; shrinking drops them.
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"x + y"}}"#));
+    post("/api/edit/set_operation_inputs", r#"{"node":"Pins","index":0,"inputs":5}"#);
+    let d = diagram();
+    let ps = pins(&d);
+    assert_eq!(ps.len(), 5, "{d}");
+    assert!(ps[2..].iter().all(|(_, k, bound)| k == "var" && !bound), "fresh pins unbound: {ps:?}");
+    post("/api/edit/set_operation_inputs", r#"{"node":"Pins","index":0,"inputs":2}"#);
+    assert_eq!(pins(&diagram()).len(), 2);
+
+    // Fixed-arity shapes expose their slots too: if_then_else has 3 pins.
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"if c then x else 1"}}"#));
+    let d = diagram();
+    assert_eq!(
+        pins(&d),
+        vec![
+            ("c".into(), "var".into(), true),
+            ("x".into(), "var".into(), true),
+            ("1".into(), "literal".into(), true),
+        ],
+        "{d}"
+    );
+
+    // Clock positions are variable names in the IR but pins all the same:
+    // `x when c` shows the clock as its second pin, wired from `c`.
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"x when c"}}"#));
+    let d = diagram();
+    assert_eq!(
+        pins(&d),
+        vec![("x".into(), "var".into(), true), ("c".into(), "var".into(), true)],
+        "{d}"
+    );
+    assert_eq!(wire_ports(&d), vec![("c".to_string(), 1), ("x".to_string(), 0)]);
+
+    // Loud errors: unknown source, out-of-range port, a slotless block.
+    let (s, m) = request(port, "POST", "/api/edit/rewire_operand",
+        r#"{"node":"Pins","index":0,"port":0,"source":"nope"}"#).unwrap();
+    assert_eq!(s, 400, "{m}");
+    let (s, m) = request(port, "POST", "/api/edit/rewire_operand",
+        r#"{"node":"Pins","index":0,"port":9,"source":"y"}"#).unwrap();
+    assert_eq!(s, 400, "{m}");
+    post("/api/edit/update_equation",
+        &format!(r#"{{"node":"Pins","index":0,"lhs":"{lhs}","body":"x"}}"#));
+    let (s, m) = request(port, "POST", "/api/edit/rewire_operand",
+        r#"{"node":"Pins","index":0,"port":0,"source":"y"}"#).unwrap();
+    assert_eq!(s, 400, "a pass-through box has no operand pins: {m}");
 }
 
 /// Project ▸ Design Document serves the report from the running Studio.

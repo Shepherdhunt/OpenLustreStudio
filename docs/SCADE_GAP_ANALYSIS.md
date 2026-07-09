@@ -21,7 +21,20 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **FMU export + inline parallel regions +
+**Landed recently (newest first):** **Operand-slot pins (2026-07-06):** an
+operation block now shows **one pin per operand slot** — its full connection
+contract — instead of one pin per distinct free variable. A literal operand
+(`roll < 3.141`) is a labeled value-carrying pin, a repeated variable
+(`x + x`) gets one pin *and one wire* per slot, a sub-expression operand is
+one pin its variables wire into, and `when`/`merge` clock positions are pins
+too (accepting only variables). Dropping a wire on ANY pin rewires exactly
+that slot via the new port-indexed `/api/edit/rewire_operand` (identifier
+text-replacement remains only for slotless free-form boxes). Growing a
+variadic operation's inputs in Properties adds red pins graphically and the
+box grows to fit — even under a stale user-set height. This is the product
+rule: anything dropped on the canvas can always be connected, and settings
+changes are visible as pins. Before
+that: **FMU export + inline parallel regions +
 junction dots (2026-07-06):** `openlustre fmu <model> -o out.fmu` exports an
 operator as an **FMI 2.0 co-simulation FMU** (`crates/ol_cli/src/fmu.rs`) —
 the verified C-Lite wrapped in self-contained FMI glue, one `fmi2DoStep` =
@@ -343,6 +356,42 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-06 (pins) — operand-slot pins: the block always shows its full contract
+
+The product rule, stated and now enforced: **every operation on the canvas
+shows one connectable input pin per operand and an output pin — whatever
+currently fills each slot — and changing an operation's settings changes
+its pins graphically.** Pins were previously derived from the equation's
+distinct free variables, which broke that contract three ways: a literal
+operand (`roll < 3.141`) lost its pin, a repeated variable (`x + x`)
+collapsed two slots into one pin, and a sub-expression operand scattered
+into pins for its inner variables.
+
+`operand_slots` (studio_server.rs) now defines the slot structure per
+recognized shape — variadic chains (one slot per chained operand), binary /
+unary / cast / arrow / pre, if_then_else, calls, float intrinsics, array
+ops, printout, iterators, case, and `when`/`merge` (whose clock *names*
+are pins that accept only variables). Each slot renders by kind: a bound
+variable pin with its wire (repeated variables get one wire per slot — the
+junction dot marks the fan-out), a labeled literal/constant pin, an
+expression pin its inner variables wire into, or a red unbound pin.
+`set_operand_slot` mirrors the traversal, and the new
+`/api/edit/rewire_operand {node, index, port, source}` replaces exactly
+the slot a wire lands on — including literal and expression operands that
+identifier replacement could never address. The canvas gestures
+(pin-specific drop, first-unbound-pin drop) both route through it;
+free-form expression boxes keep the old free-variable pins and text
+replacement. Growing a variadic block in Properties appends red pins and
+the box height follows the pin count even under a stale user resize.
+
+Tests: `operand_slot_pins_expose_every_input_and_rewire_by_port`
+(tests/studio_editing.rs) — literal/repeated/expression/clock pins, wire
+port indices, port-exact rewiring, pin growth 2→5→2, fixed-arity slots,
+and the loud errors (unknown source, bad port, slotless box); the
+gate-authoring test updated to the new contract. Browser-verified: the
+literal pin renders labeled, and growing a plus block to 6 inputs adds 4
+red pins with the box growing 42→106 px.
 
 ### 2026-07-06 (fmu) — FMI 2.0 co-simulation export
 

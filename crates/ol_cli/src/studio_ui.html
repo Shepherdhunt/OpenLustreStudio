@@ -220,7 +220,9 @@
   /* Input pins on a gate's left edge: blue when bound, red when unbound. */
   svg .inpin { fill: #fff; stroke: #2b579a; stroke-width: 1.4; }
   svg .inpin.unbound { stroke: #d11a1a; fill: #fdeeee; }
+  svg .inpin.valued { fill: #eef4fb; stroke: #6a86ab; }
   svg .inpin:hover { fill: #2b579a; }
+  svg .pin-label { fill: #6a86ab; font-size: 9px; font-family: Consolas, monospace; }
   svg text.sym { font-size: 13px; font-weight: 600; }
   svg text.wire-label { fill: #6b7c8d; font-size: 9px; }
   svg text { fill: #1e1e1e; font-size: 11px; font-family: "Segoe UI", sans-serif; }
@@ -1866,6 +1868,13 @@ function computePositions(d) {
     if (p.h != null) { pos[id].h = p.h; pos[id].userH = true; }
     if (p.wrap) pos[id].wrap = true;
   }
+  // A block is never shorter than its pins need: growing a variadic
+  // operation's inputs grows the box graphically, even under a user-set
+  // height from before the change.
+  d.equations.forEach(e => {
+    const p = pos[e.id];
+    if (p) p.h = Math.max(p.h || DIAG.BOXH, eqHeight(e));
+  });
   return pos;
 }
 
@@ -2053,13 +2062,28 @@ function renderDiagram() {
     // unbound. Each is a drop target for wiring a source onto that operand.
     (it.inputs || []).forEach((pin, k) => {
       const py = inputPinY(it.id, k);
-      // Bound pins name their source; unbound pins read as a neutral "input N"
-      // slot — wire it, or just type the expression in Properties.
-      const tip = pin.bound ? pin.name
-        : ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)");
-      svg += '<circle class="inpin' + (pin.bound ? "" : " unbound") + '" data-eq="' + it.id +
-        '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + p.x +
+      // One pin per operand slot: a variable pin names its source; a literal
+      // or expression pin shows the value it carries (drop a wire to replace
+      // it); an unbound pin reads as a neutral "input N" slot.
+      const tip = !pin.bound
+        ? ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)")
+        : pin.kind === "literal" ? ("literal " + pin.name + " — drop a wire here to replace it, or edit in Properties")
+        : pin.kind === "const" ? ("constant " + pin.name + " — drop a wire here to replace it")
+        : pin.kind === "expr" ? ("expression " + pin.name + " — drop a wire here to replace it, or edit in Properties")
+        : pin.name;
+      const cls = "inpin" + (pin.bound ? "" : " unbound") +
+        (pin.kind === "literal" || pin.kind === "const" || pin.kind === "expr" ? " valued" : "");
+      svg += '<circle class="' + cls + '" data-eq="' + it.id +
+        '" data-port="' + k + '" data-kind="' + (pin.kind || "") +
+        '" data-operand="' + escapeAttr(pin.name) + '" cx="' + p.x +
         '" cy="' + py + '" r="4"><title>' + escapeHTML(tip) + '</title></circle>';
+      // A value-carrying pin (literal / named constant) labels itself so the
+      // operand is readable on the diagram, SCADE style.
+      if (pin.kind === "literal" || pin.kind === "const") {
+        const lbl = pin.name.length > 8 ? pin.name.slice(0, 7) + "…" : pin.name;
+        svg += '<text class="pin-label" x="' + (p.x - 7) + '" y="' + (py + 3) +
+          '" text-anchor="end">' + escapeHTML(lbl) + '</text>';
+      }
     });
     // Source pin on the right edge: drag it onto another box to wire. A gate
     // whose result is a collapsed local shows that result here — red ("output
@@ -2319,7 +2343,8 @@ async function diagPointerUp(ev) {
     const g = el && el.closest ? el.closest("g.diag-item") : null;
     renderDiagram();
     if (inpin && inpin.dataset.eq !== wd.from) {
-      await bindInputPin(wd.from, inpin.dataset.eq, inpin.dataset.operand);
+      await bindInputPin(wd.from, inpin.dataset.eq, inpin.dataset.operand,
+        +inpin.dataset.port, inpin.dataset.kind);
     } else if (g && g.dataset.id !== wd.from) {
       await completeWire(wd.from, g.dataset.id);
     }
@@ -2343,10 +2368,11 @@ function wireStatus(m) {
   document.getElementById("diagram-status").textContent = m;
 }
 
-/// Bind one specific input pin of a gate: replace its operand (a red ghost
-/// like `p0_1`, or an already-wired variable being rerouted) with the dragged
-/// source. The source may be a variable box or a single-output gate.
-async function bindInputPin(from, eqId, operand) {
+/// Bind one specific input pin of a gate: replace the operand slot the pin
+/// displays — a red ghost like `p0_1`, an already-wired variable being
+/// rerouted, a literal, or a sub-expression — with the dragged source. The
+/// source may be a variable box or a single-output gate.
+async function bindInputPin(from, eqId, operand, port, kind) {
   const d = state.diagramData;
   let src = from;
   if (/^eq\d+$/.test(from)) {
@@ -2360,12 +2386,17 @@ async function bindInputPin(from, eqId, operand) {
   if (src === operand) return;
   const i = +/^eq(\d+)$/.exec(eqId)[1];
   const eq = d.equations[i];
-  const ok = await propsFetch("/api/edit/update_equation", {
-    node: d.node, index: i, lhs: eq.lhs.join(", "),
-    body: replaceIdent(eq.body, operand, src),
-  });
+  // A slot-typed pin (kind set) rewires by port index on the server — exact
+  // for every operand shape, including literals, repeated variables, and
+  // sub-expressions that plain identifier replacement cannot address.
+  const ok = kind
+    ? await propsFetch("/api/edit/rewire_operand", { node: d.node, index: i, port, source: src })
+    : await propsFetch("/api/edit/update_equation", {
+        node: d.node, index: i, lhs: eq.lhs.join(", "),
+        body: replaceIdent(eq.body, operand, src),
+      });
   if (ok) {
-    wireStatus("wired " + src + " → " + operand);
+    wireStatus("wired " + src + " → input " + (port + 1) + (kind === "var" ? " (was " + operand + ")" : ""));
     await propsReload();
   }
 }
@@ -2381,27 +2412,13 @@ async function completeWire(from, to) {
   if (vars.has(from) && isEq(to)) {
     const i = +/^eq(\d+)$/.exec(to)[1];
     const eq = d.equations[i];
-    const unbound = (d.ghosts || [])
-      .map(g => g.name)
-      .filter(gn => {
-        const esc = gn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return new RegExp("\\b" + esc + "\\b").test(eq.body);
-      })
-      .sort();
-    if (!unbound.length) {
-      wireStatus("no unbound pin on this block — edit its expression in Properties");
+    // The block's own pin list knows which slot is unbound — bind the first.
+    const k = (eq.inputs || []).findIndex(p => !p.bound);
+    if (k < 0) {
+      wireStatus("no unbound pin on this block — drop onto a specific pin to rewire it");
       return;
     }
-    const ok = await propsFetch("/api/edit/update_equation", {
-      node: d.node,
-      index: i,
-      lhs: eq.lhs.join(", "),
-      body: replaceIdent(eq.body, unbound[0], from),
-    });
-    if (ok) {
-      wireStatus("wired " + from + " → " + unbound[0]);
-      await propsReload();
-    }
+    await bindInputPin(from, to, eq.inputs[k].name, k, eq.inputs[k].kind);
   } else if (isEq(from) && vars.has(to)) {
     const i = +/^eq(\d+)$/.exec(from)[1];
     const eq = d.equations[i];
