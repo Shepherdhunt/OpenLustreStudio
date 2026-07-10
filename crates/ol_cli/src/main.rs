@@ -489,7 +489,24 @@ pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
     }
+    monomorphize_or_bail(&mut project)?;
     Ok(project)
+}
+
+/// Specialize generic operator templates per call site. Inference or
+/// constraint errors abort the load — downstream tools never see a type
+/// variable.
+pub(crate) fn monomorphize_or_bail(project: &mut ol_ir::Project) -> Result<()> {
+    let diags = ol_typecheck::monomorphize(project);
+    let errors: Vec<String> = diags
+        .iter()
+        .filter(|d| matches!(d.severity, ol_ir::Severity::Error))
+        .map(|d| d.render())
+        .collect();
+    if !errors.is_empty() {
+        anyhow::bail!("generic instantiation failed:\n{}", errors.join("\n"));
+    }
+    Ok(())
 }
 
 fn cmd_check(
@@ -846,6 +863,7 @@ pub(crate) fn package_to_json(pkg: &ol_ir::Package) -> serde_json::Value {
                 "contract": n.contract,
                 "requirements": n.requirements,
                 "sysml": n.sysml,
+                "generics": ol_typecheck::generics::effective_generics(n),
             })
         })
         .collect();
@@ -1139,6 +1157,7 @@ pub(crate) fn load_for_studio(
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
     }
+    monomorphize_or_bail(&mut project)?;
     Ok(project)
 }
 
@@ -1345,6 +1364,7 @@ fn starter_project() -> ol_ir::Project {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     Project {
         name: "welcome".into(),

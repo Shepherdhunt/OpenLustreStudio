@@ -57,6 +57,7 @@ pub fn build_release_logic_project() -> Project {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     let helper = NodeDef {
@@ -74,6 +75,7 @@ pub fn build_release_logic_project() -> Project {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     let contract = serde_json::json!({

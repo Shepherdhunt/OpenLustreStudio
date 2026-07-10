@@ -254,6 +254,7 @@ mod tests {
             probes: vec![],
             requirements: vec![],
         sysml: None,
+        generics: vec![],
         }
     }
 

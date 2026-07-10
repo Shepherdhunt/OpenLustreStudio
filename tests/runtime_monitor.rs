@@ -49,6 +49,7 @@ fn build_faulty_latch_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     // Contract: one named guarantee.

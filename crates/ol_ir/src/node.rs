@@ -123,6 +123,12 @@ pub struct NodeDef {
     /// Requirements will always ride in the associated SysML model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sysml: Option<SysmlRef>,
+    /// Generic parameters when this node is a TEMPLATE (`'T` type variables
+    /// and `N` array sizes in its ports/locals). Empty for concrete nodes.
+    /// Templates never reach a backend: monomorphization specializes them
+    /// per call site and removes the template.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generics: Vec<crate::types::GenericParam>,
 }
 
 /// A reference into a SysML 2.0 model: the model file (relative to the
@@ -137,6 +143,18 @@ pub struct SysmlRef {
 }
 
 impl NodeDef {
+    /// Is this node a generic template ('T / size-parameter ports)? Templates
+    /// never reach a backend — monomorphization specializes them per call.
+    pub fn is_generic_template(&self) -> bool {
+        !self.generics.is_empty()
+            || self
+                .inputs
+                .iter()
+                .chain(self.outputs.iter())
+                .any(|p| p.ty.is_generic())
+            || self.locals.iter().any(|l| l.ty.is_generic())
+    }
+
     pub fn is_function(&self) -> bool {
         matches!(self.kind, NodeKind::Function)
     }

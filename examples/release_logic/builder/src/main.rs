@@ -66,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     // Pure helper to show off the function/operator distinction.
@@ -84,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     let contract = serde_json::json!({

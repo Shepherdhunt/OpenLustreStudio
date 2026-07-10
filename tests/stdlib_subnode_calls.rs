@@ -55,6 +55,7 @@ fn build_edge_counter_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
 
     Project {
@@ -182,6 +183,7 @@ fn merge_into_does_not_clobber_existing_node() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
             }],
             ..Default::default()
         }],

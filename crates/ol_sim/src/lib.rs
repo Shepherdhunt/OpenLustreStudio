@@ -436,6 +436,9 @@ impl<'a> Sim<'a> {
 
 fn default_value(ty: &Type, project: &Project) -> Value {
     match ty {
+        // Generic parameters never reach the simulator: monomorphization
+        // replaced them, or the typechecker refused the project.
+        Type::Var { .. } | Type::ArrayVar { .. } => Value::Int(0),
         Type::Bool => Value::Bool(false),
         Type::Float32 | Type::Float64 => Value::Float(0.0),
         Type::Int8

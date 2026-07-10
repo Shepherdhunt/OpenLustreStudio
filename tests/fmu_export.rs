@@ -71,6 +71,7 @@ fn mix_project() -> Project {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     Project {
         name: "fmu_mix".into(),

@@ -3153,10 +3153,26 @@ function operatorTreeMenu(ev, name) {
   sep();
   item("Requirements…", () => editRequirements(name));
   item("SysML Model…", () => editSysml(name));
+  item("Generics…", () => editGenerics(name));
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";
   m.style.top = ev.clientY + "px";
   m.style.display = "block";
+}
+
+/// Declare the operator's generic type-parameter constraints. Ports typed
+/// `'T` / `int32[N]` make the operator a template; this sets what `'T` may
+/// bind (any / numeric / integer / float). Sizes register implicitly.
+async function editGenerics(name) {
+  const node = findNode(name);
+  const cur = ((node && node.generics) || [])
+    .filter(g => g.kind === "type")
+    .map(g => g.name + ": " + (g.constraint || "any")).join(", ");
+  const text = prompt(
+    "Generic type parameters of `" + name + "` (e.g. T: numeric, U: any; " +
+    "empty = every 'X in the ports, unconstrained):", cur);
+  if (text === null) return;
+  await postEdit("/api/edit/set_generics", { node: name, generics: text.trim() });
 }
 
 /// Associate a SysML 2.0 model element with the operator (groundwork: the

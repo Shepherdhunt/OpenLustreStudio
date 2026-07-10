@@ -225,6 +225,11 @@ fn topo_sort_nodes<'a>(project: &'a Project) -> Vec<&'a NodeDef> {
         visited: &mut BTreeSet<String>,
         order: &mut Vec<&'a NodeDef>,
     ) {
+        // Generic templates never emit: monomorphization already produced a
+        // concrete instance per call site, and 'T has no C representation.
+        if node.is_generic_template() {
+            return;
+        }
         if !visited.insert(node.name.clone()) {
             return;
         }
@@ -1125,7 +1130,14 @@ fn emit_call_block(callee: &NodeDef, idx: usize, arg_strs: &[String], out: &mut 
     let _ = writeln!(out, "  {name}_Input __in{idx};");
     let _ = writeln!(out, "  {name}_Output __out{idx};");
     for (p, a) in callee.inputs.iter().zip(arg_strs.iter()) {
-        let _ = writeln!(out, "  __in{idx}.{} = {};", c_ident(&p.name), a);
+        // C has no array assignment: an array-typed input copies with memcpy
+        // (its declared size — both sides agree, the typechecker saw to it).
+        if matches!(p.ty, ol_ir::Type::Array { .. }) {
+            let f = c_ident(&p.name);
+            let _ = writeln!(out, "  memcpy(__in{idx}.{f}, {a}, sizeof(__in{idx}.{f}));");
+        } else {
+            let _ = writeln!(out, "  __in{idx}.{} = {};", c_ident(&p.name), a);
+        }
     }
     if callee.is_function() {
         let _ = writeln!(out, "  {name}_step(&__in{idx}, &__out{idx});");

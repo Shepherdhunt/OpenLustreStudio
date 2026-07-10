@@ -129,6 +129,9 @@ impl TypeContext {
     }
 }
 
+pub mod generics;
+pub use generics::monomorphize;
+
 pub fn check_project(project: &Project) -> CheckReport {
     let mut diags = Vec::new();
     let tctx = TypeContext::from_project(project);
@@ -152,6 +155,42 @@ pub fn check_project(project: &Project) -> CheckReport {
     }
 
     for n in project.all_nodes() {
+        if generics::is_template(n) {
+            // A generic TEMPLATE checks against a representative
+            // instantiation (numeric/integer -> int32, float -> float64,
+            // unconstrained vars stay opaque, sizes -> 3): most template
+            // errors surface immediately, and every real instantiation is
+            // fully re-checked after monomorphization anyway.
+            let mut rep_t: BTreeMap<String, Type> = BTreeMap::new();
+            let mut rep_s: BTreeMap<String, u32> = BTreeMap::new();
+            for g in generics::effective_generics(n) {
+                match g {
+                    ol_ir::GenericParam::Type { name, constraint } => {
+                        let rep = match constraint {
+                            ol_ir::TypeConstraint::Numeric
+                            | ol_ir::TypeConstraint::Integer => Some(Type::Int32),
+                            ol_ir::TypeConstraint::Float => Some(Type::Float64),
+                            ol_ir::TypeConstraint::Any => None, // stays opaque
+                        };
+                        if let Some(rep) = rep {
+                            rep_t.insert(name, rep);
+                        }
+                    }
+                    ol_ir::GenericParam::Size { name } => {
+                        rep_s.insert(name, 3);
+                    }
+                }
+            }
+            let mut rep = n.clone();
+            for pp in rep.inputs.iter_mut().chain(rep.outputs.iter_mut()) {
+                pp.ty = pp.ty.substitute(&rep_t, &rep_s);
+            }
+            for l in &mut rep.locals {
+                l.ty = l.ty.substitute(&rep_t, &rep_s);
+            }
+            check_node(&rep, &signatures, &tctx, &mut diags);
+            continue;
+        }
         check_node(n, &signatures, &tctx, &mut diags);
     }
 
@@ -174,6 +213,7 @@ fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagno
         probes: Vec::new(),
         requirements: Vec::new(),
         sysml: None,
+        generics: vec![],
     };
     let empty_env: BTreeMap<String, Type> = BTreeMap::new();
     let empty_sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();

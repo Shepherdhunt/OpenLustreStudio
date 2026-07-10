@@ -57,6 +57,7 @@ fn build_edge_counter_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     Project {
         name: "edge_counter".into(),

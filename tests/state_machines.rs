@@ -507,6 +507,7 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let sm = StateMachineDef {
         name: "LampSM".into(),
@@ -1005,6 +1006,7 @@ fn last_outside_a_state_machine_is_a_type_error() {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let project = Project {
         name: "last".into(),

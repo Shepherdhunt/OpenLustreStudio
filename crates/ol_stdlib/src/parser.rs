@@ -1054,21 +1054,38 @@ pub fn parse_expr(src: &str) -> Result<Expr, ParseError> {
 /// Parse a textual type annotation (`bool`, `int32`, `uint8[32]`, `MyRecord`, …).
 pub fn parse_type(src: &str) -> Result<Type, ParseError> {
     let src = src.trim();
-    // Array form: `elem[len]`.
+    // Array form: `elem[len]` with a literal length, or `elem[N]` with a
+    // SIZE PARAMETER of a generic operator template.
     if let Some(open) = src.find('[') {
         if !src.ends_with(']') {
             return Err(ParseError::UnknownType(src.to_string()));
         }
         let elem = &src[..open];
-        let len_str = &src[open + 1..src.len() - 1];
-        let len: u32 = len_str
-            .trim()
-            .parse()
-            .map_err(|_| ParseError::UnknownType(src.to_string()))?;
-        return Ok(Type::Array {
-            elem: Box::new(parse_type(elem)?),
-            len,
-        });
+        let len_str = src[open + 1..src.len() - 1].trim();
+        if let Ok(len) = len_str.parse::<u32>() {
+            return Ok(Type::Array {
+                elem: Box::new(parse_type(elem)?),
+                len,
+            });
+        }
+        if !len_str.is_empty()
+            && len_str.chars().all(|c| c.is_alphanumeric() || c == '_')
+            && len_str.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_')
+        {
+            return Ok(Type::ArrayVar {
+                elem: Box::new(parse_type(elem)?),
+                len_param: len_str.to_string(),
+            });
+        }
+        return Err(ParseError::UnknownType(src.to_string()));
+    }
+    // A type variable of a generic template: `'T`.
+    if let Some(name) = src.strip_prefix('\'') {
+        let name = name.trim();
+        if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Ok(Type::Var { name: name.to_string() });
+        }
+        return Err(ParseError::UnknownType(src.to_string()));
     }
     Ok(match src {
         "bool" => Type::Bool,

@@ -378,6 +378,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             apply_edit_response(ctx, body, edit_set_requirements)
         }
         ("POST", "/api/edit/set_sysml") => apply_edit_response(ctx, body, edit_set_sysml),
+        ("POST", "/api/edit/set_generics") => apply_edit_response(ctx, body, edit_set_generics),
         ("POST", "/api/edit/remove_probe") => apply_edit_response(ctx, body, edit_remove_probe),
         ("POST", "/api/edit/undo") => history_response(ctx, true),
         ("POST", "/api/edit/redo") => history_response(ctx, false),
@@ -1358,6 +1359,7 @@ fn edit_add_node(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     if project.packages.is_empty() {
         project.packages.push(ol_ir::Package {
@@ -1935,6 +1937,10 @@ fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachin
     candidate
         .lower_state_machines()
         .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    let mdiags = ol_typecheck::monomorphize(&mut candidate);
+    if mdiags.iter().any(|d| matches!(d.severity, ol_ir::Severity::Error)) {
+        return Err(mdiags.iter().map(|d| d.render()).collect::<Vec<_>>().join("; "));
+    }
 
     // The machine merges into its owning operator; check that operator's slice.
     let to_check = match machine.owner.as_deref() {
@@ -2086,6 +2092,8 @@ fn type_str(t: &ol_ir::Type) -> String {
         Char => "char".into(),
         Array { elem, len } => format!("{}[{}]", type_str(elem), len),
         Named { name } => name.clone(),
+        Var { name } => format!("'{name}"),
+        ArrayVar { elem, len_param } => format!("{}[{}]", type_str(elem), len_param),
     }
 }
 
@@ -4326,6 +4334,45 @@ fn edit_set_requirements(
     }
     let node = find_node_mut(project, &node_name)?;
     node.requirements = ids;
+    Ok(())
+}
+
+/// Set an operator's generic TYPE-parameter constraints
+/// (`{node, generics: "T: numeric, U: any"}`). Size parameters need no
+/// declaration (they register from `int32[N]` port types); an empty string
+/// clears the declared list back to implicit `any` parameters.
+fn edit_set_generics(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let text = req
+        .get("generics")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let mut generics = Vec::new();
+    for part in text.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let (name, constraint) = match part.split_once(':') {
+            Some((n, c)) => (n.trim().trim_start_matches('\''), c.trim()),
+            None => (part.trim_start_matches('\''), "any"),
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err(format!("`{part}` — expected `T: numeric` style entries"));
+        }
+        let constraint = match constraint {
+            "any" => ol_ir::TypeConstraint::Any,
+            "numeric" => ol_ir::TypeConstraint::Numeric,
+            "integer" => ol_ir::TypeConstraint::Integer,
+            "float" => ol_ir::TypeConstraint::Float,
+            other => {
+                return Err(format!(
+                    "unknown constraint `{other}` (expected any, numeric, integer, or float)"
+                ))
+            }
+        };
+        generics.push(ol_ir::GenericParam::Type { name: name.to_string(), constraint });
+    }
+    let node = find_node_mut(project, &node_name)?;
+    node.generics = generics;
     Ok(())
 }
 

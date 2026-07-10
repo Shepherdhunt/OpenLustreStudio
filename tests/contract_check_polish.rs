@@ -41,6 +41,7 @@ fn dummy_node(name: &str, contract: Option<&str>) -> NodeDef {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     }
 }
 

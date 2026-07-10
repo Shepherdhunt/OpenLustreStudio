@@ -91,6 +91,9 @@ pub fn emit_package(pkg: &Package, out: &mut String) {
         out.push('\n');
     }
     for n in &pkg.nodes {
+        if n.is_generic_template() {
+            continue; // templates have no Lustre form; instances carry the code
+        }
         emit_node(n, out);
         out.push('\n');
     }

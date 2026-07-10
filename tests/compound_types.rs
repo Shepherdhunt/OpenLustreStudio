@@ -71,6 +71,7 @@ fn array_node() -> NodeDef {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     }
 }
 
@@ -111,6 +112,7 @@ fn record_node() -> NodeDef {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     }
 }
 
@@ -139,6 +141,7 @@ fn enum_node() -> NodeDef {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     }
 }
 

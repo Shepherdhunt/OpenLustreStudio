@@ -59,6 +59,7 @@ fn gate_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     Project {
         name: "gate".into(),

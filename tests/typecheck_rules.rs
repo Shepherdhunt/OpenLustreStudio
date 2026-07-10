@@ -37,6 +37,7 @@ fn function_cannot_contain_pre() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(bad));
     let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
@@ -57,6 +58,7 @@ fn unassigned_output_is_an_error() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(bad));
     let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
@@ -80,6 +82,7 @@ fn double_assignment_is_an_error() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(bad));
     let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
@@ -104,6 +107,7 @@ fn combinational_cycle_is_an_error() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(bad));
     let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();
@@ -128,6 +132,7 @@ fn uninitialized_pre_is_an_error() {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let report = ol_typecheck::check_project(&project_with(bad));
     let codes: Vec<_> = report.diagnostics.iter().map(|d| d.code.as_str()).collect();

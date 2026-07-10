@@ -62,6 +62,7 @@ fn build_project() -> Project {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     Project {
         name: "composite_consts".into(),
@@ -164,6 +165,7 @@ fn array_constant_lookup_agrees_across_backends() {
                 probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
             }],
             ..Default::default()
         }],
@@ -278,6 +280,7 @@ fn make_array_and_record_emit_real_c() {
         probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let project = Project {
         name: "make".into(),

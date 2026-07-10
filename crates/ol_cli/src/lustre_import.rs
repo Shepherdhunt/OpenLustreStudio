@@ -170,6 +170,7 @@ fn parse_node_decl(input: &str) -> Result<(NodeDef, &str), String> {
             probes: vec![],
             requirements: vec![],
         sysml: None,
+        generics: vec![],
         },
         rest,
     ))

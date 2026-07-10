@@ -12,16 +12,48 @@ cannot code your way to a qualification certificate), and prioritizes the former
 ## 0. Status snapshot — resume here
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
-`main`). **Full check**: `cargo test --workspace --no-fail-fast` (64 result
-groups green as of 2026-07-06 on Linux/gcc; 56 groups were green 2026-06-16
-on Windows/MSVC) plus `openlustre lib-check libraries` (48 blocks / 48
+`main`). **Full check**: `cargo test --workspace --no-fail-fast` (67 result
+groups green as of 2026-07-10 on Linux/gcc; 56 groups were green 2026-06-16
+on Windows/MSVC) plus `openlustre lib-check libraries` (52 blocks / 48
 contracts) — the workspace builds with zero warnings across all targets. The Studio GUI is one embedded
 HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 `crates/ol_cli/src/studio_server.rs` (`openlustre studio serve <dir>`); the IR
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Language round (2026-07-10):** three of
+**Landed recently (newest first):** **Generics round (2026-07-10):** the
+deepest language gap — **type- and size-generic operators** — closed via
+**per-call-site monomorphization**. Ports (and locals) may now be typed
+`'T` (a type variable, optionally constrained: `'T: numeric | integer |
+float | any`) or `elem[N]` (a size variable), declared per operator
+(`NodeDef.generics`; YAML libraries take a `generics:` list, the parser
+reads `'T` in signatures). After state-machine lowering, every pipeline
+(`check`/`sim`/`codegen`/`test`/`fmu`/Studio load + FSM validation) runs
+`ol_typecheck::generics::monomorphize`: each call of a template unifies
+argument types against the declared ports (E0190 when a parameter can't be
+inferred or binds inconsistently, E0191 on constraint violations, E0192 if
+main itself is generic), instantiates a concrete clone under a
+width-precise mangled name (`SaturateG_float64`, `SumN_4`), and rewrites
+the call — iterator calls included (map/mapi/fold/foldi/mapfold synthesize
+the element/index/init argument types). Templates stay in the model for
+editing but are skipped by both emitters and the sorter, so generated
+C/Lustre contain only concrete instances; template bodies are still
+checked representatively (Numeric→int32 etc.) so a bad template is loud
+before any instantiation. Studio: right-click ▸ Generics… declares
+parameters (`T: numeric, U: any` → `/api/edit/set_generics`), inspect JSON
+carries each block's effective generics, and `'T` ports round-trip.
+`libraries/generic/generic.yaml` ships SaturateG/HoldG (stateful)/SumN as
+the first generic blocks (52 blocks / 48 contracts). Six-test suite
+(`tests/generic_operators.rs`) covers instantiation + call rewrite,
+per-binding behavior incl. state, loud inference/constraint failures,
+representative template checking, dual-backend equivalence, and stdlib use
+from a user model; it also exposed and fixed a pre-existing C-backend bug
+(array-typed call inputs now `memcpy` instead of invalid array
+assignment). V1 limits, recorded: instances drop contracts, size
+parameters are usable only in types (not expressions), and parameters must
+be inferable from arguments. Follow-up queued: collapse the monomorphic
+library families onto the generic blocks. Before
+that: **Language round (2026-07-10):** three of
 the four Scade-6 language gaps closed full-pipeline. **(1) Indexed
 iterators** — `mapi(F, a…)` / `foldi(F, init, a)`: F receives the 0-based
 element index (an integer) as its FIRST input; IR (`IterKind::Mapi/Foldi`),
@@ -46,11 +78,9 @@ inputs arriving while the activation is off
 (`tests/activate_conditioning.rs` — this test caught the C backend
 executing unconditionally before the desugar existed). A Time/Statefuls
 toolbox block drops it with condition + default + F's input pins.
-Remaining from the language review: **type/size-generic operators** (`'T`,
-`<<N>>`) — the deepest item, needs its own dedicated round (typechecker
-type variables, per-instantiation monomorphization, generic library
-blocks). Also `Expr::visit_mut` (a mutable expression walker) landed as
-shared infrastructure. Before
+The last item from the language review — type/size-generic operators —
+landed in the generics round above. Also `Expr::visit_mut` (a mutable
+expression walker) landed as shared infrastructure. Before
 that: **Graphical interface round (2026-07-09):**
 four SCADE-parity interface gaps closed in one sweep. **(1) The graphical
 automaton editor** — the flagship: an operator's machine now renders and
@@ -372,6 +402,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. **2026-07-06**: clause-level links landed — `requirements` on each contract Assumption/Guarantee/Mode, matrix grew an `element` column (`operator` / `assume L` / `guarantee L` / `mode M`), doc tags clause lines. **ReqIF export is decided out (2026-07-06)** — instead, **SysML 2.0 association groundwork landed**: `NodeDef.sysml` names the SysML model/element an operator realizes (Studio-edited, W0170 on dangling file, in trace/diff/doc); requirements will always ride in the SysML model | done |
 | ~~Documentation generator~~ | **Landed 2026-07-06**: `openlustre doc <model> -o design.html` and Project ▸ Design Document in the Studio — a self-contained, deterministic HTML report: per operator its interface tables, schematic SVG (stored canvas positions or column layout), behavior as Lustre, owned state machine (states/transitions/equations), CoCoSpec contract, and requirement badges, plus types/constants and the traceability matrix. PDF stays "print the HTML" | done |
+| ~~Type/size-generic operators (`'T`, `<<N>>`)~~ | **Landed 2026-07-10**: type variables with constraints (`'T: numeric/integer/float/any`) and array-size variables (`elem[N]`) on operator ports, resolved by **per-call-site monomorphization** after machine lowering and before every consumer (typecheck E0190–E0192, sim, C, Lustre, FMU, Studio). Templates are Studio-editable (right-click ▸ Generics…), representative-checked, and skipped by emitters; generic YAML library blocks work (`libraries/generic`). V1 limits: instances drop contracts; size params only in types; params must be argument-inferable. Follow-up: collapse monomorphic library families onto generics. See §6 | done |
 | ~~FMU export~~ | **Landed 2026-07-06**: `openlustre fmu <model> -o out.fmu [--node N]` — an FMI 2.0 co-simulation FMU wrapping the verified C-Lite (one `fmi2DoStep` = one synchronous cycle; scalar interfaces, compound ports are a loud error). Deterministic archive (store-only zip, fixed timestamps, content-hashed GUID — re-export is byte-identical), `sources/` always, `binaries/linux64/<id>.so` when a host compiler exists, `--keep-sources` explodes the tree for inspection. Equivalence-tested: driving the FMU through the standard fmi2 API reproduces the IR simulator's trace cell for cell | done |
 
 ## 4. The structural gap: qualification
@@ -413,6 +444,74 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-10 (generics) — type- and size-generic operators via monomorphization
+
+The deepest language item on the board, done as its own round. An operator
+(or YAML library block) may now declare **generic parameters**: type
+variables written `'T` in port/local signatures with an optional constraint
+(`any` — the default, `numeric`, `integer`, `float`), and size variables
+written as an identifier in an array length (`elem[N]`). IR:
+`Type::Var { name }` / `Type::ArrayVar { elem, len_param }` and
+`NodeDef.generics: Vec<GenericParam>` (serde-defaulted; old models load
+untouched). Implicit declaration works too — a port typed `'T` without a
+declared parameter gets an `any`-constrained one (`effective_generics`).
+
+The architecture is **monomorphize before everything**
+(`crates/ol_typecheck/src/generics.rs`). After state-machine lowering,
+every pipeline — `check`, `sim`, `test`, codegen, `fmu`, Studio project
+load, and the FSM-editor validation — runs `monomorphize(&mut Project)`:
+a fixpoint walk (≤16 rounds for templates calling templates) finds each
+call of a generic template, **unifies** the actual argument types against
+the declared port types (binding type vars and array sizes; iterator calls
+synthesize their argument list — `mapi`/`foldi` prepend the int index,
+folds prepend the init type, arrays contribute element types), checks
+constraints, and instantiates a concrete clone of the template under a
+**width-precise mangled name** (`SaturateG_float64`, `HoldG_int32`,
+`SumN_4` — int8 vs int64 cannot collide), rewriting the call site. Failures
+are loud and precise: **E0190** (parameter not inferable from arguments, or
+bound inconsistently by two arguments), **E0191** (constraint violation:
+`bool` where `'T: numeric` is required), **E0192** (the main node itself is
+generic — there is nothing to infer from).
+
+Templates stay in the project so the Studio can keep editing them, but
+`NodeDef::is_generic_template()` makes both emitters and the topological
+sorter skip them — emitted C and Lustre contain only concrete instances,
+no `'T` anywhere. Template *bodies* are still checked representatively
+(Numeric/Integer→int32, Float→float64, Any→an opaque var that admits only
+polymorphic-safe operations, sizes→3), so `x + x` on an unconstrained `'T`
+fails at edit time, before any caller exists.
+
+Studio surface: right-click an operator ▸ **Generics…** edits the type
+parameters as `T: numeric, U: any` (`POST /api/edit/set_generics`,
+journaled; unknown constraints are a clean 400); the inspect JSON carries
+every block's effective generics; `'T` ports serialize as
+`{"kind":"Var","name":"T"}` and print as `'T`. YAML libraries declare
+`generics:` (name + optional constraint) and use `'T`/`elem[N]` in
+signatures; `libraries/generic/generic.yaml` ships the first generic
+blocks — `SaturateG` (`'T: numeric` clamp), `HoldG` (stateful `'T`
+previous-value hold), `SumN` (`int32[N]` fold) — palette at **52 blocks /
+48 contracts**.
+
+Pinned by `tests/generic_operators.rs` (6 tests): per-call-site
+instantiation + call rewriting (including `map(SaturateG_float64, …)`
+inside an iterator), per-binding runtime behavior including template state
+(each instance holds its own `pre`), loud E0190/E0191/E0192 diagnostics,
+representative template checking, **dual-backend equivalence** of a
+monomorphized project (IR sim vs compiled C), and instantiating stdlib
+generic blocks from a user model via `--with-stdlib`. The dual-backend
+test exposed a **pre-existing C-backend bug** — passing an array directly
+to a called node's input emitted an invalid C array assignment (iterators
+had sidestepped it); `emit_call_block` now emits `memcpy` for array-typed
+params. Workspace suite: **67 result groups, zero failures**.
+
+Documented v1 limitations: instantiated nodes **drop the template's
+contract** (`contract: None`) — proving a generic contract per instance is
+follow-up work; size parameters are usable only in *types*, not in body
+expressions; and every generic parameter must be inferable from the call's
+arguments (no explicit `<<…>>` instantiation syntax yet). Also queued:
+collapsing the monomorphic library families (per-width Saturate/etc.) onto
+the new generic blocks.
 
 ### 2026-07-10 (language) — indexed iterators, `last`, and `activate` conditioning
 

@@ -130,6 +130,20 @@ pub struct LibBlock {
     /// automaton, true exactly while an emitting state is active.
     #[serde(default)]
     pub signals: Vec<String>,
+    /// Generic TYPE parameters (`'T` in the port types), with an optional
+    /// constraint (`any` / `numeric` / `integer` / `float`). Array SIZE
+    /// parameters (`int32[N]`) need no declaration — they register
+    /// implicitly. A block with generics is a template: it instantiates per
+    /// call site and never reaches a backend itself.
+    #[serde(default)]
+    pub generics: Vec<RawGeneric>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawGeneric {
+    pub name: String,
+    #[serde(default)]
+    pub constraint: ol_ir::TypeConstraint,
 }
 
 /// Lowering result for one block.
@@ -198,7 +212,15 @@ impl LibBlock {
             diagram: Default::default(),
             probes: Vec::new(),
             requirements: Vec::new(),
-        sysml: None,
+            sysml: None,
+            generics: self
+                .generics
+                .iter()
+                .map(|g| ol_ir::GenericParam::Type {
+                    name: g.name.clone(),
+                    constraint: g.constraint,
+                })
+                .collect(),
         };
 
         Ok(LoweredBlock {

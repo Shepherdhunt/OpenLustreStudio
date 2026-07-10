@@ -45,6 +45,7 @@ pub fn export(project: &Project, out: &Path, opts: &FmuOptions) -> Result<()> {
     lowered.lower_state_machines().map_err(|errs| {
         anyhow::anyhow!(errs.iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))
     })?;
+    crate::monomorphize_or_bail(&mut lowered)?;
     let sliced = lowered.slice_for_root(&root).map_err(|e| anyhow::anyhow!(e))?;
     let node = sliced
         .find_node(&root)
@@ -174,7 +175,8 @@ fn fmi_type(ty: &Type) -> Option<Fmi> {
         | Type::Uint16
         | Type::Uint32
         | Type::Uint64 => Some(Fmi::Integer),
-        Type::Char | Type::Array { .. } | Type::Named { .. } => None,
+        Type::Char | Type::Array { .. } | Type::Named { .. }
+        | Type::Var { .. } | Type::ArrayVar { .. } => None,
     }
 }
 

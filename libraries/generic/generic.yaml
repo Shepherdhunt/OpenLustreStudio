@@ -1,0 +1,48 @@
+# Generic operator templates — 'T type polymorphism and array-size
+# parameters. A template instantiates per call site (SaturateG on float64
+# becomes SaturateG_float64); it never reaches a backend itself.
+
+- name: SaturateG
+  kind: function
+  category: generic
+  generics: [{ name: T, constraint: numeric }]
+  inputs:
+    - { name: x,  type: "'T" }
+    - { name: lo, type: "'T" }
+    - { name: hi, type: "'T" }
+  outputs:
+    - { name: y, type: "'T" }
+  equations:
+    - { lhs: [y], body: "if x > hi then hi else if x < lo then lo else x" }
+
+- name: HoldG
+  kind: operator
+  category: generic
+  generics: [{ name: T }]
+  inputs:
+    - { name: x, type: "'T" }
+  outputs:
+    - { name: y, type: "'T" }
+  equations:
+    - { lhs: [y], body: "x -> pre x" }
+
+- name: Add2
+  kind: function
+  category: generic
+  inputs:
+    - { name: acc, type: int32 }
+    - { name: e,   type: int32 }
+  outputs:
+    - { name: s, type: int32 }
+  equations:
+    - { lhs: [s], body: "acc + e" }
+
+- name: SumN
+  kind: function
+  category: generic
+  inputs:
+    - { name: a, type: "int32[N]" }
+  outputs:
+    - { name: s, type: int32 }
+  equations:
+    - { lhs: [s], body: "fold(Add2, 0, a)" }

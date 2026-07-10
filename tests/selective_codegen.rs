@@ -53,6 +53,7 @@ fn cluttered_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let unrelated = NodeDef {
         name: "Unrelated".into(),
@@ -72,6 +73,7 @@ fn cluttered_project() -> Project {
             probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let main_contract = serde_json::json!({
         "name": "Main_contract",
@@ -251,6 +253,7 @@ fn debug_driver_holds_watch_table_inputs() {
         probes: vec![ol_ir::Probe { label: "doubled".into(), var: "y".into() }],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
     };
     let mut held = BTreeMap::new();
     held.insert("x".to_string(), "9".to_string());
@@ -288,6 +291,7 @@ fn debug_driver_holds_watch_table_inputs() {
             contract: None, diagram: Default::default(), probes: vec![],
         requirements: vec![],
         sysml: None,
+        generics: vec![],
         },
         &hostile,
     );
