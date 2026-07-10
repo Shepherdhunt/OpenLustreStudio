@@ -21,6 +21,27 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
+**Branch model (since 2026-07-10):** two branches. `develop` is the single
+integration line — all work lands and is tested there; `main` only advances
+when a develop state is confirmed stable. The historical parallel branches
+were consolidated into `develop` on 2026-07-10: the automaton-editor line
+(`claude/scade-fable-implementation-*`) is its direct ancestry, and the
+`claude/scade-gaps-2026-06-18` line (which contained
+`claude/next-priority-item-*`) was closed out with its unique work ported
+on top — fixed-point Q-format types with divide and saturating arithmetic,
+the cruise-control example, the Windows installer file-association round,
+`openlustre doctor` + `DEPENDENCIES.md`, and the workspace browse dialogs.
+Where the two lines had implemented the same feature independently (float
+intrinsics, canvas zoom/pan/marquee/copy-paste, orthogonal wires, gate
+silhouettes, signals, trace plots vs. waveforms, generic nodes vs. generic
+operators, TOR/doc updates), the automaton-editor line's implementation is
+the one in force. Still to port from the closed-out line (tracked as
+backlog; the commits stay reachable through the closeout merge):
+**target/OS build profiles + Studio target selector**, the **Docker+QEMU
+emulated-target backend** (`clite-emulate`, user-mode + full-system arm64 —
+needs a Docker host to verify), and the **per-target integration entry
+skeleton**.
+
 **Landed recently (newest first):** **Generics round (2026-07-10):** the
 deepest language gap — **type- and size-generic operators** — closed via
 **per-call-site monomorphization**. Ports (and locals) may now be typed
