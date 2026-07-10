@@ -187,9 +187,88 @@ impl Project {
             }
         }
         if errors.is_empty() {
+            self.desugar_activations();
             Ok(())
         } else {
             Err(errors)
+        }
+    }
+
+    /// Split SCADE-style activations into the clock profile's supported
+    /// shape. The parser sugars `activate(F, c, d, args…)` into
+    /// `merge(c, F(args when c), d when not c)`; when `F` is STATEFUL, its
+    /// activation clock must be explicit at the equation level so both
+    /// backends freeze its state off-cycles — so each such call moves into
+    /// its own fresh-local equation:
+    ///
+    /// ```text
+    /// y = merge(c, F(x when c), d when not c);
+    ///   ⇒  __act0 = F(x when c);
+    ///      y = merge(c, __act0, d when not c);
+    /// ```
+    ///
+    /// Only the exact activate shape is rewritten (a stateful single-output
+    /// call whose every argument is `when` the merge's own clock); anything
+    /// else is left for the typechecker to judge.
+    fn desugar_activations(&mut self) {
+        use crate::expr::Expr;
+        // (name -> (stateful, single output type)) across the whole project.
+        let sigs: std::collections::HashMap<String, (bool, Option<crate::Type>)> = self
+            .packages
+            .iter()
+            .flat_map(|p| p.nodes.iter())
+            .map(|n| {
+                (
+                    n.name.clone(),
+                    (
+                        !matches!(n.kind, crate::NodeKind::Function),
+                        (n.outputs.len() == 1).then(|| n.outputs[0].ty.clone()),
+                    ),
+                )
+            })
+            .collect();
+        for pkg in &mut self.packages {
+            for node in &mut pkg.nodes {
+                let mut fresh = 0usize;
+                let mut hoisted: Vec<(String, crate::Type, Expr)> = Vec::new();
+                let taken: std::collections::HashSet<String> = node
+                    .inputs
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .chain(node.outputs.iter().map(|p| p.name.clone()))
+                    .chain(node.locals.iter().map(|l| l.name.clone()))
+                    .collect();
+                for eq in &mut node.equations {
+                    eq.rhs.visit_mut(&mut |e: &mut Expr| {
+                        let Expr::Merge { clock, on_true, .. } = e else { return };
+                        let Expr::Call { node: f, args } = on_true.as_mut() else { return };
+                        let Some((true, Some(out_ty))) = sigs.get(f.as_str()) else { return };
+                        let is_activate_shape = !args.is_empty()
+                            && args.iter().all(|a| matches!(
+                                a,
+                                Expr::When { on: true, clock: c, .. } if c == clock
+                            ));
+                        if !is_activate_shape {
+                            return;
+                        }
+                        let mut name = format!("__act{fresh}");
+                        while taken.contains(&name) {
+                            fresh += 1;
+                            name = format!("__act{fresh}");
+                        }
+                        fresh += 1;
+                        let call = std::mem::replace(
+                            on_true.as_mut(),
+                            Expr::Var { name: name.clone() },
+                        );
+                        hoisted.push((name, out_ty.clone(), call));
+                    });
+                }
+                for (name, ty, call) in hoisted {
+                    node.locals.push(crate::Local { name: name.clone(), ty });
+                    node.equations.push(crate::Equation { lhs: vec![name], rhs: call });
+                }
+            }
         }
     }
 }

@@ -21,7 +21,37 @@ HTML page, `crates/ol_cli/src/studio_ui.html`, served by
 is `crates/ol_ir`, sim `crates/ol_sim`, C emitter `crates/ol_clite_emit`,
 typecheck `crates/ol_typecheck`.
 
-**Landed recently (newest first):** **Graphical interface round (2026-07-09):**
+**Landed recently (newest first):** **Language round (2026-07-10):** three of
+the four Scade-6 language gaps closed full-pipeline. **(1) Indexed
+iterators** — `mapi(F, a…)` / `foldi(F, init, a)`: F receives the 0-based
+element index (an integer) as its FIRST input; IR (`IterKind::Mapi/Foldi`),
+parser/formatter, typecheck (index-input must be integer, arity rules under
+E0145), simulation, generated C (the loop index feeds F's first input,
+cast to its declared type), Higher Order toolbox drops, dual-backend
+equivalence test (`tests/indexed_iterators.rs`). **(2) `last x`** —
+SCADE's previous-cycle value, valid only inside a state machine where a
+variable is assigned by different states: `Expr::Last` parses (`last n +
+1`), machine lowering resolves it to `default(ty) -> pre x` (unknown
+variable = a lowering error), and the typechecker rejects it anywhere else
+(**E0180**); a two-state up/down counter reading `last n` across states
+simulates exactly (`tests/state_machines.rs`). **(3) `activate(F, cond,
+default, args…)`** — SCADE's operator conditioning as sugar over the
+boolean-clock core: parses to `merge(cond, F(args when cond), default when
+not cond)` (like `fby`), and a new lowering pass
+(`Project::desugar_activations`, run by `lower_state_machines`) hoists a
+STATEFUL activated call into its own fresh-local equation so the activation
+clock is explicit — which is what makes both backends freeze F's state
+off-cycles; pinned by a dual-backend test whose accumulator must NOT see
+inputs arriving while the activation is off
+(`tests/activate_conditioning.rs` — this test caught the C backend
+executing unconditionally before the desugar existed). A Time/Statefuls
+toolbox block drops it with condition + default + F's input pins.
+Remaining from the language review: **type/size-generic operators** (`'T`,
+`<<N>>`) — the deepest item, needs its own dedicated round (typechecker
+type variables, per-instantiation monomorphization, generic library
+blocks). Also `Expr::visit_mut` (a mutable expression walker) landed as
+shared infrastructure. Before
+that: **Graphical interface round (2026-07-09):**
 four SCADE-parity interface gaps closed in one sweep. **(1) The graphical
 automaton editor** — the flagship: an operator's machine now renders and
 EDITS as first-class graphics in the machine dialog: states are draggable
@@ -337,7 +367,7 @@ navigation, and an unmappable-problems banner. Remaining gaps, in priority order
 | Source spans in diagnostics | `Diagnostic.span` exists but is never populated. Honest re-scope: models are GUI-authored JSON, so the `node X · equation N` context (landed) already pins every diagnostic to its diagram box — file:line:col only becomes meaningful with a textual `.lus` frontend, which is itself roadmap | P2 (was P0) |
 | ~~Clocks (`when` / `merge`)~~ | **Landed 2026-06-12**: boolean clocks end to end — `e when c` / `e when not c` / `merge(c, a, b)` in IR, parser, formatter, clock calculus (E0130–E0135), simulator, generated C, Kind 2 view (V6 merge-case syntax), and the Time/Statefuls toolbox. See §6 | done |
 | ~~Hierarchical/parallel automata~~ | **Landed**: state machines are **operator-owned** (a machine is an operator's body, nested under it in the tree, created within it); a state can `refine` another machine or hold nested `Region`s, lowered recursively with restart-on-entry / freeze / history (§6). **2026-07-06**: **signals** (declare in the machine, `emit name` in states, same-cycle broadcast, merged across refinement), **`refine M with history`**, and **inline parallel regions in the textual grammar** (`Active.motor.Lo: level = 1` dotted paths; `Active.motor: history`; first sub-state = the region's initial) — the automata story is complete | done |
-| ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. Clocked/stateful iteration and Kind 2 iterator proving remain roadmap. See §6 | done |
+| ~~Array iterators (`map`/`fold`)~~ | **Landed 2026-06-12**: `map(F, a…)` / `fold(F, init, a)` over a stateless function, end to end — IR, parser/formatter, typecheck (E0140–E0146), element-wise simulation, generated C (`for` loops), array CSV I/O at the boundary, and the Higher Order toolbox. Dual-backend equivalence test passes on MSVC. **2026-07-10: indexed `mapi`/`foldi` landed** (F takes the element index first, dual-backend tested); `activate(F, cond, default, args…)` conditioning landed the same day (see §6). Clocked/stateful iteration inside iterators and Kind 2 iterator proving remain roadmap. See §6 | done |
 | ~~MC/DC proper~~ | **Landed 2026-06-12**: unique-cause Modified Condition/Decision Coverage (DO-178C Level A) on the decision-coverage substrate — decisions are if-conditions and compound boolean equations; each atomic condition's value is captured in a single eval pass; suite-level independence-pair analysis reports which conditions still lack an isolating test, surfaced in `test run` and the Studio Tests dock. **2026-07-06: masking MC/DC landed** — the decision's boolean shape is recorded, coupled conditions are grouped, and a controlling-in-both-trials pair covers what unique-cause structurally cannot; reports count masking-covered conditions. See §6 | done |
 | ~~Model diff (`openlustre diff`)~~ | **Landed 2026-07-03**: `openlustre diff <old> <new>` reports design changes (`+`/`-`/`~` per node, port, equation-by-lhs, type, constant, state machine, contract ref, requirements) and never layout — a box shuffle or re-serialization diffs empty; exits nonzero on differences so it can gate review | done |
 | ~~Requirements traceability~~ | **Landed 2026-07-03**: `NodeDef.requirements` (IDs like "SRS-042"; serde-default so old models load), edited in the Studio (right-click operator ▸ Requirements…, hover shows them), `openlustre trace` emits the requirement↔operator CSV matrix + untraced report, `--strict` gates CI on full coverage. **2026-07-06**: clause-level links landed — `requirements` on each contract Assumption/Guarantee/Mode, matrix grew an `element` column (`operator` / `assume L` / `guarantee L` / `mode M`), doc tags clause lines. **ReqIF export is decided out (2026-07-06)** — instead, **SysML 2.0 association groundwork landed**: `NodeDef.sysml` names the SysML model/element an operator realizes (Studio-edited, W0170 on dangling file, in trace/diff/doc); requirements will always ride in the SysML model | done |
@@ -383,6 +413,48 @@ verification burden the qualified tool would otherwise discharge.
 | Auto-update check | Studio could poll GitHub releases and show a banner | P3 |
 
 ## 6. What closed recently
+
+### 2026-07-10 (language) — indexed iterators, `last`, and `activate` conditioning
+
+**`mapi` / `foldi`**: the indexed iterators, mechanical along the
+map/fold/mapfold path — `IterKind::Mapi/Foldi`, parser (`mapi(F, a…)`,
+`foldi(F, seed, a)`), formatter, typecheck (F's first input receives the
+0-based index and must be an integer type; arity rules fold into the
+existing E0145 family), element loops in the simulator and generated C
+(the C loop index feeds F's first input cast to its declared type), Higher
+Order toolbox drops (the index is implicit — no pin), and a dual-backend
+equivalence test with index-dependent bodies so an off-by-one in either
+backend flips the trace.
+
+**`last x`**: SCADE's previous-cycle value (SCADE writes `last 'x`; the
+quote is dropped here). `Expr::Last` is a proper IR variant — parsed by
+`last <ident>`, printed as `last x`, renamed with the variable — and is
+resolved during state-machine lowering to `default(ty) -> pre x` using the
+port/local's typed default (an unknown name is the `UnknownLastVar`
+lowering error). Outside a machine it has no meaning: the typechecker
+rejects it with **E0180**. The point of `last` is reading a value across
+STATES without per-state arrow plumbing — pinned by an up/down counter
+whose two states both read `last n` (trace 1,2,3,2,1 across a flip).
+
+**`activate(F, cond, default, args…)`**: operator conditioning as sugar
+over the clock core, expanding at parse time to
+`merge(cond, F(args when cond), default when not cond)` — the same
+philosophy as `fby`. The subtle half: a STATEFUL `F` must carry its
+activation clock at the equation level for the backends to freeze its
+state, so `Project::desugar_activations` (run inside
+`lower_state_machines`, i.e. by every pipeline) hoists exactly the
+activate shape — a stateful single-output call whose every argument is
+`when` the merge's own clock — into a fresh-local equation. The
+dual-backend test drives a running-sum accumulator gated by the condition:
+inputs arriving off-cycle must never enter the sum, and the off-cycle
+output is the default. That test caught the C backend executing the
+accumulator unconditionally before the desugar pass existed — the reason
+the pass is in the lowering, not in the editor. A Time/Statefuls toolbox
+block drops `activate` with condition + default + F's inputs as pins.
+
+Shared infrastructure: `Expr::visit_mut`, a mutable post-order expression
+walker (used by the `last` rewrite and the activation desugar).
+
 
 ### 2026-07-09 (gui) — graphical automata, CEX replay, waveforms, layout tools
 

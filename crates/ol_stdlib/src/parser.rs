@@ -549,6 +549,22 @@ impl Parser {
         if self.eat_kw("pre") {
             return Ok(Expr::pre(self.parse_unary()?));
         }
+        // SCADE's `last x` (SCADE writes `last 'x`; the quote is dropped in
+        // this surface): the variable's value at the previous cycle, valid
+        // only inside a state machine.
+        if self.eat_kw("last") {
+            let name = match self.peek() {
+                Some(Tok::Ident(n)) => n.clone(),
+                other => {
+                    return Err(ParseError::Expected {
+                        expected: "a variable name after `last`".into(),
+                        found: format!("{other:?}"),
+                    })
+                }
+            };
+            self.bump();
+            return Ok(Expr::Last { name });
+        }
         if matches!(self.peek(), Some(Tok::Minus)) {
             self.bump();
             return Ok(Expr::neg(self.parse_unary()?));
@@ -731,7 +747,7 @@ impl Parser {
                     // `map(F, a, …)` / `fold(F, init, a)` / `mapfold(F, init, a)`
                     // are array iterators: the first argument is the iterated
                     // function's name.
-                    if name == "map" || name == "fold" || name == "mapfold" {
+                    if ["map", "fold", "mapfold", "mapi", "foldi"].contains(&name.as_str()) {
                         let iter_node = match args.first() {
                             Some(Expr::Var { name }) => name.clone(),
                             _ => {
@@ -747,11 +763,19 @@ impl Parser {
                             }
                         };
                         let rest: Vec<Expr> = args.into_iter().skip(1).collect();
-                        if name == "map" {
+                        if name == "map" || name == "mapi" {
                             if rest.is_empty() {
                                 return Err(ParseError::Expected {
-                                    expected: "map(F, array, …) with at least one array".into(),
+                                    expected: format!("{name}(F, array, …) with at least one array"),
                                     found: "no arrays".into(),
+                                });
+                            }
+                            if name == "mapi" {
+                                return Ok(Expr::Iterate {
+                                    kind: ol_ir::IterKind::Mapi,
+                                    node: iter_node,
+                                    init: None,
+                                    arrays: rest,
                                 });
                             }
                             return Ok(Expr::map(iter_node, rest));
@@ -766,15 +790,70 @@ impl Parser {
                         let mut it = rest.into_iter();
                         let init = it.next().unwrap();
                         let array = it.next().unwrap();
-                        if name == "mapfold" {
+                        if name == "mapfold" || name == "foldi" {
                             return Ok(Expr::Iterate {
-                                kind: ol_ir::IterKind::MapFold,
+                                kind: if name == "mapfold" {
+                                    ol_ir::IterKind::MapFold
+                                } else {
+                                    ol_ir::IterKind::Foldi
+                                },
                                 node: iter_node,
                                 init: Some(Box::new(init)),
                                 arrays: vec![array],
                             });
                         }
                         return Ok(Expr::fold(iter_node, init, array));
+                    }
+                    // SCADE's operator conditioning, `activate F every c
+                    // default d`: `activate(F, c, d, args…)` runs `F` only on
+                    // the cycles where `c` holds (its internal state freezes
+                    // off-clock) and yields `d` on the others. Sugar over the
+                    // boolean-clock core — it expands to
+                    // `merge(c, F(args when c), d when not c)`, exactly like
+                    // `fby` expands to `init -> pre x`.
+                    if name == "activate" {
+                        if args.len() < 4 {
+                            return Err(ParseError::Expected {
+                                expected: "activate(F, condition, default, arg, …)".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        let mut it = args.into_iter();
+                        let f_name = match it.next() {
+                            Some(Expr::Var { name }) => name,
+                            other => {
+                                return Err(ParseError::Expected {
+                                    expected: "a function/operator name as activate's first argument".into(),
+                                    found: other.as_ref().map(ol_ir_expr_describe).unwrap_or_default(),
+                                })
+                            }
+                        };
+                        let clock = match it.next() {
+                            Some(Expr::Var { name }) => name,
+                            other => {
+                                return Err(ParseError::Expected {
+                                    expected: "a boolean variable (the activation clock) as activate's second argument".into(),
+                                    found: other.as_ref().map(ol_ir_expr_describe).unwrap_or_default(),
+                                })
+                            }
+                        };
+                        let default = it.next().expect("len checked");
+                        let call_args: Vec<Expr> = it
+                            .map(|a| Expr::When {
+                                arg: Box::new(a),
+                                clock: clock.clone(),
+                                on: true,
+                            })
+                            .collect();
+                        return Ok(Expr::Merge {
+                            clock: clock.clone(),
+                            on_true: Box::new(Expr::Call { node: f_name, args: call_args }),
+                            on_false: Box::new(Expr::When {
+                                arg: Box::new(default),
+                                clock,
+                                on: false,
+                            }),
+                        });
                     }
                     // Terminal printout: 1..=12 declared-variable inputs, the
                     // special `terminal_out` bool value.

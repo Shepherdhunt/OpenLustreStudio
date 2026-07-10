@@ -161,6 +161,8 @@ pub enum LowerError {
     DuplicateSignal(String, String),
     #[error("machine `{0}`: signal `{1}` collides with an input, output, local, or state name")]
     SignalClash(String, String),
+    #[error("machine `{0}`: `last {1}` — `{1}` is not an input, output, or local of the machine")]
+    UnknownLastVar(String, String),
 }
 
 /// Resolve every `refines` reference in `sm` into an inlined nested [`Region`]
@@ -273,7 +275,72 @@ fn resolve_states(
 const STATE_LOCAL: &str = "__sm_state";
 const NEXT_STATE_LOCAL: &str = "__sm_next_state";
 
+/// Resolve every `last x` in the machine's expressions to
+/// `default(ty) -> pre x` — the value `x` held at the previous cycle, with
+/// the type's default on the first one. `x` must be a port or local of the
+/// machine (it needs a per-cycle value to look back at).
+fn resolve_last(sm: &StateMachineDef) -> Result<StateMachineDef, LowerError> {
+    let mut types: std::collections::BTreeMap<&str, &Type> = Default::default();
+    for p in sm.inputs.iter().chain(sm.outputs.iter()) {
+        types.insert(&p.name, &p.ty);
+    }
+    for l in &sm.locals {
+        types.insert(&l.name, &l.ty);
+    }
+    fn rewrite(
+        e: &mut Expr,
+        machine: &str,
+        types: &std::collections::BTreeMap<&str, &Type>,
+    ) -> Result<(), LowerError> {
+        let mut err: Option<LowerError> = None;
+        e.visit_mut(&mut |sub: &mut Expr| {
+            if err.is_some() {
+                return;
+            }
+            if let Expr::Last { name } = sub {
+                match types.get(name.as_str()) {
+                    Some(ty) => {
+                        *sub = Expr::arrow(
+                            default_expr_for_type(ty),
+                            Expr::pre(Expr::var(name.clone())),
+                        );
+                    }
+                    None => {
+                        err = Some(LowerError::UnknownLastVar(
+                            machine.to_string(),
+                            name.clone(),
+                        ));
+                    }
+                }
+            }
+        });
+        err.map_or(Ok(()), Err)
+    }
+    let mut out = sm.clone();
+    fn walk_states(
+        states: &mut [StateDef],
+        machine: &str,
+        types: &std::collections::BTreeMap<&str, &Type>,
+    ) -> Result<(), LowerError> {
+        for st in states {
+            for eq in &mut st.equations {
+                rewrite(&mut eq.rhs, machine, types)?;
+            }
+            for t in &mut st.transitions {
+                rewrite(&mut t.guard, machine, types)?;
+            }
+            for r in &mut st.regions {
+                walk_states(&mut r.states, machine, types)?;
+            }
+        }
+        Ok(())
+    }
+    walk_states(&mut out.states, &sm.name, &types)?;
+    Ok(out)
+}
+
 pub fn lower(sm: &StateMachineDef) -> Result<LoweredMachine, LowerError> {
+    let sm = &resolve_last(sm)?;
     if sm.states.is_empty() {
         return Err(LowerError::NoStates(sm.name.clone()));
     }

@@ -104,6 +104,13 @@ pub enum Expr {
     Pre {
         arg: Box<Expr>,
     },
+    /// SCADE's `last x`: the value `x` held at the previous cycle, valid
+    /// only inside a state machine (where `x` may be assigned by different
+    /// states). Lowering resolves it to `default -> pre x` with the
+    /// variable's typed default; the typechecker rejects it anywhere else.
+    Last {
+        name: String,
+    },
     /// `init -> body` — `init` on the first cycle, `body` thereafter.
     Arrow {
         init: Box<Expr>,
@@ -391,6 +398,12 @@ impl FloatOp {
 pub enum IterKind {
     Map,
     Fold,
+    /// `mapi(F, a…)` — indexed map: `F` is `(index, e₁…eₖ) -> out`, the
+    /// element index (int32, 0-based) arriving as the first argument.
+    Mapi,
+    /// `foldi(F, init, a)` — indexed fold: `F` is
+    /// `(index, accumulator, element) -> accumulator`.
+    Foldi,
     /// `mapfold(F, init, a)` — SCADE's combined iterator: `F` is
     /// `(accumulator, element) -> (accumulator, element_out)`; the result is
     /// the tuple `(final_accumulator, mapped_array)`, bound by a two-name
@@ -518,7 +531,7 @@ impl Expr {
         fn walk<F: FnMut(&Expr)>(e: &Expr, f: &mut F) {
             f(e);
             match e {
-                Expr::Const { .. } | Expr::Var { .. } => {}
+                Expr::Const { .. } | Expr::Var { .. } | Expr::Last { .. } => {}
                 Expr::Unary { arg, .. } => walk(arg, f),
                 Expr::Binary { lhs, rhs, .. } => {
                     walk(lhs, f);
@@ -601,6 +614,73 @@ impl Expr {
         walk(self, &mut f);
     }
 
+    /// Walk subexpressions mutably, applying `f` to every node (post-order:
+    /// children first, so a rewrite of a parent sees rewritten children).
+    pub fn visit_mut<F: FnMut(&mut Expr)>(&mut self, f: &mut F) {
+        match self {
+            Expr::Const { .. } | Expr::Var { .. } | Expr::Last { .. } => {}
+            Expr::Unary { arg, .. }
+            | Expr::Pre { arg }
+            | Expr::Cast { arg, .. }
+            | Expr::When { arg, .. }
+            | Expr::Field { base: arg, .. } => arg.visit_mut(f),
+            Expr::Binary { lhs, rhs, .. } => {
+                lhs.visit_mut(f);
+                rhs.visit_mut(f);
+            }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                cond.visit_mut(f);
+                then_branch.visit_mut(f);
+                else_branch.visit_mut(f);
+            }
+            Expr::Arrow { init, body } => {
+                init.visit_mut(f);
+                body.visit_mut(f);
+            }
+            Expr::Index { base, index } => {
+                base.visit_mut(f);
+                index.visit_mut(f);
+            }
+            Expr::Merge { on_true, on_false, .. } => {
+                on_true.visit_mut(f);
+                on_false.visit_mut(f);
+            }
+            Expr::Call { args, .. }
+            | Expr::FloatIntrinsic { args, .. }
+            | Expr::ArrayOp { args, .. }
+            | Expr::Printout { args }
+            | Expr::Tuple { items: args }
+            | Expr::Array { items: args } => {
+                for a in args {
+                    a.visit_mut(f);
+                }
+            }
+            Expr::Struct { fields, .. } => {
+                for fi in fields {
+                    fi.value.visit_mut(f);
+                }
+            }
+            Expr::Iterate { init, arrays, .. } => {
+                if let Some(i) = init {
+                    i.visit_mut(f);
+                }
+                for a in arrays {
+                    a.visit_mut(f);
+                }
+            }
+            Expr::Case { sel, arms, default } => {
+                sel.visit_mut(f);
+                for arm in arms {
+                    arm.value.visit_mut(f);
+                }
+                if let Some(d) = default {
+                    d.visit_mut(f);
+                }
+            }
+        }
+        f(self);
+    }
+
     /// True if the expression syntactically contains any temporal operator.
     pub fn contains_temporal(&self) -> bool {
         let mut found = false;
@@ -622,6 +702,11 @@ impl Expr {
                 }
             }
             Expr::Const { .. } => {}
+            Expr::Last { name } => {
+                if name == from {
+                    *name = to.to_string();
+                }
+            }
             Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Cast { arg, .. } => {
                 arg.rename_var(from, to)
             }

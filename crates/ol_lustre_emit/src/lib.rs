@@ -185,6 +185,7 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
         Expr::Const { lit: Literal::Char { value } } if lustre => (value.to_string(), 100),
         Expr::Const { lit } => (format_literal(lit), 100),
         Expr::Var { name } => (name.clone(), 100),
+        Expr::Last { name } => (format!("last {name}"), 100),
         Expr::Unary { op, arg } => {
             let inner = format_expr_prec(arg, 90, lustre);
             let t = match op {
@@ -389,6 +390,8 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
                 ol_ir::IterKind::Map => "map",
                 ol_ir::IterKind::Fold => "fold",
                 ol_ir::IterKind::MapFold => "mapfold",
+                ol_ir::IterKind::Mapi => "mapi",
+                ol_ir::IterKind::Foldi => "foldi",
             };
             let mut parts: Vec<String> = vec![node.clone()];
             if let Some(i) = init {

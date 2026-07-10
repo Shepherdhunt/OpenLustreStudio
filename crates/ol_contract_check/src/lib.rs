@@ -557,7 +557,7 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
     fn walk(e: &Expr, name: &str, in_pre: bool) -> bool {
         match e {
             Expr::Var { name: n } if n == name => in_pre,
-            Expr::Const { .. } | Expr::Var { .. } => true,
+            Expr::Const { .. } | Expr::Var { .. } | Expr::Last { .. } => true,
             Expr::Pre { arg } => walk(arg, name, true),
             Expr::Arrow { init, body } => walk(init, name, in_pre) && walk(body, name, in_pre),
             Expr::Unary { arg, .. } | Expr::Cast { arg, .. } => walk(arg, name, in_pre),

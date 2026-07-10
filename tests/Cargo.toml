@@ -179,3 +179,11 @@ path = "printout.rs"
 [[test]]
 name = "fmu_export"
 path = "fmu_export.rs"
+
+[[test]]
+name = "indexed_iterators"
+path = "indexed_iterators.rs"
+
+[[test]]
+name = "activate_conditioning"
+path = "activate_conditioning.rs"

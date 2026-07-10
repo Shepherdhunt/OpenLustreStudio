@@ -770,6 +770,9 @@ fn eval(
     cov: &mut Option<Coverage>,
 ) -> Result<Value, SimError> {
     match expr {
+        Expr::Last { name } => Err(SimError::EvalError(format!(
+            "`last {name}` survives only in an unlowered state machine — lower machines first"
+        ))),
         Expr::Const { lit } => Ok(match lit {
             Literal::Bool { value } => Value::Bool(*value),
             Literal::Int { value } => Value::Int(*value),
@@ -1109,25 +1112,37 @@ fn eval(
                 ));
             }
             match kind {
-                IterKind::Map => {
+                IterKind::Map | IterKind::Mapi => {
                     // Apply F to the k-th element of each array, building the
-                    // result array element by element.
+                    // result array element by element; `mapi` passes the
+                    // element index as F's first argument.
                     let mut out = Vec::with_capacity(n);
                     for k in 0..n {
-                        let args: Vec<Value> = arrs.iter().map(|a| a[k].clone()).collect();
+                        let mut args: Vec<Value> = Vec::with_capacity(arrs.len() + 1);
+                        if matches!(kind, IterKind::Mapi) {
+                            args.push(Value::Int(k as i64));
+                        }
+                        args.extend(arrs.iter().map(|a| a[k].clone()));
                         out.push(call_function_values(callee, args, project, cov)?);
                     }
                     Ok(Value::Array(out))
                 }
-                IterKind::Fold => {
-                    // Left fold: acc starts at the seed, then F(acc, elem).
+                IterKind::Fold | IterKind::Foldi => {
+                    // Left fold: acc starts at the seed, then F(acc, elem) —
+                    // `foldi` prepends the element index.
                     let seed = init.as_ref().ok_or_else(|| {
                         SimError::EvalError("fold without an accumulator seed".into())
                     })?;
                     let mut acc =
                         eval(seed, env, state, call_states, project, site_clocks, cov)?;
-                    for elem in &arrs[0] {
-                        acc = call_function_values(callee, vec![acc, elem.clone()], project, cov)?;
+                    for (k, elem) in arrs[0].iter().enumerate() {
+                        let mut args: Vec<Value> = Vec::with_capacity(3);
+                        if matches!(kind, IterKind::Foldi) {
+                            args.push(Value::Int(k as i64));
+                        }
+                        args.push(acc);
+                        args.push(elem.clone());
+                        acc = call_function_values(callee, args, project, cov)?;
                     }
                     Ok(acc)
                 }

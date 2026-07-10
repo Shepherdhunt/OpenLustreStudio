@@ -898,3 +898,123 @@ fn refine_with_history_resumes_the_sub_state_held_on_exit() {
     assert_eq!(run(false), vec![0, 1, 2, 0, 1], "no history: restart at Lo");
     assert_eq!(run(true), vec![0, 1, 2, 0, 2], "history: resume at Hi");
 }
+
+// --- `last x` (SCADE's previous-cycle value) -----------------------------------
+
+/// A counter whose states both read `last n` — the whole point of `last`:
+/// the previous cycle's value crosses state boundaries without manual
+/// `pre` plumbing (each state's equation would otherwise need its own
+/// arrow-init).
+fn last_counter() -> StateMachineDef {
+    let st = |name: &str, body: &str, target: &str| StateDef {
+        name: name.into(),
+        equations: vec![Equation {
+            lhs: vec!["n".into()],
+            rhs: ol_stdlib::parse_expr(body).unwrap(),
+        }],
+        transitions: vec![Transition {
+            guard: Expr::var("flip"),
+            target: target.into(),
+        }],
+        regions: vec![],
+        refines: None,
+        refine_history: false,
+        emits: vec![],
+    };
+    StateMachineDef {
+        name: "Count".into(),
+        inputs: vec![Port { name: "flip".into(), ty: Type::Bool }],
+        outputs: vec![Port { name: "n".into(), ty: Type::Int32 }],
+        locals: vec![],
+        initial_state: "Up".into(),
+        states: vec![st("Up", "last n + 1", "Down"), st("Down", "last n - 1", "Up")],
+        contract: None,
+        signals: vec![],
+        owner: None,
+        diagram: Default::default(),
+    }
+}
+
+#[test]
+fn last_reads_the_previous_cycle_across_states() {
+    // Parse + format round-trip first.
+    let e = ol_stdlib::parse_expr("last n + 1").unwrap();
+    assert_eq!(ol_lustre_emit::format_expr(&e), "last n + 1");
+
+    let mut project = Project {
+        name: "last".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            state_machines: vec![last_counter()],
+            ..Default::default()
+        }],
+        main: Some("Count".into()),
+        ..Default::default()
+    };
+    project.lower_state_machines().expect("last resolves and lowers");
+    assert!(
+        !ol_typecheck::check_project(&project).has_errors(),
+        "{:?}",
+        ol_typecheck::check_project(&project).errors().map(|d| d.render()).collect::<Vec<_>>()
+    );
+
+    let mut sim = Sim::new(&project, "Count").unwrap();
+    let mut ns = Vec::new();
+    for flip in [false, false, true, false, false] {
+        let mut inputs = BTreeMap::new();
+        inputs.insert("flip".into(), Value::Bool(flip));
+        ns.push(sim.step(&inputs).unwrap()["n"].as_int().unwrap());
+    }
+    // Up counts from the int32 default (0): 1, 2, 3; the flip lands us in
+    // Down NEXT cycle, which counts back down off the held value.
+    assert_eq!(ns, vec![1, 2, 3, 2, 1]);
+}
+
+#[test]
+fn last_of_an_unknown_variable_is_rejected_at_lowering() {
+    let mut bad = last_counter();
+    bad.states[0].equations[0].rhs = ol_stdlib::parse_expr("last zz + 1").unwrap();
+    let mut project = Project {
+        name: "last".into(),
+        packages: vec![Package { name: "user".into(), state_machines: vec![bad], ..Default::default() }],
+        ..Default::default()
+    };
+    let errs = project.lower_state_machines().unwrap_err();
+    assert!(
+        matches!(errs[0], ol_ir::state_machine::LowerError::UnknownLastVar(_, _)),
+        "{errs:?}"
+    );
+}
+
+#[test]
+fn last_outside_a_state_machine_is_a_type_error() {
+    // In a plain dataflow equation `last` has no meaning — E0180, not a
+    // silent misread.
+    let node = ol_ir::NodeDef {
+        name: "Plain".into(),
+        kind: NodeKind::Operator,
+        inputs: vec![Port { name: "x".into(), ty: Type::Int32 }],
+        outputs: vec![Port { name: "y".into(), ty: Type::Int32 }],
+        locals: vec![],
+        equations: vec![Equation {
+            lhs: vec!["y".into()],
+            rhs: ol_stdlib::parse_expr("last x").unwrap(),
+        }],
+        contract: None,
+        diagram: Default::default(),
+        probes: vec![],
+        requirements: vec![],
+        sysml: None,
+    };
+    let project = Project {
+        name: "last".into(),
+        packages: vec![Package { name: "user".into(), nodes: vec![node], ..Default::default() }],
+        ..Default::default()
+    };
+    let r = ol_typecheck::check_project(&project);
+    assert!(
+        r.diagnostics.iter().any(|d| d.code == "E0180"),
+        "expected E0180, got {:?}",
+        r.diagnostics
+    );
+}

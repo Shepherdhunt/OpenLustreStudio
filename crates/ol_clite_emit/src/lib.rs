@@ -246,6 +246,7 @@ fn topo_sort_nodes<'a>(project: &'a Project) -> Vec<&'a NodeDef> {
 
 fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
     match expr {
+        Expr::Last { .. } => {}
         Expr::Call { node, args } => {
             f(node);
             for a in args {
@@ -349,6 +350,7 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
         return;
     }
     match expr {
+        Expr::Last { .. } => {}
         Expr::Unary { arg, .. }
         | Expr::Pre { arg }
         | Expr::Field { base: arg, .. }
@@ -654,6 +656,7 @@ fn collect_stateful(
         return;
     }
     match expr {
+        Expr::Last { .. } => {}
         Expr::Unary { arg, .. }
         | Expr::Pre { arg }
         | Expr::Field { base: arg, .. }
@@ -979,8 +982,10 @@ fn emit_iterator(
         return;
     }
 
-    if matches!(kind, ol_ir::IterKind::Fold) {
-        // acc = seed; for k { in.acc=acc; in.elem=a[k]; F_step; acc=out; } lhs=acc;
+    if matches!(kind, ol_ir::IterKind::Fold | ol_ir::IterKind::Foldi) {
+        // acc = seed; for k { [in.idx=k;] in.acc=acc; in.elem=a[k]; F_step;
+        // acc=out; } lhs=acc; — `foldi` feeds the index as F's first input.
+        let idx = matches!(kind, ol_ir::IterKind::Foldi) as usize;
         let acc = format!("__it{seq}acc");
         let (stmts, seed) = init
             .map(|e| lower_anf(e, ctx))
@@ -994,10 +999,15 @@ fn emit_iterator(
         let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {{");
         let _ = writeln!(out, "    {f_name}_Input {inp};");
         let _ = writeln!(out, "    {f_name}_Output {outp};");
-        if let Some(p) = callee.inputs.first() {
+        if idx == 1 {
+            if let Some(p) = callee.inputs.first() {
+                let _ = writeln!(out, "    {inp}.{} = ({}){i};", c_ident(&p.name), p.ty.c_name());
+            }
+        }
+        if let Some(p) = callee.inputs.get(idx) {
             let _ = writeln!(out, "    {inp}.{} = {acc};", c_ident(&p.name));
         }
-        if let Some(p) = callee.inputs.get(1) {
+        if let Some(p) = callee.inputs.get(idx + 1) {
             let _ = writeln!(out, "    {inp}.{} = {arr}[{i}];", c_ident(&p.name));
         }
         let _ = writeln!(out, "    {f_name}_step(&{inp}, &{outp});");
@@ -1009,13 +1019,19 @@ fn emit_iterator(
         return;
     }
 
-    // map: for k { in.<inj>=aj[k]; F_step; lhs[k]=out.<o>; }
+    // map/mapi: for k { [in.idx=k;] in.<inj>=aj[k]; F_step; lhs[k]=out.<o>; }
+    let idx = matches!(kind, ol_ir::IterKind::Mapi) as usize;
     let arr_refs: Vec<String> = arrays.iter().map(|a| lower_operand(a, ctx)).collect();
     let lhs_ref = ctx.scope.ref_var(lhs);
     let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {{");
     let _ = writeln!(out, "    {f_name}_Input {inp};");
     let _ = writeln!(out, "    {f_name}_Output {outp};");
-    for (p, a) in callee.inputs.iter().zip(arr_refs.iter()) {
+    if idx == 1 {
+        if let Some(p) = callee.inputs.first() {
+            let _ = writeln!(out, "    {inp}.{} = ({}){i};", c_ident(&p.name), p.ty.c_name());
+        }
+    }
+    for (p, a) in callee.inputs[idx..].iter().zip(arr_refs.iter()) {
         let _ = writeln!(out, "    {inp}.{} = {a}[{i}];", c_ident(&p.name));
     }
     let _ = writeln!(out, "    {f_name}_step(&{inp}, &{outp});");
@@ -1123,6 +1139,9 @@ fn emit_call_block(callee: &NodeDef, idx: usize, arg_strs: &[String], out: &mut 
 /// `__outN.<output_name>` in the surrounding expression.
 fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
     match expr {
+        // `last` is resolved when state machines lower; it cannot reach
+        // codegen through a type-checked project.
+        Expr::Last { .. } => (vec![], "0 /* unreachable: unlowered last */".into()),
         Expr::Const { lit } => {
             let s = match lit {
                 Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
@@ -1424,6 +1443,7 @@ fn collect_pre_vars(
     seen: &mut BTreeSet<String>,
 ) {
     match expr {
+        Expr::Last { .. } => {}
         Expr::Pre { arg } => {
             if let Expr::Var { name } = arg.as_ref() {
                 if seen.insert(name.clone()) {

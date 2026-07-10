@@ -845,7 +845,13 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         // so the user can dive into F like any operator call.
         Expr::Iterate { kind, node, .. } => serde_json::json!({
             "kind": "call",
-            "text": format!("{}({node})", if *kind == ol_ir::IterKind::Map { "map" } else { "fold" }),
+            "text": format!("{}({node})", match kind {
+                ol_ir::IterKind::Map => "map",
+                ol_ir::IterKind::Mapi => "mapi",
+                ol_ir::IterKind::Fold => "fold",
+                ol_ir::IterKind::Foldi => "foldi",
+                ol_ir::IterKind::MapFold => "mapfold",
+            }),
         }),
         Expr::Cast { to, .. } => op(&type_str(to)),
         Expr::Case { .. } => op("CASE"),
@@ -2876,8 +2882,11 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
         "when" | "when_not" => (vec!["T", "bool clock"], "T on the clock"),
         "merge" => (vec!["bool clock", "T", "T"], "T"),
+        "activate" => (vec!["bool condition", "default", "F's inputs…"], "F's output"),
         "map" => (vec!["array(s)"], "array of F's output"),
+        "mapi" => (vec!["array(s)"], "array of F's output (F gets the index first)"),
         "fold" => (vec!["seed", "array"], "F's output"),
+        "foldi" => (vec!["seed", "array"], "F's output (F gets the index first)"),
         "mapfold" => (vec!["seed", "array"], "(accumulator, array)"),
         "if_then_else" => (vec!["bool", "T", "T"], "T"),
         "bit_and" | "bit_or" | "bit_xor" => (n("integer"), "integer"),
@@ -3158,6 +3167,9 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             OpDef { id: "merge", label: "merge (join clocked streams)", pins: 3, out_type: "int32",
                     param: None, enabled: true,
                     hint: "pin 1 = bool clock, pin 2 = stream when true, pin 3 = stream when false" },
+            OpDef { id: "activate", label: "activate (run F every cond)", pins: 2, out_type: "int32",
+                    param: Some("operator"), enabled: true,
+                    hint: "condition + default + the conditioned operator F's inputs; F runs only while the condition holds (its state freezes off-cycles)" },
         ]),
         ("Choice", vec![
             op("if_then_else", "if / then / else", 3, "int32"),
@@ -3181,9 +3193,15 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             OpDef { id: "map", label: "map(F)", pins: 1, out_type: "int32",
                     param: Some("iterator"), enabled: true,
                     hint: "apply a function element-wise across array(s) → array" },
+            OpDef { id: "mapi", label: "mapi(F)", pins: 1, out_type: "int32",
+                    param: Some("iterator"), enabled: true,
+                    hint: "indexed: F(k, elem…) — apply a function element-wise across array(s) → array" },
             OpDef { id: "fold", label: "fold(F)", pins: 2, out_type: "int32",
                     param: Some("iterator"), enabled: true,
                     hint: "reduce an array to a scalar: acc = F(acc, element)" },
+            OpDef { id: "foldi", label: "foldi(F)", pins: 2, out_type: "int32",
+                    param: Some("iterator"), enabled: true,
+                    hint: "indexed: F(k, acc, elem) — reduce an array to a scalar: acc = F(acc, element)" },
             OpDef { id: "mapfold", label: "mapfold(F)", pins: 2, out_type: "int32",
                     param: Some("iterator"), enabled: true,
                     hint: "fold and map in one pass: (acc, elem_out) = F(acc, elem) — param `F:N`" },
@@ -3384,28 +3402,57 @@ fn resolve_iterator_drop(
         return Err(format!("`{f_name}` must have exactly one output"));
     }
     let out_elem = f.outputs[0].ty.clone();
-    if op_id == "map" {
-        let k = f.inputs.len();
+    if op_id == "map" || op_id == "mapi" {
+        // mapi's F takes the element index first — the index is implicit at
+        // the block level, so it contributes no pin.
+        let idx = (op_id == "mapi") as usize;
+        let k = f.inputs.len().saturating_sub(idx);
         if k == 0 {
-            return Err(format!("`{f_name}` has no inputs to map over"));
+            return Err(format!("`{f_name}` has no array inputs to {op_id} over"));
         }
         let n: u32 = len_opt
             .and_then(|s| s.parse().ok())
-            .ok_or("map needs the array length, e.g. `Scale:4`")?;
+            .ok_or_else(|| format!("{op_id} needs the array length, e.g. `Scale:4`"))?;
         let pins: Vec<String> = (1..=k).map(|i| format!("p{eq_index}_{i}")).collect();
-        let body = format!("map({f_name}, {})", pins.join(", "));
+        let body = format!("{op_id}({f_name}, {})", pins.join(", "));
         Ok((pins, body, vec![ol_ir::Type::Array { elem: Box::new(out_elem), len: n }]))
     } else {
-        // fold(F, seed, array): F is (accumulator, element) -> accumulator.
-        if f.inputs.len() != 2 {
+        // fold(F, seed, array): F is (accumulator, element) -> accumulator;
+        // foldi's F takes (index, accumulator, element).
+        let want = if op_id == "foldi" { 3 } else { 2 };
+        if f.inputs.len() != want {
             return Err(format!(
-                "fold needs `{f_name}` to take two inputs (accumulator, element)"
+                "{op_id} needs `{f_name}` to take {want} inputs ({}accumulator, element)",
+                if op_id == "foldi" { "index, " } else { "" }
             ));
         }
         let pins = vec![format!("p{eq_index}_1"), format!("p{eq_index}_2")];
-        let body = format!("fold({f_name}, {}, {})", pins[0], pins[1]);
+        let body = format!("{op_id}({f_name}, {}, {})", pins[0], pins[1]);
         Ok((pins, body, vec![out_elem]))
     }
+}
+
+/// Drop an `activate` block: `activate(F, cond, default, args…)` runs the
+/// named operator only while `cond` holds. Pins: the condition, the
+/// off-cycle default, then one per input of `F`; the result type is `F`'s
+/// single output.
+fn resolve_activate_drop(
+    project: &ol_ir::Project,
+    param: Option<&str>,
+    eq_index: usize,
+) -> Result<(Vec<String>, String, Vec<ol_ir::Type>), String> {
+    let f_name = param.ok_or("activate needs the conditioned operator's name")?.trim();
+    let f = project
+        .find_node(f_name)
+        .ok_or_else(|| format!("unknown operator `{f_name}`"))?;
+    if f.outputs.len() != 1 {
+        return Err(format!("`{f_name}` must have exactly one output to activate"));
+    }
+    let out_ty = f.outputs[0].ty.clone();
+    let pins: Vec<String> =
+        (1..=f.inputs.len() + 2).map(|k| format!("p{eq_index}_{k}")).collect();
+    let body = format!("activate({f_name}, {})", pins.join(", "));
+    Ok((pins, body, vec![out_ty]))
 }
 
 /// Drop a predefined operation onto a node's canvas at (x, y): a fresh typed
@@ -3478,8 +3525,13 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Some(n) => n.equations.len(),
         None => return bad(&format!("node `{host_name}` not found")),
     };
-    let (_pins, body_text, out_tys) = if op_id == "map" || op_id == "fold" || op_id == "mapfold" {
+    let (_pins, body_text, out_tys) = if ["map", "fold", "mapfold", "mapi", "foldi"].contains(&op_id.as_str()) {
         match resolve_iterator_drop(&project, &op_id, param.as_deref(), eq_index) {
+            Ok(v) => v,
+            Err(e) => return bad(&e),
+        }
+    } else if op_id == "activate" {
+        match resolve_activate_drop(&project, param.as_deref(), eq_index) {
             Ok(v) => v,
             Err(e) => return bad(&e),
         }

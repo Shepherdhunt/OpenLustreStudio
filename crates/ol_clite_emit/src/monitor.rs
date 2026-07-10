@@ -167,6 +167,7 @@ impl MonScope {
 
 fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
     match expr {
+        Expr::Last { .. } => "0 /* unreachable: unlowered last */".into(),
         Expr::Const { lit: Literal::Bool { value } } => if *value { "true" } else { "false" }.into(),
         Expr::Const { lit: Literal::Int { value } } => format!("({value})"),
         Expr::Const { lit: Literal::Float { value } } => format!("({value})"),

@@ -19,7 +19,7 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
         Expr::Var { name } => {
             out.insert(name.clone());
         }
-        Expr::Const { .. } | Expr::Pre { .. } => {}
+        Expr::Const { .. } | Expr::Pre { .. } | Expr::Last { .. } => {}
         Expr::Unary { arg, .. } | Expr::Cast { arg, .. } | Expr::Field { base: arg, .. } => {
             same_cycle_reads(arg, out)
         }

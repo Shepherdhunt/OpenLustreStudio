@@ -221,7 +221,7 @@ pub fn infer_clocks(node: &NodeDef) -> ClockInfo {
 /// child. `None` means clock-polymorphic (constants, unknown names).
 fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clock> {
     match expr {
-        Expr::Var { name } => var_clocks.get(name).cloned(),
+        Expr::Var { name } | Expr::Last { name } => var_clocks.get(name).cloned(),
         Expr::Const { .. } => None,
         Expr::When { arg, clock, on } => {
             let parent = natural_clock(arg, var_clocks)
@@ -289,7 +289,7 @@ fn check_expr(
 ) {
     match expr {
         Expr::Const { .. } => {}
-        Expr::Var { name } => {
+        Expr::Var { name } | Expr::Last { name } => {
             // Unknown names (constants, enum variants, unbound pins) are
             // clock-polymorphic; the typechecker already reports unknowns.
             if let Some(ck) = var_clocks.get(name) {

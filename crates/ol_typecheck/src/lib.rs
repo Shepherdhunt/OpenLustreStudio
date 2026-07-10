@@ -510,6 +510,7 @@ fn check_pre_initialization(
     ctx: &str,
 ) {
     match expr {
+        Expr::Last { .. } => {}
         Expr::Pre { arg } => {
             if !under_arrow_body {
                 diags.push(
@@ -626,6 +627,19 @@ pub fn infer_expr_type(
     hint: Option<&Type>,
 ) -> Option<Type> {
     match expr {
+        Expr::Last { name } => {
+            diags.push(
+                Diagnostic::error(
+                    "E0180",
+                    format!(
+                        "`last {name}` is only allowed inside a state machine — \
+                         it resolves to the previous cycle's value when the machine lowers"
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
+            None
+        }
         Expr::Const { lit } => Some(match lit {
             Literal::Bool { .. } => Type::Bool,
             Literal::Int { value } => integer_literal_type(*value, hint, tctx),
@@ -1401,6 +1415,8 @@ fn infer_iterator_type(
         IterKind::Map => "map",
         IterKind::Fold => "fold",
         IterKind::MapFold => "mapfold",
+        IterKind::Mapi => "mapi",
+        IterKind::Foldi => "foldi",
     };
 
     let Some((f_inputs, f_outputs, f_kind)) = sigs.get(f_name) else {
@@ -1426,6 +1442,9 @@ fn infer_iterator_type(
         return None;
     }
     let want_outputs = if kind == IterKind::MapFold { 2 } else { 1 };
+    // Indexed iterators pass the element index (an integer, 0-based) as F's
+    // FIRST input; every rule below then applies to the remaining inputs.
+    let indexed = matches!(kind, IterKind::Mapi | IterKind::Foldi);
     if f_outputs.len() != want_outputs {
         diags.push(
             Diagnostic::error(
@@ -1438,6 +1457,28 @@ fn infer_iterator_type(
             .with_context(ctx.to_string()),
         );
         return None;
+    }
+    if indexed {
+        let ok = f_inputs.first().map(|p| {
+            matches!(
+                tctx.resolve(&p.ty),
+                Type::Int8 | Type::Int16 | Type::Int32 | Type::Int64
+                    | Type::Uint8 | Type::Uint16 | Type::Uint32 | Type::Uint64
+            )
+        });
+        if ok != Some(true) {
+            diags.push(
+                Diagnostic::error(
+                    "E0145",
+                    format!(
+                        "{iter}: `{f_name}`'s first input receives the element index \
+                         and must be an integer type"
+                    ),
+                )
+                .with_context(ctx.to_string()),
+            );
+            return None;
+        }
     }
     let f_out = f_outputs[0].ty.clone();
 
@@ -1478,22 +1519,24 @@ fn infer_iterator_type(
     let n = lengths.first().copied().unwrap_or(0);
 
     match kind {
-        IterKind::Map => {
-            if f_inputs.len() != arrays.len() {
+        IterKind::Map | IterKind::Mapi => {
+            let idx = if indexed { 1 } else { 0 };
+            if f_inputs.len() != arrays.len() + idx {
                 diags.push(
                     Diagnostic::error(
                         "E0145",
                         format!(
-                            "map: `{f_name}` takes {} input(s) but {} array(s) were given",
+                            "{iter}: `{f_name}` takes {} input(s) but {} array(s) were given{}",
                             f_inputs.len(),
-                            arrays.len()
+                            arrays.len(),
+                            if indexed { " (plus the index input)" } else { "" }
                         ),
                     )
                     .with_context(ctx.to_string()),
                 );
                 return None;
             }
-            for (i, (p, e)) in f_inputs.iter().zip(elems.iter()).enumerate() {
+            for (i, (p, e)) in f_inputs[idx..].iter().zip(elems.iter()).enumerate() {
                 if !types_compatible(tctx, &p.ty, e) {
                     diags.push(
                         Diagnostic::error(
@@ -1511,27 +1554,33 @@ fn infer_iterator_type(
             }
             Some(Type::Array { elem: Box::new(f_out), len: n })
         }
-        IterKind::Fold => {
-            // fold(F, init, a): F is (accumulator, element) -> accumulator.
-            if f_inputs.len() != 2 {
+        IterKind::Fold | IterKind::Foldi => {
+            // fold(F, init, a): F is (accumulator, element) -> accumulator;
+            // foldi prepends the element index: (index, accumulator, element).
+            let idx = if indexed { 1 } else { 0 };
+            if f_inputs.len() != 2 + idx {
                 diags.push(
                     Diagnostic::error(
                         "E0145",
-                        format!("fold: `{f_name}` must take exactly two inputs (accumulator, element)"),
+                        format!(
+                            "{iter}: `{f_name}` must take exactly {} inputs ({}accumulator, element)",
+                            2 + idx,
+                            if indexed { "index, " } else { "" }
+                        ),
                     )
                     .with_context(ctx.to_string()),
                 );
                 return None;
             }
-            let acc_ty = f_inputs[0].ty.clone();
-            let elem_ty = f_inputs[1].ty.clone();
+            let acc_ty = f_inputs[idx].ty.clone();
+            let elem_ty = f_inputs[idx + 1].ty.clone();
             // The accumulator type must thread: in, out, and the seed agree.
             if !types_compatible(tctx, &acc_ty, &f_out) {
                 diags.push(
                     Diagnostic::error(
                         "E0145",
                         format!(
-                            "fold: `{f_name}`'s accumulator input {acc_ty:?} and output {f_out:?} \
+                            "{iter}: `{f_name}`'s accumulator input {acc_ty:?} and output {f_out:?} \
                              must be the same type"
                         ),
                     )
@@ -1548,7 +1597,7 @@ fn infer_iterator_type(
                             Diagnostic::error(
                                 "E0145",
                                 format!(
-                                    "fold: seed has type {seed_ty:?} but `{f_name}`'s accumulator \
+                                    "{iter}: seed has type {seed_ty:?} but `{f_name}`'s accumulator \
                                      is {acc_ty:?}"
                                 ),
                             )
@@ -1564,7 +1613,7 @@ fn infer_iterator_type(
                         Diagnostic::error(
                             "E0145",
                             format!(
-                                "fold: array element type {e:?} but `{f_name}` expects {elem_ty:?}"
+                                "{iter}: array element type {e:?} but `{f_name}` expects {elem_ty:?}"
                             ),
                         )
                         .with_context(ctx.to_string()),
@@ -1851,7 +1900,7 @@ fn dfs(
 
 fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
     match expr {
-        Expr::Const { .. } => {}
+        Expr::Const { .. } | Expr::Last { .. } => {}
         Expr::Var { name } => {
             out.insert(name.clone());
         }
