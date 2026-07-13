@@ -199,3 +199,7 @@ path = "fixed_point.rs"
 [[test]]
 name = "cruise_control"
 path = "cruise_control.rs"
+
+[[test]]
+name = "fuzz_sim"
+path = "fuzz_sim.rs"

@@ -327,6 +327,7 @@
       <div class="mi" onclick="showDock('simulation')">Simulation</div>
       <div class="mi" onclick="showDock('tests')">Tests</div>
       <div class="mi" onclick="showDock('verify')">Verify</div>
+      <div class="mi" onclick="showDock('fuzz'); fuzzSync()">Fuzz</div>
     </div>
   </div>
   <div class="menu" data-menu="simulation">
@@ -338,6 +339,7 @@
       <div class="mi disabled" id="mi-sim-stop" onclick="simStop()">Stop / Reset</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-csv')">Run CSV Vector…</div>
+      <div class="mi" onclick="showDock('fuzz'); fuzzSync()">Fuzz Simulation…</div>
     </div>
   </div>
   <div class="menu" data-menu="code">
@@ -403,6 +405,7 @@
     <span class="dock-tab" data-dock="simulation" onclick="showDock('simulation')">Simulation</span>
     <span class="dock-tab" data-dock="tests" onclick="showDock('tests'); loadTests()">Tests</span>
     <span class="dock-tab" data-dock="verify" onclick="showDock('verify')">Verify</span>
+    <span class="dock-tab" data-dock="fuzz" onclick="showDock('fuzz'); fuzzSync()">Fuzz</span>
     <span class="dock-tab" data-dock="build" onclick="showDock('build')">Build</span>
   </div>
   <div class="dock-body">
@@ -465,6 +468,33 @@
         <span class="build-note" id="verify-status"></span>
       </div>
       <div id="verify-results"></div>
+    </div>
+    <div class="dock-pane" id="dock-fuzz" style="display:none">
+      <p style="margin:4px 0">Fuzzing <strong id="fuzz-entry-name">main</strong> — pseudo-random,
+        type-aware values on the checked inputs (the rest hold their defaults); every cycle is
+        checked for crashes, contract violations, non-finite values, and your error predicates.
+        Equal seeds reproduce runs exactly.</p>
+      <div class="row">
+        inputs: <span id="fuzz-inputs"></span>
+      </div>
+      <div class="row">
+        cycles/run <input id="fuzz-cycles" type="number" value="25" min="1" style="width:64px">
+        runs <input id="fuzz-iterations" type="number" value="200" min="1" style="width:74px">
+        seed <input id="fuzz-seed" type="text" placeholder="random" style="width:100px"
+                    title="Leave blank for a fresh random seed; the used seed fills in after the run so it can be replayed">
+        <button class="primary" onclick="fuzzRun()">Run Fuzz</button>
+        <span class="build-note" id="fuzz-status"></span>
+      </div>
+      <div class="row">
+        error predicates: <span id="fuzz-preds"><span class="build-note">none</span></span>
+      </div>
+      <div class="row">
+        <input id="fuzz-pred-name" placeholder="name (optional)" style="width:130px">
+        <input id="fuzz-pred-expr" placeholder="boolean expression over inputs/outputs/locals, e.g. speed > 200"
+               style="width:320px" onkeydown="if(event.key==='Enter')fuzzAddPred()">
+        <button onclick="fuzzAddPred()">Add predicate</button>
+      </div>
+      <div id="fuzz-results"></div>
     </div>
   </div>
 </div>
@@ -754,6 +784,9 @@ const state = {
   // The state machine currently open for editing in dlg-fsm (its original
   // name), or null when creating a new one.
   fsmEditing: null,
+  // Fuzz tab: user error predicates, the un-checked inputs (checked is the
+  // default), and the last run's findings (kept for replay buttons).
+  fuzz: { predicates: [], unchecked: {}, findings: [] },
 };
 
 async function fetchJSON(p) { const r = await fetch(p); return r.ok ? r.json() : Promise.reject(await r.text()); }
@@ -3585,6 +3618,143 @@ async function replayCex(idx) {
     " (" + p.cex_inputs.rows.length + " cycle(s); step to continue past it)");
 }
 
+// --- Fuzz simulation ---------------------------------------------------------------
+
+/// Sync the Fuzz tab to the current entry operator: its name and one checkbox
+/// per input (checked = fuzzed; unchecked inputs hold their defaults).
+function fuzzSync() {
+  const e = entryNode();
+  document.getElementById("fuzz-entry-name").textContent = e ? e.name : "(no main operator)";
+  const host = document.getElementById("fuzz-inputs");
+  if (!e || !e.inputs.length) {
+    host.innerHTML = '<span class="build-note">' +
+      (e ? "no inputs — only cycle behavior is explored" : "set a main operator first") + "</span>";
+  } else {
+    host.innerHTML = e.inputs.map(p =>
+      '<label style="margin-right:10px"><input type="checkbox" data-fuzz-input="' + escapeAttr(p.name) + '"' +
+      (state.fuzz.unchecked[p.name] ? "" : " checked") +
+      ' onchange="state.fuzz.unchecked[this.dataset.fuzzInput] = !this.checked"> ' +
+      escapeHTML(p.name) + ' <span class="build-note">: ' + escapeHTML(typeName(p.type)) + "</span></label>"
+    ).join("");
+  }
+  fuzzRenderPreds();
+}
+
+function fuzzRenderPreds() {
+  const host = document.getElementById("fuzz-preds");
+  if (!state.fuzz.predicates.length) {
+    host.innerHTML = '<span class="build-note">none — crashes, contract violations, and non-finite values are always detected</span>';
+    return;
+  }
+  host.innerHTML = state.fuzz.predicates.map((p, i) =>
+    '<code class="inline">' + escapeHTML(p.name) + ": " + escapeHTML(p.expr) + "</code> " +
+    '<button onclick="fuzzRemovePred(' + i + ')" title="remove">✕</button> '
+  ).join("");
+}
+
+function fuzzAddPred() {
+  const expr = document.getElementById("fuzz-pred-expr").value.trim();
+  if (!expr) return;
+  const name = document.getElementById("fuzz-pred-name").value.trim() || expr;
+  state.fuzz.predicates.push({ name, expr });
+  document.getElementById("fuzz-pred-name").value = "";
+  document.getElementById("fuzz-pred-expr").value = "";
+  fuzzRenderPreds();
+}
+
+function fuzzRemovePred(i) {
+  state.fuzz.predicates.splice(i, 1);
+  fuzzRenderPreds();
+}
+
+async function fuzzRun() {
+  const e = entryNode();
+  if (!e) {
+    document.getElementById("fuzz-status").textContent = "no main operator to fuzz";
+    return;
+  }
+  const inputs = e.inputs.map(p => p.name).filter(n => !state.fuzz.unchecked[n]);
+  const body = {
+    inputs,
+    cycles: parseInt(document.getElementById("fuzz-cycles").value, 10) || 25,
+    iterations: parseInt(document.getElementById("fuzz-iterations").value, 10) || 200,
+    predicates: state.fuzz.predicates,
+  };
+  const seedRaw = document.getElementById("fuzz-seed").value.trim();
+  if (seedRaw) body.seed = parseInt(seedRaw, 10) >>> 0;
+  document.getElementById("fuzz-status").textContent = "fuzzing…";
+  const r = await fetch("/api/fuzz", { method: "POST", body: JSON.stringify(body) });
+  const text = await r.text();
+  let data;
+  try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
+  const host = document.getElementById("fuzz-results");
+  document.getElementById("fuzz-status").textContent = "";
+  if (data.error) {
+    host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    return;
+  }
+  // The used seed fills the box, so re-running reproduces this exact run.
+  document.getElementById("fuzz-seed").value = data.seed;
+  state.fuzz.findings = data.findings || [];
+  const ran = data.iterations_run + " run(s), " + data.total_cycles + " cycle(s), seed " + data.seed;
+  const note = (data.unfuzzable_inputs || []).length
+    ? ' <span class="build-note">held (no CSV form): ' + escapeHTML(data.unfuzzable_inputs.join(", ")) + "</span>"
+    : "";
+  if (data.clean) {
+    host.innerHTML = '<div class="diag severity-Info">CLEAN — no crashes, contract violations, ' +
+      "non-finite values, or predicate hits (" + ran + ")</div>" + note;
+    return;
+  }
+  let html = '<div class="diag severity-Error">' + state.fuzz.findings.length +
+    " finding(s) — " + ran + "</div>" + note;
+  html += "<table><thead><tr><th>kind</th><th>detail</th><th>first seen</th><th>hits</th>" +
+    "<th>outputs at failure</th><th></th></tr></thead><tbody>";
+  state.fuzz.findings.forEach((f, i) => {
+    const outs = (f.outputs || []).map(kv => kv[0] + "=" + kv[1]).join(", ");
+    html += "<tr><td>" + escapeHTML(f.kind.replace("_", " ")) +
+      '</td><td class="severity-Error">' + escapeHTML(f.detail) +
+      "</td><td>run " + f.iteration + ", cycle " + f.cycle +
+      "</td><td>" + f.occurrences +
+      "</td><td>" + escapeHTML(outs) +
+      '</td><td><button onclick="replayFuzz(' + i + ')" ' +
+      'title="Load this finding\'s inputs into the watch table and step to the failure">▶ Replay in simulator</button></td></tr>';
+  });
+  html += "</tbody></table>";
+  host.innerHTML = html;
+}
+
+/// Step a fuzz finding's recorded inputs through the simulator — the same
+/// watch-table replay a Kind 2 counterexample gets.
+async function replayFuzz(idx) {
+  const f = state.fuzz.findings[idx];
+  if (!f || !f.inputs) return;
+  const e = entryNode();
+  if (!e) {
+    setSimStatus("no main operator to replay into");
+    showDock("simulation");
+    return;
+  }
+  const inputNames = new Set(e.inputs.map(x => x.name));
+  const cols = f.inputs.columns;
+  if (!cols.every(c => inputNames.has(c))) {
+    setSimStatus("finding's inputs don't match the main operator (" + cols.join(", ") + ")");
+    showDock("simulation");
+    return;
+  }
+  state.sim.built = true; // the fuzzer just consumed the model — it builds
+  simRun();
+  let crashed = false;
+  for (const row of f.inputs.rows) {
+    cols.forEach((c, i) => { state.sim.values[c] = row[i]; });
+    buildWatchTable();
+    crashed = (await stepOnce()) === false;
+  }
+  setSimStatus("SIMULATION RUNNING — replayed fuzz finding [" + f.kind.replace("_", " ") + "] " +
+    f.detail + " (" + f.inputs.rows.length + " cycle(s); " +
+    (crashed ? "the last row crashes the interpreter — the finding, reproduced)"
+             : "the failure fires on the last row)"));
+}
+
 // --- Types: the SCADE-style types file --------------------------------------------
 
 async function loadTypes() {
@@ -4732,8 +4902,19 @@ async function stepOnce() {
   state.stepHistory += cells.join(",") + "\n";
   const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
   const trace = await r.text();
+  if (!r.ok) {
+    // This row crashes the interpreter (division by zero, overflow, …).
+    // Keep the last good trace on screen, surface the crash, and drop the
+    // fatal row from the history so a corrected value can step again.
+    state.stepHistory = state.stepHistory.split("\n").slice(0, -2).join("\n") + "\n";
+    setSimStatus("CRASH at cycle " + document.getElementById("step-cycle").textContent +
+      " — " + trace.trim());
+    showDock("simulation");
+    return false;
+  }
   updateWatchComputed(trace);
   renderStepTrace(trace);
+  return true;
 }
 
 function renderStepTrace(csv) {

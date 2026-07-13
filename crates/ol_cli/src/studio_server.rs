@@ -307,6 +307,10 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
+        ("POST", "/api/fuzz") => match fuzz_run(ctx, body) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
         ("GET", "/api/fsm") => match fsm_get(ctx, &parse_query(query)) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -1551,6 +1555,99 @@ fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
             "name": name,
             "golden": path.display().to_string(),
         })).collect::<Vec<_>>(),
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+// --- Fuzz simulation ---------------------------------------------------------
+
+/// Run the type-aware fuzzer (`ol_sim::fuzz`) against an operator and return
+/// the findings as JSON. Each finding ships its input trace in the same
+/// `{columns, rows}` shape as a Kind 2 counterexample's `cex_inputs`, so the
+/// Fuzz tab replays it through the watch table with the same machinery.
+fn fuzz_run(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct PredicateReq {
+        name: String,
+        expr: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct FuzzReq {
+        #[serde(default)]
+        node: Option<String>,
+        #[serde(default)]
+        inputs: Vec<String>,
+        #[serde(default)]
+        cycles: Option<usize>,
+        #[serde(default)]
+        iterations: Option<usize>,
+        #[serde(default)]
+        seed: Option<u64>,
+        #[serde(default)]
+        max_findings: Option<usize>,
+        #[serde(default)]
+        predicates: Vec<PredicateReq>,
+        #[serde(default)]
+        held: std::collections::BTreeMap<String, String>,
+    }
+    let req: FuzzReq = serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+
+    let project = load(ctx)?;
+    let node = match req.node {
+        Some(n) => n,
+        None => project.main.clone().ok_or_else(|| "project has no `main` node".to_string())?,
+    };
+
+    let mut predicates = Vec::new();
+    for p in &req.predicates {
+        let name = if p.name.trim().is_empty() { p.expr.clone() } else { p.name.clone() };
+        let expr = ol_stdlib::parse_expr(&p.expr)
+            .map_err(|e| format!("error predicate `{name}` does not parse: {e}"))?;
+        predicates.push(ol_sim::fuzz::FuzzPredicate { name, expr });
+    }
+
+    let seed = req.seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64
+    });
+    let cfg = ol_sim::fuzz::FuzzConfig {
+        fuzz_inputs: req.inputs,
+        cycles: req.cycles.unwrap_or(25).min(10_000),
+        iterations: req.iterations.unwrap_or(200).min(100_000),
+        seed,
+        predicates,
+        held: req.held,
+        max_findings: req.max_findings.unwrap_or(10),
+    };
+    let report = ol_sim::fuzz::fuzz_node(&project, &node, &cfg).map_err(|e| e.to_string())?;
+
+    let findings: Vec<serde_json::Value> = report
+        .findings
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "kind": f.kind.as_str(),
+                "detail": f.detail,
+                "iteration": f.iteration,
+                "cycle": f.cycle,
+                "occurrences": f.occurrences,
+                "outputs": f.outputs,
+                "inputs": { "columns": f.columns, "rows": f.rows },
+            })
+        })
+        .collect();
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "node": report.node,
+        "fuzzed_inputs": report.fuzzed_inputs,
+        "unfuzzable_inputs": report.unfuzzable_inputs,
+        "iterations_run": report.iterations_run,
+        "total_cycles": report.total_cycles,
+        "seed": report.seed,
+        "clean": report.clean(),
+        "findings": findings,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }

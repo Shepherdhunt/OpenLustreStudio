@@ -13,6 +13,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+pub mod fuzz;
+
 use ol_contract_ir::{parse_contracts, ContractDef};
 use ol_ir::{BinOp, Expr, IterKind, Literal, NodeDef, NodeKind, Project, Type, TypeBody, UnaryOp};
 
@@ -1530,6 +1532,12 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         (BinOp::Mul, Int(a), Int(b)) => Int(a * b),
         (BinOp::Div, Int(a), Int(b)) if b != 0 => Int(a / b),
         (BinOp::Mod, Int(a), Int(b)) if b != 0 => Int(a % b),
+        (BinOp::Div, Int(_), Int(0)) => {
+            return Err(SimError::EvalError("integer division by zero".into()))
+        }
+        (BinOp::Mod, Int(_), Int(0)) => {
+            return Err(SimError::EvalError("modulo by zero".into()))
+        }
         (BinOp::BitAnd, Int(a), Int(b)) => Int(a & b),
         (BinOp::BitOr, Int(a), Int(b)) => Int(a | b),
         (BinOp::BitXor, Int(a), Int(b)) => Int(a ^ b),
@@ -1539,6 +1547,9 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
         (BinOp::Mul, Float(a), Float(b)) => Float(a * b),
         (BinOp::Div, Float(a), Float(b)) if b != 0.0 => Float(a / b),
+        (BinOp::Div, Float(_), Float(b)) if b == 0.0 => {
+            return Err(SimError::EvalError("float division by zero".into()))
+        }
         // --- Fixed-point: integer ops on the stored value (same format on both
         // sides is guaranteed by the type checker). Eq/Neq are handled by the
         // generic value-equality arms above. ---------------------------------
@@ -1570,6 +1581,9 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         // identical to the generated `(intN)(((int64_t)a << frac) / b)`.
         (BinOp::Div, Fixed { stored: a, signed, bits, frac }, Fixed { stored: b, .. }) if b != 0 => {
             Fixed { stored: narrow_fixed(signed, bits, a.wrapping_shl(frac) / b), signed, bits, frac }
+        }
+        (BinOp::Div | BinOp::SatDiv, Fixed { .. }, Fixed { stored: 0, .. }) => {
+            return Err(SimError::EvalError("fixed-point division by zero".into()))
         }
         // Saturating ops: same i64 intermediate as their plain counterparts, then
         // clamp to the type's [min,max] (no wrap). The bound comes from the shared

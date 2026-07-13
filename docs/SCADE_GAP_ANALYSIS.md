@@ -12,8 +12,8 @@ cannot code your way to a qualification certificate), and prioritizes the former
 ## 0. Status snapshot — resume here
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
-`main`). **Full check**: `cargo test --workspace --no-fail-fast` (67 result
-groups green as of 2026-07-10 on Linux/gcc; 56 groups were green 2026-06-16
+`main`). **Full check**: `cargo test --workspace --no-fail-fast` (70 result
+groups green as of 2026-07-13 on Linux/gcc; 56 groups were green 2026-06-16
 on Windows/MSVC) plus `openlustre lib-check libraries` (52 blocks / 48
 contracts) — the workspace builds with zero warnings across all targets. The Studio GUI is one embedded
 HTML page, `crates/ol_cli/src/studio_ui.html`, served by
@@ -42,7 +42,30 @@ emulated-target backend** (`clite-emulate`, user-mode + full-system arm64 —
 needs a Docker host to verify), and the **per-target integration entry
 skeleton**.
 
-**Landed recently (newest first):** **Generics round (2026-07-10):** the
+**Landed recently (newest first):** **Fuzz Simulation (2026-07-13):** the
+recorded backlog item, landed. `ol_sim::fuzz` drives the same interpreter the
+watch table uses with pseudo-random, **type-aware** inputs on user-selected
+ports (sticky values so machine guards actually fire; boundary-heavy menus
+per width; enums only draw declared variants; record inputs have no CSV form
+so they hold defaults and are reported as unfuzzable). Every cycle — through
+every suboperator the root executes — is checked for **crashes** (evaluation
+errors and caught interpreter panics, e.g. debug-build overflow; divide by
+zero now reports itself as such), **contract violations** (the trace
+monitor), **non-finite** outputs/locals, and **user error predicates**
+(boolean expressions over inputs/outputs/locals; `pre`/`->` allowed with
+equation semantics, one state per predicate per run). Findings deduplicate by
+kind+detail; the first occurrence carries a replayable `{columns, rows}`
+input trace (the Kind 2 counterexample shape); runs are **deterministic per
+seed**. Three surfaces: `openlustre fuzz` (exit 1 on findings, replay CSV
+printed), `POST /api/fuzz`, and the Studio **Fuzz dock tab** — typed input
+checkboxes, predicate list, a seed box that back-fills after the run so it
+reproduces, findings table with **▶ Replay in simulator** stepping the watch
+table to the failure (a crashing row now reports `CRASH at cycle N` in the
+stepper instead of blanking the trace). Verified by 8 engine tests, an
+`/api/fuzz` API test, and an 11-check Playwright browser run (tab sync,
+checkboxes, predicate add, planted div-by-zero + predicate findings, seed
+back-fill, replay to the reproduced crash, browse-dialog smoke). Before
+that: **Generics round (2026-07-10):** the
 deepest language gap — **type- and size-generic operators** — closed via
 **per-call-site monomorphization**. Ports (and locals) may now be typed
 `'T` (a type variable, optionally constrained: `'T: numeric | integer |

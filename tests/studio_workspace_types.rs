@@ -968,3 +968,77 @@ fn dropping_a_block_creates_a_placed_call_with_red_pins_then_binds() {
         r#"{"node":"Press","callee":"NoSuchBlock","x":0,"y":0}"#).unwrap();
     assert_eq!(s, 400);
 }
+
+// --- Fuzz simulation: /api/fuzz ----------------------------------------------
+
+/// The fuzzer finds a planted division-by-zero, ships a replayable input
+/// trace in the counterexample shape (`{columns, rows}`), reports user
+/// predicates, is deterministic per seed, and rejects bad predicates loudly.
+#[test]
+fn fuzz_endpoint_finds_planted_bugs_with_replayable_traces() {
+    let g = start_server_on_workspace("ws_fuzz");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Ratio","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"input","name":"num","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"input","name":"den","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"output","name":"q","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Ratio","lhs":"q","body":"num / den"}"#);
+    post_ok(port, "/api/edit/set_main", r#"{"main":"Ratio"}"#);
+
+    let run = r#"{"seed":7,"cycles":10,"iterations":50}"#;
+    let (s, body) = request(port, "POST", "/api/fuzz", run).unwrap();
+    assert_eq!(s, 200, "{body}");
+    let rep: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rep["node"], "Ratio", "{rep}");
+    assert_eq!(rep["clean"], false, "{rep}");
+    assert_eq!(rep["seed"], 7, "{rep}");
+    let findings = rep["findings"].as_array().unwrap();
+    let crash = findings
+        .iter()
+        .find(|f| f["kind"] == "crash")
+        .expect("division by zero surfaces");
+    assert!(
+        crash["detail"].as_str().unwrap().contains("division by zero"),
+        "{crash}"
+    );
+    // The trace is replay-shaped: every input column, rows up to the failing
+    // cycle, and the failing row's divisor is the fatal 0.
+    assert_eq!(crash["inputs"]["columns"], serde_json::json!(["num", "den"]));
+    let rows = crash["inputs"]["rows"].as_array().unwrap();
+    let cycle = crash["cycle"].as_u64().unwrap() as usize;
+    assert_eq!(rows.len(), cycle + 1, "{crash}");
+    assert_eq!(rows[cycle][1], "0", "{crash}");
+
+    // Determinism: the same seed reproduces the same first finding.
+    let (_, body2) = request(port, "POST", "/api/fuzz", run).unwrap();
+    let rep2: serde_json::Value = serde_json::from_str(&body2).unwrap();
+    assert_eq!(rep["findings"], rep2["findings"], "same seed, same findings");
+
+    // A user error predicate fires and names itself.
+    let with_pred = r#"{"seed":3,"cycles":10,"iterations":40,
+        "predicates":[{"name":"quotient spike","expr":"q > 1000"}],
+        "inputs":["num"],"held":{"den":"1"}}"#;
+    let (s, body) = request(port, "POST", "/api/fuzz", with_pred).unwrap();
+    assert_eq!(s, 200, "{body}");
+    let rep: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(rep["fuzzed_inputs"], serde_json::json!(["num"]), "{rep}");
+    assert!(
+        rep["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["kind"] == "predicate" && f["detail"] == "quotient spike"),
+        "{rep}"
+    );
+
+    // Bad predicates are a 400 with the reason, not a silent no-op.
+    let bad = r#"{"predicates":[{"name":"broken","expr":"q +"}]}"#;
+    let (s, body) = request(port, "POST", "/api/fuzz", bad).unwrap();
+    assert_eq!(s, 400, "{body}");
+    assert!(body.contains("broken"), "{body}");
+    let nonbool = r#"{"predicates":[{"name":"nb","expr":"q + 1"}]}"#;
+    let (s, body) = request(port, "POST", "/api/fuzz", nonbool).unwrap();
+    assert_eq!(s, 400, "{body}");
+    assert!(body.contains("not boolean"), "{body}");
+}

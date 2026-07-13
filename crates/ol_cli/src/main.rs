@@ -212,6 +212,38 @@ enum Cmd {
     /// present and what functionality each one unlocks. The core tool needs
     /// none of them.
     Doctor,
+    /// Fuzz-simulate an operator: pseudo-random, type-aware inputs on the
+    /// selected ports, with automatic crash / contract-violation / non-finite
+    /// detection plus optional user error predicates. Deterministic per seed;
+    /// each finding prints the failing input trace as replayable CSV.
+    Fuzz {
+        model: PathBuf,
+        /// Operator to fuzz; defaults to the project's `main`.
+        #[arg(long)]
+        node: Option<String>,
+        /// Inputs to fuzz (repeat or comma-separate). Default: all fuzzable.
+        #[arg(long, value_name = "NAME", value_delimiter = ',')]
+        input: Vec<String>,
+        #[arg(long, default_value_t = 25)]
+        cycles: usize,
+        #[arg(long, default_value_t = 200)]
+        iterations: usize,
+        /// PRNG seed (equal seeds reproduce runs); default derives from time.
+        #[arg(long)]
+        seed: Option<u64>,
+        /// Error predicate `name=expr` (or a bare boolean expr), repeatable.
+        /// A predicate evaluating true at any cycle is a finding.
+        #[arg(long = "predicate", value_name = "NAME=EXPR")]
+        predicates: Vec<String>,
+        /// Pin a non-fuzzed input: `name=value` in CSV syntax, repeatable.
+        #[arg(long = "hold", value_name = "NAME=VALUE")]
+        holds: Vec<String>,
+        /// Stop after this many distinct findings (0 = no cap).
+        #[arg(long, default_value_t = 10)]
+        max_findings: usize,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -461,6 +493,29 @@ fn main() -> Result<()> {
             ),
         },
         Cmd::Doctor => cmd_doctor(),
+        Cmd::Fuzz {
+            model,
+            node,
+            input,
+            cycles,
+            iterations,
+            seed,
+            predicates,
+            holds,
+            max_findings,
+            with_stdlib,
+        } => cmd_fuzz(
+            &model,
+            node.as_deref(),
+            input,
+            cycles,
+            iterations,
+            seed,
+            &predicates,
+            &holds,
+            max_findings,
+            with_stdlib.as_deref(),
+        ),
     }
 }
 
@@ -1165,6 +1220,110 @@ fn doctor_report() -> String {
 fn cmd_doctor() -> Result<()> {
     print!("{}", doctor_report());
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_fuzz(
+    model: &Path,
+    node: Option<&str>,
+    inputs: Vec<String>,
+    cycles: usize,
+    iterations: usize,
+    seed: Option<u64>,
+    predicates: &[String],
+    holds: &[String],
+    max_findings: usize,
+    with_stdlib: Option<&Path>,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let node_name = node
+        .map(String::from)
+        .or_else(|| project.main.clone())
+        .context("no --node specified and project has no `main`")?;
+
+    let mut preds = Vec::new();
+    for raw in predicates {
+        // `name=expr`, or a bare expression that names itself. `=` can appear
+        // inside an expression only as `<=`/`>=`/`<>`, so the first bare `=`
+        // splits name from body; a split whose body doesn't parse falls back
+        // to treating the whole string as the expression.
+        let (name, body) = match raw.split_once('=') {
+            Some((n, b)) if !n.ends_with('<') && !n.ends_with('>') && !b.starts_with('=') => {
+                (n.trim().to_string(), b.trim().to_string())
+            }
+            _ => (raw.trim().to_string(), raw.trim().to_string()),
+        };
+        let expr = ol_stdlib::parse_expr(&body)
+            .map_err(|e| anyhow::anyhow!("predicate `{name}` does not parse: {e}"))?;
+        preds.push(ol_sim::fuzz::FuzzPredicate { name, expr });
+    }
+    let mut held = std::collections::BTreeMap::new();
+    for raw in holds {
+        let (name, value) = raw
+            .split_once('=')
+            .with_context(|| format!("--hold `{raw}`: expected name=value"))?;
+        held.insert(name.trim().to_string(), value.trim().to_string());
+    }
+
+    let seed = seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64
+    });
+    let cfg = ol_sim::fuzz::FuzzConfig {
+        fuzz_inputs: inputs,
+        cycles,
+        iterations,
+        seed,
+        predicates: preds,
+        held,
+        max_findings,
+    };
+    let report = ol_sim::fuzz::fuzz_node(&project, &node_name, &cfg)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    println!(
+        "fuzz: `{}` — {} iteration(s), {} cycle(s) run, seed {} (fuzzing {})",
+        report.node,
+        report.iterations_run,
+        report.total_cycles,
+        report.seed,
+        report.fuzzed_inputs.join(", "),
+    );
+    if !report.unfuzzable_inputs.is_empty() {
+        println!(
+            "note: held at default (no CSV form): {}",
+            report.unfuzzable_inputs.join(", ")
+        );
+    }
+    if report.clean() {
+        println!("fuzz: CLEAN — no crashes, violations, or predicate hits");
+        return Ok(());
+    }
+    for (i, f) in report.findings.iter().enumerate() {
+        println!(
+            "\nfinding #{n} [{kind}] {detail}\n  first at iteration {it}, cycle {cy}; seen {occ} time(s)",
+            n = i + 1,
+            kind = f.kind.as_str(),
+            detail = f.detail,
+            it = f.iteration,
+            cy = f.cycle,
+            occ = f.occurrences,
+        );
+        if !f.outputs.is_empty() {
+            let outs: Vec<String> =
+                f.outputs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+            println!("  outputs at failure: {}", outs.join(", "));
+        }
+        println!("  replay CSV:");
+        println!("    {}", f.columns.join(","));
+        for row in &f.rows {
+            println!("    {}", row.join(","));
+        }
+    }
+    eprintln!("\nfuzz: {} finding(s)", report.findings.len());
+    std::process::exit(1);
 }
 fn cmd_prove(
     model: &Path,
