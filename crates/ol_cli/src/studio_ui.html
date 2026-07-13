@@ -336,6 +336,11 @@
       <div class="mi" id="mi-sim-build" onclick="pipeBuild()">Build Model</div>
       <div class="mi" id="mi-sim-run" onclick="pipeSimulate()">Run</div>
       <div class="mi disabled" id="mi-sim-step" onclick="simStep()">Step <span class="shortcut">active while running</span></div>
+      <div class="mi disabled" id="mi-sim-step5" onclick="simStepN(5)">Step ×5</div>
+      <div class="mi disabled" id="mi-sim-rev" onclick="simReverse(1)">Reverse</div>
+      <div class="mi disabled" id="mi-sim-rev5" onclick="simReverse(5)">Reverse ×5</div>
+      <div class="mi disabled" id="mi-sim-freerun" onclick="simFreeRun()">Free Run / Pause</div>
+      <div class="mi" onclick="simFuzzToggle()">Fuzz Operator (toggle)</div>
       <div class="mi disabled" id="mi-sim-stop" onclick="simStop()">Stop / Reset</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-csv')">Run CSV Vector…</div>
@@ -417,7 +422,13 @@
         <tbody id="sim-watch-body"></tbody>
       </table>
       <div style="margin-top:6px">
-        <button class="primary" onclick="simStep()">Step</button>
+        <button id="sim-reverse5" onclick="simReverse(5)" title="Rewind five cycles (the truncated trace recomputes exactly)">⏮ ×5</button>
+        <button id="sim-reverse" onclick="simReverse(1)" title="Rewind one cycle">◀ Reverse</button>
+        <button id="sim-step-btn" class="primary" onclick="simStep()">Step ▶</button>
+        <button id="sim-step5" onclick="simStepN(5)" title="Step five cycles">×5 ⏭</button>
+        <button id="sim-freerun" onclick="simFreeRun()" title="Step continuously until paused (or a crash finding stops it)">▶▶ Free Run</button>
+        <button id="sim-fuzz-toggle" onclick="simFuzzToggle()"
+                title="While ON, every forward step draws type-aware random values for the simulated operator's inputs — watch the cascade in the table and waveforms">Fuzz Operator: OFF</button>
         <button onclick="simStop()">Stop / Reset</button>
         <span class="build-note">cycle <span id="step-cycle">0</span></span>
       </div>
@@ -482,7 +493,7 @@
         runs <input id="fuzz-iterations" type="number" value="200" min="1" style="width:74px">
         seed <input id="fuzz-seed" type="text" placeholder="random" style="width:100px"
                     title="Leave blank for a fresh random seed; the used seed fills in after the run so it can be replayed">
-        <button class="primary" onclick="fuzzRun()">Run Fuzz</button>
+        <button id="fuzz-run-btn" class="primary" onclick="fuzzRun()">Run Fuzz</button>
         <span class="build-note" id="fuzz-status"></span>
       </div>
       <div class="row">
@@ -769,7 +780,7 @@ const state = {
   // Canvas zoom (1 = 100%); panning is the host's scroll, so a middle-button
   // drag just scrolls. The copied sub-diagram is a set of equation indices.
   zoom: 1, pan: null, clipboard: null,
-  sim: { built: false, running: false, values: {} },
+  sim: { built: false, running: false, values: {}, fuzz: false, freeRun: false, freeRunTimer: null },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
   pipeline: { built: false, generated: false, lustre: "", sig: "" },
@@ -1459,22 +1470,165 @@ function simRun() {
   document.getElementById("step-cycle").textContent = "0";
   buildWatchTable();
   setMenuEnabled("mi-sim-step", true);
+  setMenuEnabled("mi-sim-step5", true);
+  setMenuEnabled("mi-sim-rev", true);
+  setMenuEnabled("mi-sim-rev5", true);
+  setMenuEnabled("mi-sim-freerun", true);
   setMenuEnabled("mi-sim-stop", true);
-  setSimStatus("SIMULATION RUNNING — cycle 0");
+  setSimStatus("SIMULATION RUNNING — cycle 0" + (state.sim.fuzz ? " (fuzzing inputs)" : ""));
   showDock("simulation");
 }
 
 function simStep() {
+  simStepN(1);
+}
+
+/// Forward transport: N cycles. With the Fuzz Operator toggle ON, each cycle
+/// first draws type-aware random values for the simulated operator's inputs
+/// (server-side, the same generator the batch fuzzer uses) and writes them
+/// into the watch table — so the fuzzed inputs and their cascade are visible
+/// cycle by cycle. A crashing step halts the transport with the crash shown.
+async function simStepN(n) {
   if (!state.sim.running) {
     setSimStatus("not running (Simulation > Run)");
     return;
   }
-  stepOnce().then(() => {
-    setSimStatus("SIMULATION RUNNING — cycle " + document.getElementById("step-cycle").textContent);
-  });
+  for (let i = 0; i < n; i++) {
+    if (state.sim.fuzz && !(await fuzzFillInputs())) return;
+    if ((await stepOnce()) === false) {
+      simFreeRunStop();
+      return; // stepOnce already shows the crash; the trace holds the last good cycle
+    }
+  }
+  setSimStatus("SIMULATION RUNNING — cycle " + document.getElementById("step-cycle").textContent +
+    (state.sim.fuzz ? " (fuzzing inputs)" : ""));
+}
+
+/// One draw of fuzzed inputs for the entry operator, written into the sticky
+/// watch values. Current values ride along for stickiness, so held inputs
+/// behave the way synchronous machines expect.
+async function fuzzFillInputs() {
+  const e = entryNode();
+  if (!e) return false;
+  const prev = {};
+  for (const p of e.inputs) {
+    const v = state.sim.values[p.name];
+    if (typeof v === "string" && v !== "") prev[p.name] = v;
+  }
+  let d;
+  try {
+    const r = await fetch("/api/fuzz/values", {
+      method: "POST",
+      body: JSON.stringify({ node: e.name, prev }),
+    });
+    d = await r.json();
+  } catch (err) {
+    setSimStatus("fuzz values request failed: " + err);
+    return false;
+  }
+  if (d.error) {
+    setSimStatus("fuzz values: " + d.error);
+    return false;
+  }
+  Object.assign(state.sim.values, d.values);
+  buildWatchTable();
+  return true;
+}
+
+/// Reverse transport: rewind N cycles by truncating the input history and
+/// recomputing the shorter trace — exact, because the simulator is a pure
+/// function of its input rows. The sticky inputs restore to the now-current
+/// cycle's row so stepping forward again continues from what's on screen.
+async function simReverse(n) {
+  if (!state.sim.running) {
+    setSimStatus("not running (Simulation > Run)");
+    return;
+  }
+  const lines = state.stepHistory.trim() ? state.stepHistory.trim().split("\n") : [];
+  if (lines.length <= 1) {
+    setSimStatus("SIMULATION RUNNING — already at cycle 0");
+    return;
+  }
+  const keep = Math.max(0, lines.length - 1 - n);
+  const hdr = lines[0];
+  if (!keep) {
+    state.stepHistory = "";
+    document.getElementById("step-trace").innerHTML = "";
+    document.getElementById("step-waves").innerHTML = "";
+    document.getElementById("step-cycle").textContent = "0";
+    document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
+    setSimStatus("SIMULATION RUNNING — rewound to cycle 0");
+    return;
+  }
+  const rows = lines.slice(1, 1 + keep);
+  state.stepHistory = hdr + "\n" + rows.join("\n") + "\n";
+  const cols = hdr.split(",");
+  const last = rows[rows.length - 1].split(",");
+  cols.forEach((c, i) => { state.sim.values[c] = last[i]; });
+  buildWatchTable();
+  const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
+  const trace = await r.text();
+  if (r.ok) {
+    updateWatchComputed(trace);
+    renderStepTrace(trace);
+    setSimStatus("SIMULATION RUNNING — rewound to cycle " +
+      document.getElementById("step-cycle").textContent);
+  } else {
+    setSimStatus("rewind failed: " + trace.trim());
+  }
+}
+
+/// Free run: chained forward steps (~6/s) until paused, stopped, or a crash
+/// finding halts the transport. With Fuzz Operator ON this is the hands-off
+/// fuzz campaign, watched live.
+function simFreeRun() {
+  if (state.sim.freeRun) {
+    simFreeRunStop();
+    return;
+  }
+  if (!state.sim.running) {
+    setSimStatus("not running (Simulation > Run)");
+    return;
+  }
+  state.sim.freeRun = true;
+  const b = document.getElementById("sim-freerun");
+  b.classList.add("primary");
+  b.textContent = "❚❚ Pause";
+  const tick = async () => {
+    if (!state.sim.freeRun || !state.sim.running) return;
+    if (state.sim.fuzz && !(await fuzzFillInputs())) { simFreeRunStop(); return; }
+    if ((await stepOnce()) === false) { simFreeRunStop(); return; }
+    setSimStatus("SIMULATION RUNNING (free run" + (state.sim.fuzz ? ", fuzzing" : "") +
+      ") — cycle " + document.getElementById("step-cycle").textContent);
+    state.sim.freeRunTimer = setTimeout(tick, 150);
+  };
+  tick();
+}
+
+function simFreeRunStop() {
+  state.sim.freeRun = false;
+  if (state.sim.freeRunTimer) clearTimeout(state.sim.freeRunTimer);
+  state.sim.freeRunTimer = null;
+  const b = document.getElementById("sim-freerun");
+  b.classList.remove("primary");
+  b.textContent = "▶▶ Free Run";
+}
+
+/// The Fuzz Operator toggle: while ON, every forward step (Step, ×5, Free
+/// Run) feeds the top operator's inputs with type-aware random values.
+function simFuzzToggle() {
+  state.sim.fuzz = !state.sim.fuzz;
+  const b = document.getElementById("sim-fuzz-toggle");
+  b.classList.toggle("primary", state.sim.fuzz);
+  b.textContent = "Fuzz Operator: " + (state.sim.fuzz ? "ON" : "OFF");
+  const e = entryNode();
+  setSimStatus(state.sim.fuzz
+    ? "FUZZ ON — forward steps draw type-aware random inputs for " + (e ? e.name : "the operator")
+    : "fuzz off — steps use the sticky watch values again");
 }
 
 function simStop() {
+  simFreeRunStop();
   state.sim.running = false;
   state.stepHistory = "";
   document.getElementById("step-trace").innerHTML = "";
@@ -1483,6 +1637,10 @@ function simStop() {
   // Reset the computed cells; keep the sticky input values for the next run.
   document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
   setMenuEnabled("mi-sim-step", false);
+  setMenuEnabled("mi-sim-step5", false);
+  setMenuEnabled("mi-sim-rev", false);
+  setMenuEnabled("mi-sim-rev5", false);
+  setMenuEnabled("mi-sim-freerun", false);
   setMenuEnabled("mi-sim-stop", false);
   setSimStatus("");
 }
@@ -3217,6 +3375,10 @@ function operatorTreeMenu(ev, name) {
   };
   const sep = () => { const s = document.createElement("div"); s.className = "ctx-sep"; m.appendChild(s); };
   item("Build " + name, () => pipeBuildNode(name));
+  item("Build & Simulate " + name, async () => {
+    await pipeBuildNode(name);
+    if (state.pipeline.built) simRun();
+  });
   sep();
   item("Add Input…", () => openPortDialog("input"));
   item("Add Output…", () => openPortDialog("output"));

@@ -311,6 +311,10 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
+        ("POST", "/api/fuzz/values") => match fuzz_values(ctx, body) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
         ("GET", "/api/fsm") => match fsm_get(ctx, &parse_query(query)) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -1650,6 +1654,38 @@ fn fuzz_run(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
         "findings": findings,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// One draw of type-aware random inputs for the simulator's "Fuzz Operator"
+/// toggle: the interactive counterpart of `/api/fuzz`. The client sends the
+/// inputs' current values for stickiness and writes the draw into the watch
+/// table before stepping — so the stepped trace itself records the campaign.
+fn fuzz_values(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct ValuesReq {
+        #[serde(default)]
+        node: Option<String>,
+        #[serde(default)]
+        prev: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        seed: Option<u64>,
+    }
+    let req: ValuesReq = serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+    let project = load(ctx)?;
+    let node = match req.node {
+        Some(n) => n,
+        None => project.main.clone().ok_or_else(|| "project has no `main` node".to_string())?,
+    };
+    let (values, unfuzzable) =
+        ol_sim::fuzz::random_inputs(&project, &node, &req.prev, req.seed)
+            .map_err(|e| e.to_string())?;
+    Ok(serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "node": node,
+        "values": values,
+        "unfuzzable": unfuzzable,
+    }))
+    .unwrap_or_default())
 }
 
 // --- Verify (Kind 2), free-form layout, and FSM authoring ------------------

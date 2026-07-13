@@ -340,3 +340,54 @@ fn fuzz_flags_non_finite_outputs() {
         .expect("the infinity is flagged");
     assert!(hit.detail.contains("`y`"), "got: {}", hit.detail);
 }
+
+// --- Interactive draws: the simulator's Fuzz Operator toggle ---------------------
+
+#[test]
+fn random_inputs_draws_type_aware_deterministic_values() {
+    let color = TypeDef {
+        body: TypeBody::Enum(EnumDef {
+            name: "Color".into(),
+            variants: vec!["Red".into(), "Green".into(), "Blue".into()],
+        }),
+    };
+    let p = project(
+        vec![node(
+            "Panel",
+            vec![
+                port("c", Type::Named { name: "Color".into() }),
+                port("x", Type::Int8),
+                port("b", Type::Bool),
+            ],
+            vec![port("o", Type::Int8)],
+            vec![eq("o", e("x"))],
+        )],
+        vec![color],
+    );
+
+    let empty = BTreeMap::new();
+    let (vals, unfuzzable) =
+        ol_sim::fuzz::random_inputs(&p, "Panel", &empty, Some(5)).expect("draw");
+    assert!(unfuzzable.is_empty());
+    assert!(["Red", "Green", "Blue"].contains(&vals["c"].as_str()), "{vals:?}");
+    let x: i64 = vals["x"].parse().unwrap();
+    assert!((i8::MIN as i64..=i8::MAX as i64).contains(&x), "int8 range, got {x}");
+    assert!(vals["b"] == "true" || vals["b"] == "false", "{vals:?}");
+
+    // Equal seeds draw equal values; the trace is the reproducible record.
+    let (again, _) = ol_sim::fuzz::random_inputs(&p, "Panel", &empty, Some(5)).unwrap();
+    assert_eq!(vals, again);
+
+    // Stickiness: with a previous value supplied, some seeds hold it and some
+    // draw fresh — both behaviors must occur across seeds.
+    let mut prev = BTreeMap::new();
+    prev.insert("x".to_string(), "7".to_string());
+    let (mut held, mut moved) = (false, false);
+    for seed in 0..64u64 {
+        let (v, _) = ol_sim::fuzz::random_inputs(&p, "Panel", &prev, Some(seed)).unwrap();
+        if v["x"] == "7" { held = true } else { moved = true }
+    }
+    assert!(held && moved, "held={held} moved={moved}");
+
+    assert!(ol_sim::fuzz::random_inputs(&p, "Nope", &empty, Some(1)).is_err());
+}

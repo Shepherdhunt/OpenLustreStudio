@@ -42,7 +42,25 @@ emulated-target backend** (`clite-emulate`, user-mode + full-system arm64 —
 needs a Docker host to verify), and the **per-target integration entry
 skeleton**.
 
-**Landed recently (newest first):** **Fuzz Simulation (2026-07-13):** the
+**Landed recently (newest first):** **Interactive fuzz flow (2026-07-13):**
+fuzzing is a simulator mode, not just a batch tab. Right-click an operator ▸
+**Build & Simulate** builds it as the root and starts the watch-table run,
+whose transport is now **⏮ ×5 / ◀ Reverse / Step ▶ / ×5 ⏭ / ▶▶ Free Run /
+Stop** (all in the Simulation menu too). **Reverse** truncates the input
+history and recomputes the shorter trace — exact, because the simulator is a
+pure function of its rows — restoring the sticky inputs to the now-current
+cycle. The **Fuzz Operator** toggle, while ON, makes every forward step draw
+type-aware random values for the simulated operator's inputs
+(`ol_sim::fuzz::random_inputs` via `POST /api/fuzz/values`, the same
+generator as the batch fuzzer, with the current values riding along for
+stickiness) and write them into the watch table before stepping — so the
+fuzzed inputs and their cascade are visible cycle by cycle in the table,
+trace, and waveforms, and remain steppable/reversible like any run. Free Run
+chains steps ~6/s until paused; a crashing step halts the transport with
+`CRASH at cycle N` and keeps the last good trace. Verified by engine + API
+determinism tests and a 23-check Playwright run (context-menu launch, all
+transport buttons, exact rewinds, type-valid fuzz draws, free-run
+advance/pause, crash halt). Before that: **Fuzz Simulation (2026-07-13):** the
 recorded backlog item, landed. `ol_sim::fuzz` drives the same interpreter the
 watch table uses with pseudo-random, **type-aware** inputs on user-selected
 ports (sticky values so machine guards actually fire; boundary-heavy menus

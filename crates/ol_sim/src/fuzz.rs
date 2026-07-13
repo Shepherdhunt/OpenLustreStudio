@@ -288,6 +288,50 @@ fn fresh_value(ty: &Type, project: &Project, rng: &mut Rng) -> Value {
     }
 }
 
+// --- Interactive fuzzing: one cycle's worth of random inputs ---------------------
+
+/// One draw of type-aware random values for a node's fuzzable inputs, in the
+/// simulator's CSV value syntax — the interactive counterpart of the batch
+/// fuzzer, backing the simulator's "Fuzz Operator" toggle: each forward step
+/// asks for a draw, writes it into the watch table, and steps.
+///
+/// `prev` carries the inputs' current values (CSV syntax) for stickiness —
+/// values hold ~55% of the time so machine guards actually fire. Unparseable
+/// or missing previous values just mean a fresh draw. `seed` gives a
+/// deterministic draw; `None` seeds from the clock (the stepped trace itself
+/// is the reproducible record). Returns the value map plus the inputs that
+/// cannot be fuzzed (no CSV form — e.g. records), which are left untouched.
+pub fn random_inputs(
+    project: &Project,
+    node_name: &str,
+    prev: &BTreeMap<String, String>,
+    seed: Option<u64>,
+) -> Result<(BTreeMap<String, String>, Vec<String>), SimError> {
+    let node = project
+        .find_node(node_name)
+        .ok_or_else(|| SimError::UnknownNode(node_name.to_string()))?;
+    let mut rng = Rng::new(seed.unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as u64
+    }));
+    let mut values = BTreeMap::new();
+    let mut unfuzzable = Vec::new();
+    for p in &node.inputs {
+        if !is_fuzzable(&p.ty, project) {
+            unfuzzable.push(p.name.clone());
+            continue;
+        }
+        let prev_value = prev
+            .get(&p.name)
+            .and_then(|raw| parse_value(raw.trim(), &p.ty, project).ok());
+        let v = gen_value(&p.ty, project, &mut rng, prev_value.as_ref());
+        values.insert(p.name.clone(), v.to_csv());
+    }
+    Ok((values, unfuzzable))
+}
+
 // --- The fuzz loop -------------------------------------------------------------
 
 pub fn fuzz_node(

@@ -1042,3 +1042,36 @@ fn fuzz_endpoint_finds_planted_bugs_with_replayable_traces() {
     assert_eq!(s, 400, "{body}");
     assert!(body.contains("not boolean"), "{body}");
 }
+
+/// The interactive draw behind the simulator's Fuzz Operator toggle:
+/// `/api/fuzz/values` returns watch-table-ready values for every fuzzable
+/// input of the (default main) operator, deterministic when seeded.
+#[test]
+fn fuzz_values_endpoint_draws_watch_ready_inputs() {
+    let g = start_server_on_workspace("ws_fuzz_values");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Panel","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Panel","side":"input","name":"level","type":"int16"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Panel","side":"input","name":"armed","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Panel","side":"output","name":"out","type":"int16"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Panel","lhs":"out","body":"level"}"#);
+    post_ok(port, "/api/edit/set_main", r#"{"main":"Panel"}"#);
+
+    let (s, body) = request(port, "POST", "/api/fuzz/values", r#"{"seed":11}"#).unwrap();
+    assert_eq!(s, 200, "{body}");
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["node"], "Panel", "{d}");
+    let level: i64 = d["values"]["level"].as_str().unwrap().parse().unwrap();
+    assert!((i16::MIN as i64..=i16::MAX as i64).contains(&level), "{d}");
+    let armed = d["values"]["armed"].as_str().unwrap();
+    assert!(armed == "true" || armed == "false", "{d}");
+
+    // Deterministic per seed.
+    let (_, body2) = request(port, "POST", "/api/fuzz/values", r#"{"seed":11}"#).unwrap();
+    assert_eq!(body, body2);
+
+    // Unknown node is a loud 400.
+    let (s, body) = request(port, "POST", "/api/fuzz/values", r#"{"node":"Nope"}"#).unwrap();
+    assert_eq!(s, 400, "{body}");
+}
