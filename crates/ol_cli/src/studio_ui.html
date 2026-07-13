@@ -431,6 +431,11 @@
                 title="While ON, every forward step draws type-aware random values for the simulated operator's inputs — watch the cascade in the table and waveforms">Fuzz Operator: OFF</button>
         <button onclick="simStop()">Stop / Reset</button>
         <span class="build-note">cycle <span id="step-cycle">0</span></span>
+        <span style="margin-left:10px">go to cycle
+          <input id="sim-goto" type="number" min="0" value="400" style="width:74px"
+                 title="Run forward to (or rewind back to) this cycle in one jump; forward jumps fuzz each cycle when Fuzz Operator is ON"
+                 onkeydown="if(event.key==='Enter')simGoto()">
+          <button id="sim-goto-btn" onclick="simGoto()">Go</button></span>
       </div>
       <details open style="margin-top:6px"><summary class="build-note">waveforms</summary><div id="step-waves" style="overflow-x:auto"></div></details>
       <details style="margin-top:6px"><summary class="build-note">trace history</summary><div id="step-trace"></div></details>
@@ -1612,6 +1617,115 @@ function simFreeRunStop() {
   const b = document.getElementById("sim-freerun");
   b.classList.remove("primary");
   b.textContent = "▶▶ Free Run";
+}
+
+/// Jump to an absolute cycle. Forward: run the intervening cycles in one
+/// batch — server-fuzzed rows when Fuzz Operator is ON (a whole campaign to
+/// cycle N at once), else the current sticky inputs held. Backward: the exact
+/// history-truncation rewind. Cycles are the synchronous base clock — one
+/// tick per cycle; the wall-clock period is the deployment's business (the C
+/// step runs once per your scheduler's period), so "cycle 400" is 400 ticks,
+/// not 400 s.
+async function simGoto() {
+  if (!state.sim.running) {
+    setSimStatus("not running (Simulation > Run)");
+    return;
+  }
+  const target = parseInt(document.getElementById("sim-goto").value, 10);
+  if (!Number.isFinite(target) || target < 0) {
+    setSimStatus("enter a cycle number ≥ 0");
+    return;
+  }
+  const now = Number(document.getElementById("step-cycle").textContent);
+  if (target === now) return;
+  if (target < now) { await simReverse(now - target); return; }
+
+  const e = entryNode();
+  if (!e) { setSimStatus("no operator to simulate"); return; }
+  const n = target - now;
+
+  // Build the intervening input rows. Fuzzed rows come from one batched
+  // /api/fuzz/values draw (respecting contract assumptions); otherwise the
+  // current sticky values repeat.
+  let rows;
+  if (state.sim.fuzz) {
+    const prev = {};
+    for (const p of e.inputs) {
+      const v = state.sim.values[p.name];
+      if (typeof v === "string" && v !== "") prev[p.name] = v;
+    }
+    let d;
+    try {
+      d = await (await fetch("/api/fuzz/values", {
+        method: "POST", body: JSON.stringify({ node: e.name, prev, count: n }),
+      })).json();
+    } catch (err) { setSimStatus("fuzz draw failed: " + err); return; }
+    if (d.error) { setSimStatus("go to cycle: " + d.error); return; }
+    const cols = e.inputs.map(p => p.name);
+    rows = d.rows.map(r => cols.map(c => (c in r ? r[c] : (state.sim.values[c] ?? "0"))));
+    if (rows.length) { // leave the watch inputs on the last drawn row
+      cols.forEach((c, i) => { state.sim.values[c] = rows[rows.length - 1][i]; });
+    }
+  } else {
+    const cols = e.inputs.map(p => p.name);
+    // Validate the held inputs once — a bad value shouldn't repeat 400×.
+    for (const p of e.inputs) {
+      const v = validateValue(typeKind(p.type), state.sim.values[p.name]);
+      if (!v.ok) { setSimStatus("invalid value for " + p.name + ": " + v.msg); return; }
+    }
+    const oneRow = cols.map(c => validateValue(typeKind(findInput(e, c).type), state.sim.values[c]).norm);
+    rows = Array.from({ length: n }, () => oneRow);
+  }
+
+  // Append to the stepped history and simulate the whole thing at once.
+  // Capture the pre-jump history so a crash mid-jump can fall back to it
+  // without losing the cycles that already ran.
+  const cols = e.inputs.map(p => p.name);
+  const preHistory = state.stepHistory || (cols.join(",") + "\n");
+  state.stepHistory = preHistory + rows.map(r => r.join(",")).join("\n") + "\n";
+  buildWatchTable();
+  const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
+  const trace = await r.text();
+  if (r.ok) {
+    updateWatchComputed(trace);
+    renderStepTrace(trace);
+    setSimStatus("SIMULATION RUNNING — jumped to cycle " +
+      document.getElementById("step-cycle").textContent +
+      (state.sim.fuzz ? " (fuzzed each cycle)" : ""));
+  } else {
+    // A crash somewhere in the jump: binary-search the added rows for the
+    // first failing one, so the trace stops exactly at the fault while the
+    // pre-jump history is preserved.
+    await gotoFindCrash(preHistory, rows, now);
+  }
+}
+
+function findInput(node, name) { return node.inputs.find(p => p.name === name); }
+
+/// A batched jump hit a crash. `preHistory` is the run up to the jump (kept
+/// intact); `rows` are the newly added cycles. Re-simulate growing prefixes
+/// to land on the last good cycle and report the fault cycle.
+async function gotoFindCrash(preHistory, rows, baseCycle) {
+  const bodyFor = k => preHistory + rows.slice(0, k).map(r => r.join(",")).join("\n") + (k ? "\n" : "");
+  let lo = 0, hi = rows.length; // rows[lo) good, rows[hi) bad
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    const ok = (await fetch("/api/simulate?full=1", { method: "POST", body: bodyFor(mid) })).ok;
+    if (ok) lo = mid; else hi = mid;
+  }
+  // Keep the pre-jump history plus the good rows of the jump.
+  state.stepHistory = bodyFor(lo);
+  const good = await (await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory })).text();
+  if (state.stepHistory.trim().split("\n").length > 1) {
+    updateWatchComputed(good);
+    renderStepTrace(good);
+  } else {
+    document.getElementById("step-cycle").textContent = "0";
+  }
+  // The crash reason comes from the first failing prefix.
+  const why = await (await fetch("/api/simulate?full=1", { method: "POST", body: bodyFor(lo + 1) })).text();
+  setSimStatus("CRASH at cycle " + (baseCycle + lo) + " during the jump — " + why.trim());
+  showDock("simulation");
 }
 
 /// The Fuzz Operator toggle: while ON, every forward step (Step, ×5, Free
@@ -3845,6 +3959,8 @@ async function fuzzRun() {
   const seedRaw = document.getElementById("fuzz-seed").value.trim();
   if (seedRaw) body.seed = parseInt(seedRaw, 10) >>> 0;
   document.getElementById("fuzz-status").textContent = "fuzzing…";
+  document.getElementById("fuzz-results").innerHTML = ""; // drop the prior run's table
+  state.fuzz.fix = {};
   const r = await fetch("/api/fuzz", { method: "POST", body: JSON.stringify(body) });
   const text = await r.text();
   let data;
@@ -3862,27 +3978,98 @@ async function fuzzRun() {
   const note = (data.unfuzzable_inputs || []).length
     ? ' <span class="build-note">held (no CSV form): ' + escapeHTML(data.unfuzzable_inputs.join(", ")) + "</span>"
     : "";
+  const asm = (data.assumes || []).length
+    ? ' <span class="build-note">drawing within: ' + escapeHTML(data.assumes.join("; ")) + "</span>"
+    : "";
   if (data.clean) {
     host.innerHTML = '<div class="diag severity-Info">CLEAN — no crashes, contract violations, ' +
-      "non-finite values, or predicate hits (" + ran + ")</div>" + note;
+      "non-finite values, or predicate hits (" + ran + ")</div>" + note + asm;
     return;
   }
   let html = '<div class="diag severity-Error">' + state.fuzz.findings.length +
-    " finding(s) — " + ran + "</div>" + note;
+    " finding(s) — " + ran + "</div>" + note + asm;
   html += "<table><thead><tr><th>kind</th><th>detail</th><th>first seen</th><th>hits</th>" +
-    "<th>outputs at failure</th><th></th></tr></thead><tbody>";
+    "<th>outputs at failure</th><th></th><th>auto-fix</th></tr></thead><tbody>";
   state.fuzz.findings.forEach((f, i) => {
     const outs = (f.outputs || []).map(kv => kv[0] + "=" + kv[1]).join(", ");
+    // Crashes attributed to an equation are auto-fixable (assume / guard).
+    const fixable = f.kind === "crash" && /in equation `/.test(f.detail || "");
     html += "<tr><td>" + escapeHTML(f.kind.replace("_", " ")) +
       '</td><td class="severity-Error">' + escapeHTML(f.detail) +
       "</td><td>run " + f.iteration + ", cycle " + f.cycle +
       "</td><td>" + f.occurrences +
       "</td><td>" + escapeHTML(outs) +
       '</td><td><button onclick="replayFuzz(' + i + ')" ' +
-      'title="Load this finding\'s inputs into the watch table and step to the failure">▶ Replay in simulator</button></td></tr>';
+      'title="Load this finding\'s inputs into the watch table and step to the failure">▶ Replay</button></td>' +
+      "<td>" + (fixable
+        ? '<button onclick="fuzzAutoFix(' + i + ')" title="Propose an Assume or a defensive guard to handle this failed state">🔧 Fix…</button>'
+        : '<span class="build-note">—</span>') +
+      "</td></tr>";
   });
   html += "</tbody></table>";
   host.innerHTML = html;
+}
+
+/// Auto-fix a crash finding: diagnose it server-side, then offer the two
+/// SCADE-shaped remedies. Assume — record the precondition in the operator's
+/// contract (the fuzzer then draws within it, Kind 2 ships it as `assume`,
+/// callers inherit the obligation). Guard — defensively rewrite the offending
+/// equation so the failed state produces a safe value. Both go through the
+/// journaled edits, so Ctrl+Z reverts.
+async function fuzzAutoFix(idx) {
+  const f = state.fuzz.findings[idx];
+  const e = entryNode();
+  if (!f || !e) return;
+  let d;
+  try {
+    const r = await fetch("/api/fuzz/diagnose", {
+      method: "POST", body: JSON.stringify({ node: e.name, detail: f.detail }),
+    });
+    d = await r.json();
+    if (!r.ok) { setFuzzStatus(d.error || "cannot diagnose this finding"); return; }
+  } catch (err) { setFuzzStatus("diagnose failed: " + err); return; }
+
+  const host = document.getElementById("fuzz-results");
+  const box = document.createElement("div");
+  box.className = "diag";
+  box.style.marginTop = "6px";
+  const guard = d.guarded_body
+    ? '<div style="margin-top:4px"><button onclick="fuzzApplyGuard(' + idx + ')">Apply guard</button> ' +
+      '<code class="inline">' + escapeHTML(d.equation_lhs) + " = " + escapeHTML(d.guarded_body) + "</code>" +
+      '<div class="build-note">Rewrites the equation so the failed state yields ' + escapeHTML(d.fallback) + " (defensive, always safe).</div></div>"
+    : '<div class="build-note" style="margin-top:4px">Guard unavailable for a multi-output equation — use the assumption.</div>';
+  box.innerHTML =
+    '<strong>Handle the failed state in <code class="inline">' + escapeHTML(d.equation_lhs) + "</code></strong>" +
+    '<div style="margin-top:4px"><button onclick="fuzzApplyAssume(' + idx + ')">Add assumption</button> ' +
+    '<code class="inline">assume ' + escapeHTML(d.assume) + "</code>" +
+    '<div class="build-note">Documents the operator\'s precondition (SCADE Assume). The fuzzer then draws within it; Kind 2 proves callers respect it. Choose this when the caller must guarantee it.</div></div>' +
+    guard +
+    '<div style="margin-top:4px" class="build-note">Ctrl+Z reverts either fix.</div>';
+  // Stash the diagnosis for the apply handlers.
+  state.fuzz.fix = state.fuzz.fix || {};
+  state.fuzz.fix[idx] = d;
+  host.appendChild(box);
+}
+
+async function fuzzApplyAssume(idx) {
+  const d = (state.fuzz.fix || {})[idx];
+  if (!d) return;
+  await postEdit("/api/edit/add_assume", { node: d.node, name: d.assume_name, expr: d.assume });
+  setFuzzStatus("added assumption `" + d.assume + "` to " + d.node + " — re-run fuzz to confirm it's clean");
+  fuzzSync();
+}
+
+async function fuzzApplyGuard(idx) {
+  const d = (state.fuzz.fix || {})[idx];
+  if (!d || !d.guarded_body) return;
+  await postEdit("/api/edit/update_equation",
+    { node: d.node, index: d.equation_index, lhs: d.equation_lhs, body: d.guarded_body });
+  setFuzzStatus("guarded equation `" + d.equation_lhs + "` in " + d.node + " — re-run fuzz to confirm it's clean");
+  fuzzSync();
+}
+
+function setFuzzStatus(msg) {
+  document.getElementById("fuzz-status").textContent = msg;
 }
 
 /// Step a fuzz finding's recorded inputs through the simulator — the same

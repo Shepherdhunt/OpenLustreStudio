@@ -314,7 +314,16 @@ impl<'a> Sim<'a> {
                 self.project,
                 Some(&self.clock_info.site_clocks),
                 &mut self.coverage,
-            )?;
+            )
+            .map_err(|e| match e {
+                // Attribute the failure to its equation — the fuzzer's crash
+                // findings (and the stepper's CRASH line) name the culprit.
+                SimError::EvalError(m) => SimError::EvalError(format!(
+                    "in equation `{}`: {m}",
+                    eq.lhs.join(", ")
+                )),
+                other => other,
+            })?;
             if eq.lhs.len() == 1 {
                 env.insert(eq.lhs[0].clone(), value);
             } else if let Value::Tuple(items) = value {

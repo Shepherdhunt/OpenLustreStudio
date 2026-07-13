@@ -26,11 +26,85 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ol_ir::{Expr, Project, Type, TypeBody};
+use ol_contract_ir::parse_contracts;
+use ol_ir::{Expr, NodeDef, Project, Type, TypeBody};
 
 use crate::{
     default_value, evaluate_monitor, eval, parse_value, Sim, SimError, State, Value,
 };
+
+/// The node's contract assumptions that constrain INPUTS only (free variables
+/// ⊆ inputs ∪ project constants): the environment envelope the fuzzer must
+/// draw within — SCADE's Assume semantics. Clauses over outputs/locals are
+/// the caller's proof obligation elsewhere, not a generator constraint.
+fn input_assumptions(project: &Project, node: &NodeDef) -> Vec<(String, Expr)> {
+    let Some(cname) = &node.contract else { return Vec::new() };
+    let mut contract = None;
+    for pkg in &project.packages {
+        let (cs, _) = parse_contracts(&pkg.contracts);
+        if let Some(found) = cs.into_iter().find(|c| &c.name == cname) {
+            contract = Some(found);
+            break;
+        }
+    }
+    let Some(contract) = contract else { return Vec::new() };
+    let inputs: HashSet<&str> = node.inputs.iter().map(|p| p.name.as_str()).collect();
+    let consts: HashSet<&str> = project
+        .packages
+        .iter()
+        .flat_map(|p| p.constants.iter())
+        .map(|c| c.name.as_str())
+        .collect();
+    contract
+        .assumptions
+        .into_iter()
+        .filter(|a| {
+            a.expr
+                .free_vars()
+                .iter()
+                .all(|v| inputs.contains(v.as_str()) || consts.contains(v.as_str()))
+        })
+        .map(|a| {
+            let label = a
+                .name
+                .clone()
+                .unwrap_or_else(|| ol_lustre_emit::format_expr(&a.expr));
+            (label, a.expr)
+        })
+        .collect()
+}
+
+/// Does a candidate input draw satisfy every checkable input assumption?
+/// Clauses are evaluated statelessly over consts + inputs; a clause that
+/// cannot evaluate that way (e.g. temporal operators) is skipped rather than
+/// blocking every draw.
+fn draw_satisfies(
+    assumes: &[(String, Expr)],
+    consts: &BTreeMap<String, Value>,
+    inputs: &BTreeMap<String, Value>,
+    project: &Project,
+) -> bool {
+    if assumes.is_empty() {
+        return true;
+    }
+    let mut env = consts.clone();
+    for (k, v) in inputs {
+        env.insert(k.clone(), v.clone());
+    }
+    for (_, expr) in assumes {
+        let mut st = State::default();
+        let mut cs: HashMap<usize, State> = HashMap::new();
+        match eval(expr, &env, &mut st, &mut cs, project, None, &mut None) {
+            Ok(Value::Bool(false)) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// How many rejected draws before we declare the assumptions unsatisfiable
+/// by random search and fail loudly instead of spinning.
+const ASSUME_RETRIES: usize = 200;
 
 /// A user-supplied error predicate: `expr` is a boolean expression over the
 /// fuzzed node's inputs, outputs, and locals; `true` at any cycle is a
@@ -129,6 +203,10 @@ pub struct FuzzReport {
     /// Inputs that could not be fuzzed because their type has no CSV form
     /// (e.g. records) — they held their default for the whole run.
     pub unfuzzable_inputs: Vec<String>,
+    /// Labels of the contract input assumptions every generated cycle was
+    /// drawn to satisfy (empty when the node has no contract or no
+    /// input-only assumptions).
+    pub assumes: Vec<String>,
     pub iterations_run: usize,
     pub total_cycles: usize,
     pub seed: u64,
@@ -307,29 +385,86 @@ pub fn random_inputs(
     prev: &BTreeMap<String, String>,
     seed: Option<u64>,
 ) -> Result<(BTreeMap<String, String>, Vec<String>), SimError> {
+    let (mut rows, unfuzzable) = random_input_rows(project, node_name, prev, seed, 1)?;
+    Ok((rows.pop().unwrap_or_default(), unfuzzable))
+}
+
+/// The assumption labels the fuzzer will draw within for this node — for
+/// display ("drawing within: den <> 0") and tests.
+pub fn assumption_labels(project: &Project, node_name: &str) -> Vec<String> {
+    project
+        .find_node(node_name)
+        .map(|n| input_assumptions(project, n).into_iter().map(|(l, _)| l).collect())
+        .unwrap_or_default()
+}
+
+/// `count` consecutive draws with the stickiness chain applied across rows —
+/// the batch behind "go to cycle N" with the Fuzz Operator toggle on. Every
+/// row satisfies the node's input assumptions (rejection sampling, bounded).
+pub fn random_input_rows(
+    project: &Project,
+    node_name: &str,
+    prev: &BTreeMap<String, String>,
+    seed: Option<u64>,
+    count: usize,
+) -> Result<(Vec<BTreeMap<String, String>>, Vec<String>), SimError> {
     let node = project
         .find_node(node_name)
         .ok_or_else(|| SimError::UnknownNode(node_name.to_string()))?;
+    let probe = Sim::new(project, node_name)?;
+    let consts = probe.consts.clone();
+    let assumes = input_assumptions(project, node);
     let mut rng = Rng::new(seed.unwrap_or_else(|| {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos() as u64
     }));
-    let mut values = BTreeMap::new();
+
     let mut unfuzzable = Vec::new();
     for p in &node.inputs {
         if !is_fuzzable(&p.ty, project) {
             unfuzzable.push(p.name.clone());
-            continue;
         }
-        let prev_value = prev
-            .get(&p.name)
-            .and_then(|raw| parse_value(raw.trim(), &p.ty, project).ok());
-        let v = gen_value(&p.ty, project, &mut rng, prev_value.as_ref());
-        values.insert(p.name.clone(), v.to_csv());
     }
-    Ok((values, unfuzzable))
+    let mut prev_vals: BTreeMap<String, Value> = BTreeMap::new();
+    for p in &node.inputs {
+        if let Some(raw) = prev.get(&p.name) {
+            if let Ok(v) = parse_value(raw.trim(), &p.ty, project) {
+                prev_vals.insert(p.name.clone(), v);
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(count);
+    for _ in 0..count {
+        let mut attempts = 0;
+        let draw = loop {
+            let mut draw = BTreeMap::new();
+            for p in &node.inputs {
+                if unfuzzable.contains(&p.name) {
+                    continue;
+                }
+                draw.insert(p.name.clone(), gen_value(&p.ty, project, &mut rng, prev_vals.get(&p.name)));
+            }
+            if draw_satisfies(&assumes, &consts, &draw, project) {
+                break draw;
+            }
+            attempts += 1;
+            if attempts >= ASSUME_RETRIES {
+                let labels: Vec<String> = assumes.iter().map(|(l, _)| l.clone()).collect();
+                return Err(SimError::EvalError(format!(
+                    "could not draw inputs satisfying the contract assumption(s) [{}] after {ASSUME_RETRIES} attempts",
+                    labels.join("; ")
+                )));
+            }
+        };
+        for (k, v) in &draw {
+            prev_vals.insert(k.clone(), v.clone());
+        }
+        rows.push(draw.iter().map(|(k, v)| (k.clone(), v.to_csv())).collect());
+    }
+    Ok((rows, unfuzzable))
 }
 
 // --- The fuzz loop -------------------------------------------------------------
@@ -409,11 +544,16 @@ pub fn fuzz_node(
         }
     }
 
+    let probe = Sim::new(project, node_name)?;
+    let consts = probe.consts.clone();
+    // The contract's input assumptions: the envelope every generated cycle
+    // must stay inside (SCADE Assume semantics).
+    let assumes = input_assumptions(project, node);
+
     // Validate predicates once against a defaults env so a typo fails the
     // request, not every cycle of the run.
     {
-        let probe = Sim::new(project, node_name)?;
-        let mut env: BTreeMap<String, Value> = probe.consts.clone();
+        let mut env: BTreeMap<String, Value> = consts.clone();
         for p in node.inputs.iter().chain(node.outputs.iter()) {
             env.insert(p.name.clone(), default_value(&p.ty, project));
         }
@@ -463,16 +603,31 @@ pub fn fuzz_node(
 
         for cycle in 0..cfg.cycles {
             // Assemble this cycle's inputs: sticky-random on fuzzed ports,
-            // pinned/default elsewhere.
-            let mut inputs: BTreeMap<String, Value> = BTreeMap::new();
-            for p in &node.inputs {
-                let v = if fuzzed.contains(&p.name) {
-                    gen_value(&p.ty, project, &mut rng, prev.get(&p.name))
-                } else {
-                    held.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, project))
-                };
-                inputs.insert(p.name.clone(), v);
-            }
+            // pinned/default elsewhere — redrawn until the contract's input
+            // assumptions hold (bounded, then a loud error).
+            let mut attempts = 0;
+            let inputs: BTreeMap<String, Value> = loop {
+                let mut draw: BTreeMap<String, Value> = BTreeMap::new();
+                for p in &node.inputs {
+                    let v = if fuzzed.contains(&p.name) {
+                        gen_value(&p.ty, project, &mut rng, prev.get(&p.name))
+                    } else {
+                        held.get(&p.name).cloned().unwrap_or_else(|| default_value(&p.ty, project))
+                    };
+                    draw.insert(p.name.clone(), v);
+                }
+                if draw_satisfies(&assumes, &consts, &draw, project) {
+                    break draw;
+                }
+                attempts += 1;
+                if attempts >= ASSUME_RETRIES {
+                    let labels: Vec<String> = assumes.iter().map(|(l, _)| l.clone()).collect();
+                    return Err(SimError::EvalError(format!(
+                        "could not draw inputs satisfying the contract assumption(s) [{}] after {ASSUME_RETRIES} attempts (are the held values compatible?)",
+                        labels.join("; ")
+                    )));
+                }
+            };
             for (k, v) in &inputs {
                 prev.insert(k.clone(), v.clone());
             }
@@ -649,6 +804,7 @@ pub fn fuzz_node(
         node: node_name.to_string(),
         fuzzed_inputs: fuzzed,
         unfuzzable_inputs: unfuzzable,
+        assumes: assumes.iter().map(|(l, _)| l.clone()).collect(),
         iterations_run,
         total_cycles,
         seed: cfg.seed,

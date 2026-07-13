@@ -391,3 +391,97 @@ fn random_inputs_draws_type_aware_deterministic_values() {
 
     assert!(ol_sim::fuzz::random_inputs(&p, "Nope", &empty, Some(1)).is_err());
 }
+
+// --- Contract assumptions: the fuzzer draws within the envelope ------------------
+
+/// A `den <> 0` assumption makes the fuzzer never draw den = 0 — so the
+/// division that used to crash is now safe, and no crash finding appears.
+#[test]
+fn fuzz_respects_contract_input_assumptions() {
+    use ol_ir::{Package, Project};
+    let mut node = node(
+        "SafeDiv",
+        vec![port("num", Type::Int32), port("den", Type::Int32)],
+        vec![port("q", Type::Int32)],
+        vec![eq("q", e("num / den"))],
+    );
+    node.contract = Some("SafeDiv_contract".into());
+    let contract = serde_json::json!({
+        "name": "SafeDiv_contract",
+        "inputs": [], "outputs": [], "ghost_vars": [],
+        "assumptions": [{ "name": "den nonzero", "expr": e("den <> 0") }],
+        "guarantees": [], "modes": [], "imports": []
+    });
+    let p = Project {
+        name: "safe".into(),
+        packages: vec![Package {
+            name: "user".into(),
+            nodes: vec![node],
+            contracts: vec![contract],
+            ..Default::default()
+        }],
+        main: Some("SafeDiv".into()),
+        ..Default::default()
+    };
+
+    let cfg = FuzzConfig { cycles: 20, iterations: 200, seed: 7, ..Default::default() };
+    let report = fuzz_node(&p, "SafeDiv", &cfg).expect("fuzz runs");
+    assert_eq!(report.assumes, vec!["den nonzero".to_string()], "the assume is reported");
+    assert!(
+        report.findings.iter().all(|f| f.kind != FindingKind::Crash),
+        "no division-by-zero once the assumption is respected: {:?}",
+        report.findings
+    );
+    // And every drawn row honored it.
+    let empty = BTreeMap::new();
+    let (rows, _) = ol_sim::fuzz::random_input_rows(&p, "SafeDiv", &empty, Some(3), 300).unwrap();
+    assert!(rows.iter().all(|r| r["den"] != "0"), "no den = 0 was ever drawn");
+}
+
+/// Batch draws (the "go to cycle N" engine) return the requested row count,
+/// deterministic per seed, with stickiness chained across rows.
+#[test]
+fn random_input_rows_returns_a_deterministic_chain() {
+    let p = project(
+        vec![node(
+            "One",
+            vec![port("x", Type::Int16)],
+            vec![port("y", Type::Int16)],
+            vec![eq("y", e("x"))],
+        )],
+        vec![],
+    );
+    let empty = BTreeMap::new();
+    let (rows, _) = ol_sim::fuzz::random_input_rows(&p, "One", &empty, Some(9), 400).unwrap();
+    assert_eq!(rows.len(), 400);
+    let (again, _) = ol_sim::fuzz::random_input_rows(&p, "One", &empty, Some(9), 400).unwrap();
+    assert_eq!(rows, again, "deterministic per seed");
+    for r in &rows {
+        let v: i64 = r["x"].parse().unwrap();
+        assert!((i16::MIN as i64..=i16::MAX as i64).contains(&v));
+    }
+}
+
+/// Crash findings name the equation they died in — the hook the auto-fix
+/// uses to locate the divisor.
+#[test]
+fn fuzz_crash_detail_names_the_failing_equation() {
+    let p = project(
+        vec![node(
+            "Named",
+            vec![port("d", Type::Int32)],
+            vec![port("out", Type::Int32)],
+            vec![eq("out", e("42 / d"))],
+        )],
+        vec![],
+    );
+    let cfg = FuzzConfig { cycles: 10, iterations: 50, seed: 7, ..Default::default() };
+    let report = fuzz_node(&p, "Named", &cfg).expect("fuzz runs");
+    let crash = report
+        .findings
+        .iter()
+        .find(|f| f.kind == FindingKind::Crash)
+        .expect("the crash is found");
+    assert!(crash.detail.contains("in equation `out`"), "got: {}", crash.detail);
+    assert!(crash.detail.contains("division by zero"), "got: {}", crash.detail);
+}

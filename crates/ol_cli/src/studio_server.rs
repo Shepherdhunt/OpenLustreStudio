@@ -315,6 +315,13 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
+        ("POST", "/api/fuzz/diagnose") => match fuzz_diagnose(ctx, body) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/edit/add_assume") => {
+            apply_edit_response(ctx, body, edit_add_assume)
+        }
         ("GET", "/api/fsm") => match fsm_get(ctx, &parse_query(query)) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -1647,6 +1654,7 @@ fn fuzz_run(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
         "node": report.node,
         "fuzzed_inputs": report.fuzzed_inputs,
         "unfuzzable_inputs": report.unfuzzable_inputs,
+        "assumes": report.assumes,
         "iterations_run": report.iterations_run,
         "total_cycles": report.total_cycles,
         "seed": report.seed,
@@ -1656,10 +1664,11 @@ fn fuzz_run(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
 
-/// One draw of type-aware random inputs for the simulator's "Fuzz Operator"
-/// toggle: the interactive counterpart of `/api/fuzz`. The client sends the
-/// inputs' current values for stickiness and writes the draw into the watch
-/// table before stepping — so the stepped trace itself records the campaign.
+/// Type-aware random input draws for the simulator's "Fuzz Operator" toggle:
+/// the interactive counterpart of `/api/fuzz`. The client sends the inputs'
+/// current values for stickiness; `count > 1` returns a chain of rows (the
+/// batch behind "go to cycle N"). Draws respect the node's contract input
+/// assumptions. The stepped trace itself records the campaign.
 fn fuzz_values(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
     #[derive(serde::Deserialize)]
     struct ValuesReq {
@@ -1669,6 +1678,8 @@ fn fuzz_values(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
         prev: std::collections::BTreeMap<String, String>,
         #[serde(default)]
         seed: Option<u64>,
+        #[serde(default)]
+        count: Option<usize>,
     }
     let req: ValuesReq = serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
     let project = load(ctx)?;
@@ -1676,14 +1687,133 @@ fn fuzz_values(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
         Some(n) => n,
         None => project.main.clone().ok_or_else(|| "project has no `main` node".to_string())?,
     };
-    let (values, unfuzzable) =
-        ol_sim::fuzz::random_inputs(&project, &node, &req.prev, req.seed)
+    let count = req.count.unwrap_or(1).clamp(1, 100_000);
+    let (rows, unfuzzable) =
+        ol_sim::fuzz::random_input_rows(&project, &node, &req.prev, req.seed, count)
             .map_err(|e| e.to_string())?;
+    let assumes = ol_sim::fuzz::assumption_labels(&project, &node);
     Ok(serde_json::to_string(&serde_json::json!({
         "schema_version": 1,
         "node": node,
-        "values": values,
+        "values": rows.first().cloned().unwrap_or_default(),
+        "rows": rows,
         "unfuzzable": unfuzzable,
+        "assumes": assumes,
+    }))
+    .unwrap_or_default())
+}
+
+/// Derive auto-fix proposals for a fuzz crash finding: which equation failed
+/// (from the attributed detail), its division/modulo sites, and the two
+/// remedies — a contract assumption over the divisors (SCADE Assume) and a
+/// defensively guarded rewrite of the equation. Read-only; applying goes
+/// through the journaled edits (`add_assume` / `update_equation`).
+fn fuzz_diagnose(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
+    #[derive(serde::Deserialize)]
+    struct DiagnoseReq {
+        #[serde(default)]
+        node: Option<String>,
+        detail: String,
+    }
+    let req: DiagnoseReq =
+        serde_json::from_slice(body).map_err(|e| format!("bad request: {e}"))?;
+    let project = load(ctx)?;
+    let node_name = match req.node {
+        Some(n) => n,
+        None => project.main.clone().ok_or_else(|| "project has no `main` node".to_string())?,
+    };
+    let node = project
+        .find_node(&node_name)
+        .ok_or_else(|| format!("no node named `{node_name}`"))?;
+
+    let eq_name = req
+        .detail
+        .split("in equation `")
+        .nth(1)
+        .and_then(|s| s.split('`').next())
+        .ok_or_else(|| {
+            "this finding is not attributed to an equation — only equation-attributed \
+             crashes are auto-fixable"
+                .to_string()
+        })?;
+    let (index, eq) = node
+        .equations
+        .iter()
+        .enumerate()
+        .find(|(_, e)| e.lhs.iter().any(|l| l == eq_name))
+        .ok_or_else(|| format!("`{node_name}` has no equation defining `{eq_name}`"))?;
+
+    if req.detail.contains("fixed-point division") {
+        return Err(
+            "fixed-point divides need a format-matched zero — add the assumption manually \
+             (Properties ▸ contract) for now"
+                .to_string(),
+        );
+    }
+
+    // Every division/modulo site's divisor, skipping literal constants (a
+    // nonzero literal cannot be the culprit and `2 <> 0` guards are noise).
+    let mut divisors: Vec<String> = Vec::new();
+    eq.rhs.visit(|e| {
+        if let ol_ir::Expr::Binary { op, rhs, .. } = e {
+            if matches!(
+                op,
+                ol_ir::BinOp::Div | ol_ir::BinOp::Mod | ol_ir::BinOp::SatDiv
+            ) && !matches!(rhs.as_ref(), ol_ir::Expr::Const { .. })
+            {
+                let d = ol_lustre_emit::format_expr(rhs);
+                if !divisors.contains(&d) {
+                    divisors.push(d);
+                }
+            }
+        }
+    });
+    if divisors.is_empty() {
+        return Err(format!(
+            "no variable division/modulo sites in equation `{eq_name}` — not auto-fixable"
+        ));
+    }
+
+    let zero = if req.detail.contains("float") { "0.0" } else { "0" };
+    let conds: Vec<String> = divisors.iter().map(|d| format!("{d} <> {zero}")).collect();
+    let assume = conds.join(" and ");
+
+    // Fallback for the guarded rewrite: the equation lhs's typed zero.
+    let lhs_ty = node
+        .outputs
+        .iter()
+        .chain(node.inputs.iter())
+        .map(|p| (&p.name, &p.ty))
+        .chain(node.locals.iter().map(|l| (&l.name, &l.ty)))
+        .find(|(n, _)| n.as_str() == eq_name)
+        .map(|(_, t)| t.clone());
+    let fallback = match lhs_ty {
+        Some(t) if t.is_float() => "0.0".to_string(),
+        Some(ol_ir::Type::Bool) => "false".to_string(),
+        _ => "0".to_string(),
+    };
+    // Guarding a multi-output (tuple) equation would need a tuple fallback;
+    // offer only the assumption route there.
+    let guarded_body = (eq.lhs.len() == 1).then(|| {
+        format!(
+            "if {} then ({}) else {}",
+            assume,
+            ol_lustre_emit::format_expr(&eq.rhs),
+            fallback
+        )
+    });
+
+    Ok(serde_json::to_string(&serde_json::json!({
+        "schema_version": 1,
+        "node": node_name,
+        "equation_index": index,
+        "equation_lhs": eq.lhs.join(", "),
+        "body": ol_lustre_emit::format_expr(&eq.rhs),
+        "divisors": divisors,
+        "assume": assume,
+        "assume_name": format!("{} stays nonzero", divisors.join(", ")),
+        "guarded_body": guarded_body,
+        "fallback": fallback,
     }))
     .unwrap_or_default())
 }
@@ -2834,6 +2964,118 @@ fn edit_update_equation(
         .get_mut(index)
         .ok_or_else(|| format!("`{node_name}` has no equation #{index}"))?;
     *eq = ol_ir::Equation { lhs, rhs };
+    Ok(())
+}
+
+/// Add a contract assumption to an operator — the SCADE Assume: a documented
+/// constraint on the operator's environment. Creates the contract when the
+/// operator has none. The fuzzer draws inputs within these assumptions, the
+/// Kind 2 view ships them as CoCoSpec `assume`, and callers inherit the
+/// obligation.
+fn edit_add_assume(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let node_name = req_str(req, "node")?.to_string();
+    let expr_text = req_str(req, "expr")?;
+    let label = req.get("name").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let expr = ol_stdlib::parse_expr(expr_text).map_err(|e| format!("expr: {e}"))?;
+
+    let pkg_idx = project
+        .packages
+        .iter()
+        .position(|p| p.nodes.iter().any(|n| n.name == node_name))
+        .ok_or_else(|| format!("no node named `{node_name}`"))?;
+
+    // An assumption constrains the ENVIRONMENT: only the operator's inputs
+    // (and project constants) may appear in it.
+    {
+        let node = project.packages[pkg_idx]
+            .nodes
+            .iter()
+            .find(|n| n.name == node_name)
+            .unwrap();
+        let inputs: std::collections::HashSet<&str> =
+            node.inputs.iter().map(|p| p.name.as_str()).collect();
+        let consts: std::collections::HashSet<&str> = project
+            .packages
+            .iter()
+            .flat_map(|p| p.constants.iter())
+            .map(|c| c.name.as_str())
+            .collect();
+        for v in expr.free_vars() {
+            if !inputs.contains(v.as_str()) && !consts.contains(v.as_str()) {
+                return Err(format!(
+                    "an assumption may only reference inputs (and constants); \
+                     `{v}` is not an input of `{node_name}`"
+                ));
+            }
+        }
+    }
+
+    let assumption =
+        ol_contract_ir::Assumption { name: label, expr, requirements: Vec::new() };
+
+    let contract_name = project.packages[pkg_idx]
+        .nodes
+        .iter()
+        .find(|n| n.name == node_name)
+        .unwrap()
+        .contract
+        .clone();
+    if let Some(cname) = contract_name {
+        for pkg in &mut project.packages {
+            for cv in &mut pkg.contracts {
+                if cv.get("name").and_then(|v| v.as_str()) == Some(cname.as_str()) {
+                    let mut c: ol_contract_ir::ContractDef = serde_json::from_value(cv.clone())
+                        .map_err(|e| format!("contract `{cname}` does not parse: {e}"))?;
+                    c.assumptions.push(assumption);
+                    *cv = serde_json::to_value(&c).map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            }
+        }
+        return Err(format!("the node's contract `{cname}` was not found"));
+    }
+
+    // No contract yet — create one that carries the assumption.
+    let mut cname = format!("{node_name}_contract");
+    let mut suffix = 2;
+    while project
+        .packages
+        .iter()
+        .flat_map(|p| p.contracts.iter())
+        .any(|c| c.get("name").and_then(|v| v.as_str()) == Some(cname.as_str()))
+    {
+        cname = format!("{node_name}_contract_{suffix}");
+        suffix += 1;
+    }
+    let (inputs, outputs) = {
+        let node = project.packages[pkg_idx]
+            .nodes
+            .iter()
+            .find(|n| n.name == node_name)
+            .unwrap();
+        (node.inputs.clone(), node.outputs.clone())
+    };
+    let contract = ol_contract_ir::ContractDef {
+        name: cname.clone(),
+        inputs,
+        outputs,
+        ghost_vars: Vec::new(),
+        assumptions: vec![assumption],
+        guarantees: Vec::new(),
+        modes: Vec::new(),
+        imports: Vec::new(),
+    };
+    let cjson = serde_json::to_value(&contract).map_err(|e| e.to_string())?;
+    project.packages[pkg_idx].contracts.push(cjson);
+    project.packages[pkg_idx]
+        .nodes
+        .iter_mut()
+        .find(|n| n.name == node_name)
+        .unwrap()
+        .contract = Some(cname);
     Ok(())
 }
 

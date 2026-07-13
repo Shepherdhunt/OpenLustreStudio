@@ -1297,6 +1297,9 @@ fn cmd_fuzz(
             report.unfuzzable_inputs.join(", ")
         );
     }
+    if !report.assumes.is_empty() {
+        println!("drawing within contract assumption(s): {}", report.assumes.join("; "));
+    }
     if report.clean() {
         println!("fuzz: CLEAN — no crashes, violations, or predicate hits");
         return Ok(());

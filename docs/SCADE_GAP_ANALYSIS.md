@@ -13,7 +13,7 @@ cannot code your way to a qualification certificate), and prioritizes the former
 
 **Repo**: `C:\Users\Jonathan\Projects\OpenLustreStudio` (Rust workspace, branch
 `main`). **Full check**: `cargo test --workspace --no-fail-fast` (70 result
-groups green as of 2026-07-13 on Linux/gcc; 56 groups were green 2026-06-16
+groups green as of 2026-07-13 on Linux/gcc (306 tests); 56 groups were green 2026-06-16
 on Windows/MSVC) plus `openlustre lib-check libraries` (52 blocks / 48
 contracts) — the workspace builds with zero warnings across all targets. The Studio GUI is one embedded
 HTML page, `crates/ol_cli/src/studio_ui.html`, served by
@@ -42,8 +42,31 @@ emulated-target backend** (`clite-emulate`, user-mode + full-system arm64 —
 needs a Docker host to verify), and the **per-target integration entry
 skeleton**.
 
-**Landed recently (newest first):** **Interactive fuzz flow (2026-07-13):**
-fuzzing is a simulator mode, not just a batch tab. Right-click an operator ▸
+**Landed recently (newest first):** **Fuzz auto-fix + go-to-cycle
+(2026-07-13):** two follow-ons to the fuzz flow. **Auto-fix**: a crash
+finding attributed to its equation (the simulator now prefixes eval errors
+with `in equation \`name\``) gains a **🔧 Fix…** button offering the two
+SCADE-shaped remedies. **Assume** records the operator's precondition in its
+contract (`POST /api/edit/add_assume` — creates the contract if absent,
+rejects clauses that reference non-inputs); the fuzzer then draws inputs
+*within* the assumptions (rejection sampling, bounded, reported as "drawing
+within: …"), Kind 2 ships them as CoCoSpec `assume`, and callers inherit the
+obligation — so re-fuzzing is clean. **Guard** defensively rewrites the
+offending equation (`q = if den <> 0 then num/den else 0`) via the journaled
+`update_equation`. `POST /api/fuzz/diagnose` derives the divisor sites, the
+assume, and the guarded body; both fixes are one undoable edit. **Go to
+cycle N**: the simulator transport gains an absolute-cycle jump — forward
+runs the intervening cycles in one batched simulate (server-fuzzed rows when
+Fuzz Operator is on, respecting assumptions; a crash mid-jump is binary-
+searched so the trace stops exactly at the fault with the pre-jump history
+kept), backward is the exact rewind. Cycles are the synchronous base clock
+(one tick per cycle); the wall-clock period is the deployment's scheduler,
+not the model's — so "cycle 400" is 400 ticks. Verified by engine tests
+(assume-respecting draws, batch rows, equation attribution), API tests
+(add_assume/diagnose/batch values, and an end-to-end fuzz→fix→clean), and a
+12-check Playwright run (jump to 400 held, exact rewind, fuzzed jump,
+crash-during-jump halt, diagnose→assume→clean). Before that: **Interactive
+fuzz flow (2026-07-13):** fuzzing is a simulator mode, not just a batch tab. Right-click an operator ▸
 **Build & Simulate** builds it as the root and starts the watch-table run,
 whose transport is now **⏮ ×5 / ◀ Reverse / Step ▶ / ×5 ⏭ / ▶▶ Free Run /
 Stop** (all in the Simulation menu too). **Reverse** truncates the input

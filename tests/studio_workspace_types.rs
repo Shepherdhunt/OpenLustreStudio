@@ -1075,3 +1075,100 @@ fn fuzz_values_endpoint_draws_watch_ready_inputs() {
     let (s, body) = request(port, "POST", "/api/fuzz/values", r#"{"node":"Nope"}"#).unwrap();
     assert_eq!(s, 400, "{body}");
 }
+
+/// Auto-fix a fuzz crash finding two ways, end to end: (a) add a contract
+/// assumption so the fuzzer draws within `den <> 0` (SCADE Assume), and
+/// (b) guard the equation defensively. After either, re-fuzzing is clean.
+#[test]
+fn fuzz_autofix_assume_and_guard_close_the_finding() {
+    let g = start_server_on_workspace("ws_autofix");
+    let port = g.port;
+
+    let seed_ratio = || {
+        post_ok(port, "/api/edit/add_node", r#"{"name":"Ratio","kind":"operator"}"#);
+        post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"input","name":"num","type":"int32"}"#);
+        post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"input","name":"den","type":"int32"}"#);
+        post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio","side":"output","name":"q","type":"int32"}"#);
+        post_ok(port, "/api/edit/add_equation", r#"{"node":"Ratio","lhs":"q","body":"num / den"}"#);
+        post_ok(port, "/api/edit/set_main", r#"{"main":"Ratio"}"#);
+    };
+    seed_ratio();
+
+    // The finding, and its crash detail (attributed to equation `q`).
+    let fuzz = |seed: u32| -> serde_json::Value {
+        let (s, b) = request(port, "POST", "/api/fuzz", &format!(r#"{{"seed":{seed},"cycles":10,"iterations":60}}"#)).unwrap();
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+    let rep = fuzz(7);
+    let crash = rep["findings"].as_array().unwrap().iter()
+        .find(|f| f["kind"] == "crash").expect("crash found").clone();
+    let detail = crash["detail"].as_str().unwrap();
+    assert!(detail.contains("in equation `q`"), "attributed: {detail}");
+
+    // diagnose derives the divisor, the assume, and the guarded rewrite.
+    let (s, b) = request(port, "POST", "/api/fuzz/diagnose",
+        &serde_json::json!({ "node": "Ratio", "detail": detail }).to_string()).unwrap();
+    assert_eq!(s, 200, "{b}");
+    let diag: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(diag["divisors"], serde_json::json!(["den"]), "{diag}");
+    assert_eq!(diag["assume"], "den <> 0", "{diag}");
+    assert_eq!(diag["equation_index"], 0, "{diag}");
+    assert!(diag["guarded_body"].as_str().unwrap().contains("if den <> 0 then"), "{diag}");
+
+    // -- Route A: add the assumption. Re-fuzz is clean and reports the assume.
+    let (s, b) = request(port, "POST", "/api/edit/add_assume",
+        r#"{"node":"Ratio","name":"den nonzero","expr":"den <> 0"}"#).unwrap();
+    assert_eq!(s, 200, "{b}");
+    let rep = fuzz(7);
+    assert_eq!(rep["clean"], true, "assumption closes the crash: {rep}");
+    assert_eq!(rep["assumes"], serde_json::json!(["den nonzero"]), "{rep}");
+    // The assumption reaches the Kind 2 view as CoCoSpec `assume`.
+    let (s, con) = request(port, "GET", "/api/contracts_view", "").unwrap_or((0, String::new()));
+    if s == 200 { assert!(con.contains("den"), "assume surfaces in contract view"); }
+
+    // -- Route B: on a fresh operator, guard the equation instead.
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Ratio2","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio2","side":"input","name":"num","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio2","side":"input","name":"den","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Ratio2","side":"output","name":"q","type":"int32"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Ratio2","lhs":"q","body":"num / den"}"#);
+    post_ok(port, "/api/edit/set_main", r#"{"main":"Ratio2"}"#);
+    let rep = fuzz(7);
+    let detail = rep["findings"].as_array().unwrap().iter()
+        .find(|f| f["kind"] == "crash").expect("crash")["detail"].as_str().unwrap().to_string();
+    let (_, b) = request(port, "POST", "/api/fuzz/diagnose",
+        &serde_json::json!({ "node": "Ratio2", "detail": detail }).to_string()).unwrap();
+    let diag: serde_json::Value = serde_json::from_str(&b).unwrap();
+    let guarded = diag["guarded_body"].as_str().unwrap();
+    post_ok(port, "/api/edit/update_equation",
+        &serde_json::json!({ "node": "Ratio2", "index": 0, "lhs": "q", "body": guarded }).to_string());
+    let rep = fuzz(7);
+    assert_eq!(rep["clean"], true, "the guard closes the crash: {rep}");
+
+    // An assumption may only reference inputs — a body over the output is rejected.
+    let (s, b) = request(port, "POST", "/api/edit/add_assume",
+        r#"{"node":"Ratio2","expr":"q > 0"}"#).unwrap();
+    assert_eq!(s, 400, "{b}");
+    assert!(b.contains("not an input"), "{b}");
+}
+
+/// Batch draws for "go to cycle N": /api/fuzz/values with count returns a
+/// chain of rows, deterministic per seed.
+#[test]
+fn fuzz_values_batches_rows_for_goto_cycle() {
+    let g = start_server_on_workspace("ws_fuzz_batch");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_node", r#"{"name":"B","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"B","side":"input","name":"x","type":"int16"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"B","side":"output","name":"y","type":"int16"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"B","lhs":"y","body":"x"}"#);
+    post_ok(port, "/api/edit/set_main", r#"{"main":"B"}"#);
+
+    let (s, b) = request(port, "POST", "/api/fuzz/values", r#"{"seed":5,"count":50}"#).unwrap();
+    assert_eq!(s, 200, "{b}");
+    let d: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(d["rows"].as_array().unwrap().len(), 50, "{d}");
+    let (_, b2) = request(port, "POST", "/api/fuzz/values", r#"{"seed":5,"count":50}"#).unwrap();
+    assert_eq!(b, b2, "deterministic per seed");
+}
