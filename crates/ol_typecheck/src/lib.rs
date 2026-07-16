@@ -154,6 +154,8 @@ pub fn check_project(project: &Project) -> CheckReport {
         }
     }
 
+    check_no_recursion(project, &mut diags);
+
     for n in project.all_nodes() {
         if generics::is_template(n) {
             // A generic TEMPLATE checks against a representative
@@ -658,6 +660,96 @@ fn check_pre_initialization(
             }
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
+    }
+}
+
+/// SCADE (and the synchronous model) forbid recursive operator instantiation:
+/// a node may not call itself, directly or through a cycle of calls. Such a
+/// cycle has no bounded unfolding into a single-pass step function, so we
+/// reject it here (E0102) with the cycle spelled out. Iterated functions
+/// (`map`/`fold` bodies) count as callees too.
+fn check_no_recursion(project: &Project, diags: &mut Vec<Diagnostic>) {
+    // Adjacency: node name -> the nodes it calls.
+    let mut callees: HashMap<String, Vec<String>> = HashMap::new();
+    for n in project.all_nodes() {
+        let mut set: Vec<String> = Vec::new();
+        let mut push = |name: &str| {
+            if !set.contains(&name.to_string()) {
+                set.push(name.to_string());
+            }
+        };
+        for eq in &n.equations {
+            eq.rhs.visit(|e| match e {
+                Expr::Call { node, .. } => push(node),
+                Expr::Iterate { node, .. } => push(node),
+                _ => {}
+            });
+        }
+        callees.insert(n.name.clone(), set);
+    }
+
+    // DFS colouring; report the first cycle through each node once.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: HashMap<String, Mark> = callees.keys().map(|k| (k.clone(), Mark::White)).collect();
+    let mut reported: BTreeSet<String> = BTreeSet::new();
+
+    fn dfs(
+        node: &str,
+        callees: &HashMap<String, Vec<String>>,
+        color: &mut HashMap<String, Mark>,
+        stack: &mut Vec<String>,
+        reported: &mut BTreeSet<String>,
+        diags: &mut Vec<Diagnostic>,
+    ) {
+        color.insert(node.to_string(), Mark::Gray);
+        stack.push(node.to_string());
+        for c in callees.get(node).into_iter().flatten() {
+            // A callee outside the project (library block not loaded) has no
+            // edges here; `E0100` already flags a genuinely unknown call.
+            match color.get(c).copied().unwrap_or(Mark::Black) {
+                Mark::Gray => {
+                    // Found a back-edge: the cycle is stack[pos..] + c.
+                    if let Some(pos) = stack.iter().position(|s| s == c) {
+                        let mut cycle: Vec<String> = stack[pos..].to_vec();
+                        cycle.push(c.clone());
+                        let key = {
+                            let mut sorted = cycle.clone();
+                            sorted.sort();
+                            sorted.join(",")
+                        };
+                        if reported.insert(key) {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0102",
+                                    format!(
+                                        "recursive operator instantiation is not allowed: {}",
+                                        cycle.join(" → ")
+                                    ),
+                                )
+                                .with_context(format!("node {node}")),
+                            );
+                        }
+                    }
+                }
+                Mark::White => dfs(c, callees, color, stack, reported, diags),
+                Mark::Black => {}
+            }
+        }
+        stack.pop();
+        color.insert(node.to_string(), Mark::Black);
+    }
+
+    let names: Vec<String> = callees.keys().cloned().collect();
+    for n in names {
+        if color.get(&n).copied() == Some(Mark::White) {
+            let mut stack = Vec::new();
+            dfs(&n, &callees, &mut color, &mut stack, &mut reported, diags);
+        }
     }
 }
 

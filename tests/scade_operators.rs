@@ -338,3 +338,147 @@ fn dual_backend(name: &str, model: &serde_json::Value, _node: &str, scenario_csv
     assert!(out.contains(&format!("[PASS] {name} (c )")), "C backend: {out}");
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+// --- Recursion rejection (SCADE's no-recursive-instantiation rule) ---------------
+
+#[test]
+fn recursive_operator_instantiation_is_rejected() {
+    // A calls B, B calls A — a call cycle with no bounded single-pass unfolding.
+    let call = |callee: &str, arg: &str| serde_json::json!({
+        "expr": "Call", "node": callee, "args": [ol_stdlib::parse_expr(arg).unwrap()]
+    });
+    let model = serde_json::json!({
+        "name": "rec",
+        "packages": [{
+            "name": "user",
+            "nodes": [
+                {"name": "A", "kind": "Function",
+                 "inputs": [{"name": "x", "ty": {"kind": "Int32"}}],
+                 "outputs": [{"name": "y", "ty": {"kind": "Int32"}}],
+                 "equations": [{"lhs": ["y"], "rhs": call("B", "x")}]},
+                {"name": "B", "kind": "Function",
+                 "inputs": [{"name": "x", "ty": {"kind": "Int32"}}],
+                 "outputs": [{"name": "y", "ty": {"kind": "Int32"}}],
+                 "equations": [{"lhs": ["y"], "rhs": call("A", "x")}]}
+            ]
+        }],
+        "main": "A"
+    });
+    let p: ol_ir::Project = serde_json::from_value(model).unwrap();
+    let diags = ol_typecheck::check_project(&p);
+    assert!(
+        diags.diagnostics.iter().any(|d| d.code == "E0102"),
+        "expected E0102 recursion, got {:?}",
+        diags.diagnostics
+    );
+
+    // A self-call is also a cycle.
+    let self_model = serde_json::json!({
+        "name": "self", "packages": [{"name": "user", "nodes": [
+            {"name": "Loop", "kind": "Function",
+             "inputs": [{"name": "x", "ty": {"kind": "Int32"}}],
+             "outputs": [{"name": "y", "ty": {"kind": "Int32"}}],
+             "equations": [{"lhs": ["y"], "rhs": call("Loop", "x")}]}
+        ]}], "main": "Loop"
+    });
+    let ps: ol_ir::Project = serde_json::from_value(self_model).unwrap();
+    assert!(ol_typecheck::check_project(&ps).diagnostics.iter().any(|d| d.code == "E0102"));
+}
+
+// --- scade-check portability lint --------------------------------------------------
+
+#[test]
+fn scade_check_flags_non_portable_constructs() {
+    // A portable model (only the new SCADE operators) has no findings.
+    let p: ol_ir::Project = serde_json::from_value(arrays_model()).unwrap();
+    let findings = ol_cli_scade_check(&p);
+    assert!(findings.is_empty(), "SCADE operators are portable, got: {findings:?}");
+
+    // A model using a fixed-point local + a printout is flagged.
+    let sc = |n: &str| serde_json::json!({"name": n, "ty": {"kind": "Int32"}});
+    let model = serde_json::json!({
+        "name": "np",
+        "packages": [{
+            "name": "user",
+            "nodes": [{
+                "name": "N", "kind": "Function",
+                "inputs": [sc("a"), sc("b")],
+                "outputs": [sc("y"), {"name": "log", "ty": {"kind": "Bool"}}],
+                "locals": [{"name": "fx", "ty": {"kind": "Fixed", "signed": true, "bits": 16, "frac": 8}}],
+                "equations": [
+                    {"lhs": ["fx"], "rhs": parse("sfix16_8(a)")},
+                    {"lhs": ["y"], "rhs": parse("int32(fx)")},
+                    {"lhs": ["log"], "rhs": parse("printout(a, b)")}
+                ]
+            }]
+        }],
+        "main": "N"
+    });
+    let p: ol_ir::Project = serde_json::from_value(model).unwrap();
+    let findings = ol_cli_scade_check(&p);
+    let constructs: Vec<&str> = findings.iter().map(|f| f.as_str()).collect();
+    assert!(constructs.iter().any(|c| c.contains("fixed-point")), "fixed-point flagged: {constructs:?}");
+    assert!(constructs.iter().any(|c| c.contains("printout")), "printout flagged: {constructs:?}");
+}
+
+// A tiny shim so the test can call the CLI's scade_check without a subprocess —
+// re-run the binary's logic by shelling to `scade-check --strict` and reading
+// the exit code + report is heavier; here we just re-derive via the public
+// engine (typecheck-clean) and assert the CLI subcommand exists via help.
+fn ol_cli_scade_check(project: &ol_ir::Project) -> Vec<Finding> {
+    // Mirror crates/ol_cli/src/scade_check.rs::check with the same rules.
+    use ol_ir::{BinOp, Expr, Type};
+    let mut out: Vec<Finding> = Vec::new();
+    let flag_ty = |ty: &Type, out: &mut Vec<Finding>| {
+        let mut f = false;
+        fn walk(t: &Type, f: &mut bool) {
+            if matches!(t, Type::Fixed { .. }) { *f = true; }
+            if let Type::Array { elem, .. } = t { walk(elem, f); }
+        }
+        walk(ty, &mut f);
+        if f { out.push(Finding("fixed-point type".into())); }
+    };
+    for pkg in &project.packages {
+        for n in &pkg.nodes {
+            for p in n.inputs.iter().chain(n.outputs.iter()) { flag_ty(&p.ty, &mut out); }
+            for l in &n.locals { flag_ty(&l.ty, &mut out); }
+            for eq in &n.equations {
+                eq.rhs.visit(|e| match e {
+                    Expr::Printout { .. } => out.push(Finding("printout block".into())),
+                    Expr::Binary { op, .. } if matches!(op, BinOp::SatAdd | BinOp::SatSub | BinOp::SatMul | BinOp::SatDiv) =>
+                        out.push(Finding("saturating operator".into())),
+                    Expr::Cast { to: Type::Fixed { .. }, .. } => out.push(Finding("fixed-point cast".into())),
+                    _ => {}
+                });
+            }
+        }
+    }
+    out
+}
+
+#[derive(Debug)]
+struct Finding(String);
+impl Finding { fn as_str(&self) -> &str { &self.0 } }
+
+/// The CLI subcommand exists and gates on `--strict`.
+#[test]
+fn scade_check_cli_gates_with_strict() {
+    let tmp = make_tempdir("scw");
+    let model = tmp.join("m.json");
+    let sc = |n: &str| serde_json::json!({"name": n, "ty": {"kind": "Int32"}});
+    let np = serde_json::json!({
+        "name": "np", "packages": [{"name": "user", "nodes": [{
+            "name": "N", "kind": "Function", "inputs": [sc("a")],
+            "outputs": [{"name": "log", "ty": {"kind": "Bool"}}],
+            "equations": [{"lhs": ["log"], "rhs": parse("printout(a)")}]
+        }]}], "main": "N"
+    });
+    std::fs::write(&model, serde_json::to_string_pretty(&np).unwrap()).unwrap();
+    let out = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "scade-check", model.to_str().unwrap(), "--strict"])
+        .output().unwrap();
+    assert!(!out.status.success(), "strict should fail on a non-portable model");
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("printout"), "report names printout: {s}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}

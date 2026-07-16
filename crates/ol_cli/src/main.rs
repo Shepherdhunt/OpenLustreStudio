@@ -9,6 +9,7 @@ mod doc_gen;
 mod fmu;
 mod lustre_import;
 mod model_diff;
+mod scade_check;
 mod scenario;
 mod studio_server;
 mod sysml;
@@ -212,6 +213,19 @@ enum Cmd {
     /// present and what functionality each one unlocks. The core tool needs
     /// none of them.
     Doctor,
+    /// Portability gate for the design-here, qualify-in-SCADE workflow: report
+    /// every construct with no 1:1 Ansys SCADE equivalent (fixed-point types,
+    /// saturating ops, printout). A clean report means the model can be
+    /// redrawn in SCADE block-for-block. `--strict` exits nonzero on findings.
+    ScadeCheck {
+        model: PathBuf,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Exit nonzero if any non-portable construct is present (the CI gate
+        /// before a SCADE handoff).
+        #[arg(long)]
+        strict: bool,
+    },
     /// Fuzz-simulate an operator: pseudo-random, type-aware inputs on the
     /// selected ports, with automatic crash / contract-violation / non-finite
     /// detection plus optional user error predicates. Deterministic per seed;
@@ -493,6 +507,15 @@ fn main() -> Result<()> {
             ),
         },
         Cmd::Doctor => cmd_doctor(),
+        Cmd::ScadeCheck { model, with_stdlib, strict } => {
+            let project = load_with_stdlib(&model, with_stdlib.as_deref())?;
+            let findings = scade_check::check(&project);
+            print!("{}", scade_check::report(&findings));
+            if strict && !findings.is_empty() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Cmd::Fuzz {
             model,
             node,

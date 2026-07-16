@@ -1172,3 +1172,51 @@ fn fuzz_values_batches_rows_for_goto_cycle() {
     let (_, b2) = request(port, "POST", "/api/fuzz/values", r#"{"seed":5,"count":50}"#).unwrap();
     assert_eq!(b, b2, "deterministic per seed");
 }
+
+/// The SCADE predefined operators are draggable palette blocks: dropping each
+/// produces a valid equation, and they appear in the operation catalog.
+#[test]
+fn scade_operator_palette_blocks_drop_and_build() {
+    let g = start_server_on_workspace("ws_scade_ops");
+    let port = g.port;
+
+    // The catalog advertises the new blocks.
+    let (s, catalog) = request(port, "GET", "/api/operations", "").unwrap();
+    assert_eq!(s, 200, "{catalog}");
+    for id in ["sharp", "dyn_index", "replicate", "slice", "transpose", "update"] {
+        assert!(catalog.contains(id), "operation catalog missing `{id}`");
+    }
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Blk","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Blk","side":"input","name":"xs","type":"int32[4]"}"#);
+
+    // Each drop returns 200 and creates an equation carrying the operator.
+    let drop = |body: &str| {
+        let (s, b) = request(port, "POST", "/api/edit/add_operation", body).unwrap();
+        assert_eq!(s, 200, "drop {body} failed: {b}");
+    };
+    drop(r#"{"node":"Blk","op":"sharp","inputs":3,"x":40,"y":40}"#);
+    drop(r#"{"node":"Blk","op":"replicate","param":"3","x":40,"y":120}"#);
+    drop(r#"{"node":"Blk","op":"slice","param":"1..2","x":40,"y":200}"#);
+    drop(r#"{"node":"Blk","op":"dyn_index","x":40,"y":280}"#);
+    drop(r#"{"node":"Blk","op":"transpose","x":40,"y":340}"#);
+    drop(r#"{"node":"Blk","op":"update","param":"[2]","x":40,"y":400}"#);
+
+    // The generated Lustre carries each operator's surface form (the reverse
+    // proof that the palette body maps to real IR that parses and formats).
+    let (s, text) = request(port, "GET", "/api/lustre", "").unwrap();
+    assert_eq!(s, 200, "{text}");
+    // The Kind 2 view expands `#` to its provable boolean form; the rest keep
+    // their surface shape.
+    assert!(text.contains("not (p0_1 and p0_2)"), "sharp block (expanded): {text}");
+    assert!(text.contains("replicate(p1_1, 3)"), "replicate block: {text}");
+    assert!(text.contains("[1 .. 2]"), "slice block: {text}");
+    assert!(text.contains(".["), "dynamic projection block: {text}");
+    assert!(text.contains("transpose("), "transpose block: {text}");
+    assert!(text.contains("with [2]"), "update block: {text}");
+
+    // A bad slice param is a clean 400, not a panic.
+    let (s, _) = request(port, "POST", "/api/edit/add_operation",
+        r#"{"node":"Blk","op":"slice","param":"nope","x":0,"y":0}"#).unwrap();
+    assert_eq!(s, 400);
+}

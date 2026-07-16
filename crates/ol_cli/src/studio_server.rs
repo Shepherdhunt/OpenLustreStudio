@@ -886,6 +886,12 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         Expr::Case { .. } => op("CASE"),
         Expr::ArrayOp { op: aop, .. } => op(aop.name()),
         Expr::Printout { .. } => op("PRINT"),
+        Expr::Sharp { .. } => op("#"),
+        Expr::DynIndex { .. } => op(".[ ]"),
+        Expr::Replicate { .. } => op("v^n"),
+        Expr::Slice { .. } => op("[..]"),
+        Expr::Transpose { .. } => op("Tᵀ"),
+        Expr::Update { .. } => op("with"),
         Expr::FloatIntrinsic { op: fop, single, .. } => {
             if *single { op(&fop.single_name()) } else { op(fop.name()) }
         }
@@ -3279,6 +3285,12 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "record_field" => (vec!["structure"], "field type"),
         "array_index" => (vec!["array"], "element type"),
         "printout" => (n("scalar signal"), "terminal_out : bool"),
+        "sharp" => (n("bool"), "bool (at most one true)"),
+        "dyn_index" => (vec!["array", "integer index", "default"], "element (or default if out of range)"),
+        "replicate" => (vec!["value"], "array of n copies"),
+        "slice" => (vec!["array"], "sub-array [lo..hi]"),
+        "transpose" => (vec!["2-D array"], "transposed 2-D array"),
+        "update" => (vec!["array/record", "new value"], "copy with one position replaced"),
         "concat" => (vec!["array", "array"], "array (lengths summed)"),
         "reverse" => (vec!["array"], "array"),
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
@@ -3545,6 +3557,9 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("xor", "xor", 2, "bool"),
             op("not", "not", 1, "bool"),
             op("implies", "implies (=>)", 2, "bool"),
+            OpDef { id: "sharp", label: "sharp #(…) at most one", pins: 2, out_type: "bool",
+                    param: None, enabled: true,
+                    hint: "SCADE's #: true when at most one wired boolean is true; drop with 2+ pins" },
         ]),
         ("Structures/Arrays", vec![
             OpDef { id: "record_field", label: "field access (.f)", pins: 1, out_type: "int32",
@@ -3557,6 +3572,22 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
                     hint: "flip element order; param is the array type, e.g. int32[4]" },
             OpDef { id: "array_index", label: "array index ([i])", pins: 1, out_type: "int32",
                     param: Some("index"), enabled: true, hint: "read one element by constant index" },
+            OpDef { id: "dyn_index", label: "dynamic projection (.[i] default)", pins: 3, out_type: "int32",
+                    param: None, enabled: true,
+                    hint: "SCADE bounds-safe read: pin 1 = array, pin 2 = index, pin 3 = default; \
+                           out-of-range yields the default (never a fault)" },
+            OpDef { id: "replicate", label: "replicate (v ^ n)", pins: 1, out_type: "int32",
+                    param: Some("size"), enabled: true,
+                    hint: "SCADE's v^n: an array of n copies of the value; param is the constant n" },
+            OpDef { id: "slice", label: "slice (a[lo..hi])", pins: 1, out_type: "int32",
+                    param: Some("lo..hi"), enabled: true,
+                    hint: "sub-array between inclusive constant bounds; param is `lo..hi`, e.g. 1..3" },
+            OpDef { id: "transpose", label: "transpose", pins: 1, out_type: "int32",
+                    param: None, enabled: true, hint: "transpose a 2-D array (rows ↔ columns)" },
+            OpDef { id: "update", label: "update (a with […]=v)", pins: 2, out_type: "int32",
+                    param: Some("[i] or .field"), enabled: true,
+                    hint: "SCADE functional update: pin 1 = array/record, pin 2 = new value; \
+                           param `[2]` or `.field` picks the position (base unchanged)" },
         ]),
         ("Time/Statefuls", vec![
             op("init_pre", "init -> pre (followed by)", 2, "int32"),
@@ -3735,6 +3766,45 @@ fn operation_body(
             format!("{a}[{i}]")
         }
         "printout" => format!("printout({})", pins.join(", ")),
+        // SCADE `#(a, b, …)`: at most one boolean operand true.
+        "sharp" => format!("#({})", pins.join(", ")),
+        // SCADE bounds-safe dynamic projection `(array.[index] default d)`.
+        "dyn_index" => format!("({a}.[{b}] default {c})"),
+        // SCADE replication `replicate(value, n)` (SCADE's `value ^ n`). The
+        // param is the constant size; the result array type is inferred.
+        "replicate" => {
+            let n: u64 = param
+                .and_then(|p| p.trim().parse().ok())
+                .ok_or("replicate needs an integer size parameter, e.g. `4`")?;
+            format!("replicate({a}, {n})")
+        }
+        // SCADE slice `array[lo .. hi]` — the param is `lo..hi`.
+        "slice" => {
+            let range = param.ok_or("slice needs bounds, e.g. `1..3`")?;
+            let (lo, hi) = range
+                .split_once("..")
+                .ok_or("slice bounds must be `lo..hi`, e.g. `1..3`")?;
+            let lo: i64 = lo.trim().parse().map_err(|_| "slice lo must be an integer")?;
+            let hi: i64 = hi.trim().parse().map_err(|_| "slice hi must be an integer")?;
+            format!("{a}[{lo} .. {hi}]")
+        }
+        "transpose" => format!("transpose({a})"),
+        // SCADE functional update: param picks `[index]` or `.field`.
+        "update" => {
+            let pos = param.ok_or("update needs `[index]` or `.field`, e.g. `[2]` or `.x`")?;
+            let pos = pos.trim();
+            if let Some(idx) = pos.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+                let idx: i64 = idx.trim().parse().map_err(|_| "update index must be an integer")?;
+                format!("({a} with [{idx}] = {b})")
+            } else if let Some(field) = pos.strip_prefix('.') {
+                if !is_identifier(field) {
+                    return Err(format!("`{field}` is not a valid field name"));
+                }
+                format!("({a} with .{field} = {b})")
+            } else {
+                return Err("update position must be `[index]` or `.field`".into());
+            }
+        }
         // The param is the RESULT array type (e.g. `int32[8]`), since the
         // operand types are unknown until the red pins are wired.
         "concat" | "reverse" => {
@@ -3901,6 +3971,16 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
             let n = n as usize;
             if !(1..=MAX_VARIADIC_INPUTS).contains(&n) {
                 return bad(&format!("printout takes 1 to {MAX_VARIADIC_INPUTS} inputs"));
+            }
+            n
+        }
+        // sharp `#` takes 2..=12 boolean operands.
+        Some(n) if op_id == "sharp" => {
+            let n = n as usize;
+            if !(MIN_VARIADIC_INPUTS..=MAX_VARIADIC_INPUTS).contains(&n) {
+                return bad(&format!(
+                    "sharp takes {MIN_VARIADIC_INPUTS} to {MAX_VARIADIC_INPUTS} inputs"
+                ));
             }
             n
         }
