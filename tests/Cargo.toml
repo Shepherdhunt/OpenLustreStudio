@@ -203,3 +203,7 @@ path = "cruise_control.rs"
 [[test]]
 name = "fuzz_sim"
 path = "fuzz_sim.rs"
+
+[[test]]
+name = "scade_operators"
+path = "scade_operators.rs"

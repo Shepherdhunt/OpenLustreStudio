@@ -588,7 +588,23 @@ fn is_temporal_reference(expr: &Expr, name: &str) -> bool {
             }
             Expr::FloatIntrinsic { args, .. }
             | Expr::ArrayOp { args, .. }
-            | Expr::Printout { args } => args.iter().all(|a| walk(a, name, in_pre)),
+            | Expr::Printout { args }
+            | Expr::Sharp { args } => args.iter().all(|a| walk(a, name, in_pre)),
+            Expr::DynIndex { base, index, default } => {
+                walk(base, name, in_pre) && walk(index, name, in_pre) && walk(default, name, in_pre)
+            }
+            Expr::Replicate { value, size } => {
+                walk(value, name, in_pre) && walk(size, name, in_pre)
+            }
+            Expr::Slice { base, lo, hi } => {
+                walk(base, name, in_pre) && walk(lo, name, in_pre) && walk(hi, name, in_pre)
+            }
+            Expr::Transpose { base } => walk(base, name, in_pre),
+            Expr::Update { base, index, value, .. } => {
+                walk(base, name, in_pre)
+                    && index.as_deref().map(|i| walk(i, name, in_pre)).unwrap_or(true)
+                    && walk(value, name, in_pre)
+            }
             Expr::Case { sel, arms, default } => {
                 walk(sel, name, in_pre)
                     && arms.iter().all(|a| walk(&a.value, name, in_pre))

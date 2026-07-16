@@ -620,10 +620,33 @@ fn check_pre_initialization(
         }
         Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 check_pre_initialization(a, under_arrow_body, diags, ctx);
             }
+        }
+        Expr::DynIndex { base, index, default } => {
+            check_pre_initialization(base, under_arrow_body, diags, ctx);
+            check_pre_initialization(index, under_arrow_body, diags, ctx);
+            check_pre_initialization(default, under_arrow_body, diags, ctx);
+        }
+        Expr::Replicate { value, size } => {
+            check_pre_initialization(value, under_arrow_body, diags, ctx);
+            check_pre_initialization(size, under_arrow_body, diags, ctx);
+        }
+        Expr::Slice { base, lo, hi } => {
+            check_pre_initialization(base, under_arrow_body, diags, ctx);
+            check_pre_initialization(lo, under_arrow_body, diags, ctx);
+            check_pre_initialization(hi, under_arrow_body, diags, ctx);
+        }
+        Expr::Transpose { base } => check_pre_initialization(base, under_arrow_body, diags, ctx),
+        Expr::Update { base, index, value, .. } => {
+            check_pre_initialization(base, under_arrow_body, diags, ctx);
+            if let Some(i) = index {
+                check_pre_initialization(i, under_arrow_body, diags, ctx);
+            }
+            check_pre_initialization(value, under_arrow_body, diags, ctx);
         }
         Expr::Case { sel, arms, default } => {
             check_pre_initialization(sel, under_arrow_body, diags, ctx);
@@ -635,6 +658,15 @@ fn check_pre_initialization(
             }
         }
         Expr::Const { .. } | Expr::Var { .. } => {}
+    }
+}
+
+/// If a type hint is an array, the hint for its element (so `replicate(v, n)`
+/// under an `int8[]` hint types `v` as `int8`). `None` otherwise.
+fn hint_elem(hint: Option<&Type>) -> Option<&Type> {
+    match hint {
+        Some(Type::Array { elem, .. }) => Some(elem),
+        _ => None,
     }
 }
 
@@ -887,6 +919,231 @@ pub fn infer_expr_type(
                     elem: Box::new(shapes[0].0.clone()),
                     len: shapes[0].1,
                 }),
+            }
+        }
+        // SCADE `#(a, b, …)`: every operand boolean, result boolean.
+        Expr::Sharp { args } => {
+            for a in args {
+                if let Some(t) = infer_expr_type(a, env, sigs, node, diags, ctx, tctx, Some(&Type::Bool)) {
+                    if tctx.resolve(&t) != Type::Bool {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0195",
+                                format!("`#` operands must be boolean, got {t:?}"),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                    }
+                }
+            }
+            Some(Type::Bool)
+        }
+        // SCADE bounds-safe dynamic projection `(base.[i] default d)`: element
+        // type of `base`, index integer, default of the element type.
+        Expr::DynIndex { base, index, default } => {
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
+            let elem = match tctx.resolve(&bt) {
+                Type::Array { elem, .. } => *elem,
+                other => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0196",
+                            format!("dynamic projection `.[i]` needs an array, got {other:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            };
+            let it = infer_expr_type(index, env, sigs, node, diags, ctx, tctx, Some(&Type::Int32))?;
+            if !tctx.resolve(&it).is_integer() {
+                diags.push(
+                    Diagnostic::error("E0196", format!("dynamic index must be an integer, got {it:?}"))
+                        .with_context(ctx.to_string()),
+                );
+            }
+            if let Some(dt) = infer_expr_type(default, env, sigs, node, diags, ctx, tctx, Some(&elem)) {
+                if !types_compatible(tctx, &elem, &dt) {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0196",
+                            format!("dynamic projection default must match the element type {elem:?}, got {dt:?}"),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                }
+            }
+            Some(elem)
+        }
+        // SCADE replication `replicate(v, n)`: an array of `n` copies of `v`.
+        Expr::Replicate { value, size } => {
+            let vt = infer_expr_type(value, env, sigs, node, diags, ctx, tctx, hint_elem(hint))?;
+            let n = match size.const_int() {
+                Some(n) if n >= 0 => n as u32,
+                _ => {
+                    diags.push(
+                        Diagnostic::error(
+                            "E0197",
+                            "replication size must be a non-negative compile-time constant".to_string(),
+                        )
+                        .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            };
+            Some(Type::Array { elem: Box::new(vt), len: n })
+        }
+        // SCADE slice `base[lo .. hi]`: sub-array, inclusive bounds.
+        Expr::Slice { base, lo, hi } => {
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
+            let (elem, len) = match tctx.resolve(&bt) {
+                Type::Array { elem, len } => (*elem, len),
+                other => {
+                    diags.push(
+                        Diagnostic::error("E0198", format!("slice needs an array, got {other:?}"))
+                            .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            };
+            let (lo_v, hi_v) = match (lo.const_int(), hi.const_int()) {
+                (Some(a), Some(b)) => (a, b),
+                _ => {
+                    diags.push(
+                        Diagnostic::error("E0198", "slice bounds must be compile-time constants".to_string())
+                            .with_context(ctx.to_string()),
+                    );
+                    return None;
+                }
+            };
+            if lo_v < 0 || hi_v < lo_v || hi_v >= len as i64 {
+                diags.push(
+                    Diagnostic::error(
+                        "E0198",
+                        format!("slice [{lo_v} .. {hi_v}] is out of range for an array of length {len}"),
+                    )
+                    .with_context(ctx.to_string()),
+                );
+                return None;
+            }
+            Some(Type::Array { elem: Box::new(elem), len: (hi_v - lo_v + 1) as u32 })
+        }
+        // SCADE transpose: `T[m][n]` (array of m rows of n) → `T[n][m]`.
+        Expr::Transpose { base } => {
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, None)?;
+            match tctx.resolve(&bt) {
+                Type::Array { elem, len: m } => match tctx.resolve(&elem) {
+                    Type::Array { elem: inner, len: n } => Some(Type::Array {
+                        elem: Box::new(Type::Array { elem: inner, len: m }),
+                        len: n,
+                    }),
+                    other => {
+                        diags.push(
+                            Diagnostic::error(
+                                "E0199",
+                                format!("transpose needs a 2-D array (array of arrays), got rows of {other:?}"),
+                            )
+                            .with_context(ctx.to_string()),
+                        );
+                        None
+                    }
+                },
+                other => {
+                    diags.push(
+                        Diagnostic::error("E0199", format!("transpose needs an array, got {other:?}"))
+                            .with_context(ctx.to_string()),
+                    );
+                    None
+                }
+            }
+        }
+        // SCADE functional update `(base with [i] = v)` / `(base with .f = v)`:
+        // same type as `base`, with the element/field position's type checked.
+        Expr::Update { base, index, field, value } => {
+            let bt = infer_expr_type(base, env, sigs, node, diags, ctx, tctx, hint)?;
+            match (index, field) {
+                (Some(idx), None) => {
+                    let elem = match tctx.resolve(&bt) {
+                        Type::Array { elem, .. } => *elem,
+                        other => {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0200",
+                                    format!("`with [i] = v` needs an array base, got {other:?}"),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                            return None;
+                        }
+                    };
+                    let it = infer_expr_type(idx, env, sigs, node, diags, ctx, tctx, Some(&Type::Int32))?;
+                    if !tctx.resolve(&it).is_integer() {
+                        diags.push(
+                            Diagnostic::error("E0200", format!("update index must be an integer, got {it:?}"))
+                                .with_context(ctx.to_string()),
+                        );
+                    }
+                    if let Some(vt) = infer_expr_type(value, env, sigs, node, diags, ctx, tctx, Some(&elem)) {
+                        if !types_compatible(tctx, &elem, &vt) {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0200",
+                                    format!("update value must match the element type {elem:?}, got {vt:?}"),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                        }
+                    }
+                    Some(bt)
+                }
+                (None, Some(fname)) => {
+                    let rec_name = match tctx.resolve(&bt) {
+                        Type::Named { name } if tctx.record_fields(&name).is_some() => name,
+                        other => {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0200",
+                                    format!("`with .{fname} = v` needs a record base, got {other:?}"),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                            return None;
+                        }
+                    };
+                    let schema = tctx.record_fields(&rec_name).cloned().unwrap_or_default();
+                    match schema.iter().find(|rf| &rf.name == fname) {
+                        Some(rf) => {
+                            if let Some(vt) = infer_expr_type(value, env, sigs, node, diags, ctx, tctx, Some(&rf.ty)) {
+                                if !types_compatible(tctx, &rf.ty, &vt) {
+                                    diags.push(
+                                        Diagnostic::error(
+                                            "E0200",
+                                            format!("update of `{rec_name}.{fname}` expects {:?}, got {vt:?}", rf.ty),
+                                        )
+                                        .with_context(ctx.to_string()),
+                                    );
+                                }
+                            }
+                        }
+                        None => {
+                            diags.push(
+                                Diagnostic::error(
+                                    "E0200",
+                                    format!("record `{rec_name}` has no field `{fname}`"),
+                                )
+                                .with_context(ctx.to_string()),
+                            );
+                        }
+                    }
+                    Some(bt)
+                }
+                _ => {
+                    diags.push(
+                        Diagnostic::error("E0200", "update needs exactly one of [index] or .field".to_string())
+                            .with_context(ctx.to_string()),
+                    );
+                    None
+                }
             }
         }
         Expr::Case { sel, arms, default } => {
@@ -2035,7 +2292,8 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 collect_immediate_deps(a, out);
             }
@@ -2044,6 +2302,28 @@ fn collect_immediate_deps(expr: &Expr, out: &mut BTreeSet<String>) {
         Expr::Index { base, index } => {
             collect_immediate_deps(base, out);
             collect_immediate_deps(index, out);
+        }
+        Expr::DynIndex { base, index, default } => {
+            collect_immediate_deps(base, out);
+            collect_immediate_deps(index, out);
+            collect_immediate_deps(default, out);
+        }
+        Expr::Replicate { value, size } => {
+            collect_immediate_deps(value, out);
+            collect_immediate_deps(size, out);
+        }
+        Expr::Slice { base, lo, hi } => {
+            collect_immediate_deps(base, out);
+            collect_immediate_deps(lo, out);
+            collect_immediate_deps(hi, out);
+        }
+        Expr::Transpose { base } => collect_immediate_deps(base, out),
+        Expr::Update { base, index, value, .. } => {
+            collect_immediate_deps(base, out);
+            if let Some(i) = index {
+                collect_immediate_deps(i, out);
+            }
+            collect_immediate_deps(value, out);
         }
         Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {

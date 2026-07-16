@@ -252,6 +252,27 @@ fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
         // value so the monitor still compiles if one ever does.
         Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
         Expr::ArrayOp { .. } => "/* array op elided in monitor */ 0".into(),
+        // SCADE `#(…)`: at most one true — same sum-of-booleans as the emitter.
+        Expr::Sharp { args } => {
+            if args.is_empty() {
+                "true".into()
+            } else {
+                let terms: Vec<String> =
+                    args.iter().map(|a| format!("({} ? 1 : 0)", emit_mon_expr(a, scope))).collect();
+                format!("(({}) <= 1)", terms.join(" + "))
+            }
+        }
+        // Bounds-safe dynamic projection reads its held value in a monitor.
+        Expr::DynIndex { base, index, default } => format!(
+            "(({idx} >= 0) ? {b}[{idx}] : {d})",
+            idx = emit_mon_expr(index, scope),
+            b = emit_mon_expr(base, scope),
+            d = emit_mon_expr(default, scope),
+        ),
+        // Whole-array/record ops don't appear in boolean contracts; neutral.
+        Expr::Replicate { .. } | Expr::Slice { .. } | Expr::Transpose { .. } | Expr::Update { .. } => {
+            "/* array/record structure op elided in monitor */ 0".into()
+        }
         Expr::Printout { .. } => "true /* printout in monitor is just its value */".into(),
         // A ternary chain over the C enum constants, like the main emitter.
         Expr::Case { sel, arms, default } => {

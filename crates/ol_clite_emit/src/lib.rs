@@ -323,10 +323,33 @@ fn walk_call_targets(expr: &Expr, f: &mut impl FnMut(&str)) {
         // A `<math.h>` function, not a project node — only its operands walk.
         Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 walk_call_targets(a, f);
             }
+        }
+        Expr::DynIndex { base, index, default } => {
+            walk_call_targets(base, f);
+            walk_call_targets(index, f);
+            walk_call_targets(default, f);
+        }
+        Expr::Replicate { value, size } => {
+            walk_call_targets(value, f);
+            walk_call_targets(size, f);
+        }
+        Expr::Slice { base, lo, hi } => {
+            walk_call_targets(base, f);
+            walk_call_targets(lo, f);
+            walk_call_targets(hi, f);
+        }
+        Expr::Transpose { base } => walk_call_targets(base, f),
+        Expr::Update { base, index, value, .. } => {
+            walk_call_targets(base, f);
+            if let Some(i) = index {
+                walk_call_targets(i, f);
+            }
+            walk_call_targets(value, f);
         }
         Expr::Case { sel, arms, default } => {
             walk_call_targets(sel, f);
@@ -419,10 +442,33 @@ fn walk_calls_assign(expr: &Expr, map: &mut HashMap<usize, CallSite>, idx: &mut 
         }
         Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 walk_calls_assign(a, map, idx);
             }
+        }
+        Expr::DynIndex { base, index, default } => {
+            walk_calls_assign(base, map, idx);
+            walk_calls_assign(index, map, idx);
+            walk_calls_assign(default, map, idx);
+        }
+        Expr::Replicate { value, size } => {
+            walk_calls_assign(value, map, idx);
+            walk_calls_assign(size, map, idx);
+        }
+        Expr::Slice { base, lo, hi } => {
+            walk_calls_assign(base, map, idx);
+            walk_calls_assign(lo, map, idx);
+            walk_calls_assign(hi, map, idx);
+        }
+        Expr::Transpose { base } => walk_calls_assign(base, map, idx),
+        Expr::Update { base, index, value, .. } => {
+            walk_calls_assign(base, map, idx);
+            if let Some(i) = index {
+                walk_calls_assign(i, map, idx);
+            }
+            walk_calls_assign(value, map, idx);
         }
         Expr::Case { sel, arms, default } => {
             walk_calls_assign(sel, map, idx);
@@ -725,10 +771,33 @@ fn collect_stateful(
         }
         Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 collect_stateful(a, call_sites, project, out);
             }
+        }
+        Expr::DynIndex { base, index, default } => {
+            collect_stateful(base, call_sites, project, out);
+            collect_stateful(index, call_sites, project, out);
+            collect_stateful(default, call_sites, project, out);
+        }
+        Expr::Replicate { value, size } => {
+            collect_stateful(value, call_sites, project, out);
+            collect_stateful(size, call_sites, project, out);
+        }
+        Expr::Slice { base, lo, hi } => {
+            collect_stateful(base, call_sites, project, out);
+            collect_stateful(lo, call_sites, project, out);
+            collect_stateful(hi, call_sites, project, out);
+        }
+        Expr::Transpose { base } => collect_stateful(base, call_sites, project, out),
+        Expr::Update { base, index, value, .. } => {
+            collect_stateful(base, call_sites, project, out);
+            if let Some(i) = index {
+                collect_stateful(i, call_sites, project, out);
+            }
+            collect_stateful(value, call_sites, project, out);
         }
         Expr::Case { sel, arms, default } => {
             collect_stateful(sel, call_sites, project, out);
@@ -890,18 +959,99 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
         return;
     }
 
-    // C has no whole-array assignment, so an array-literal RHS (an array MAKE or
-    // SLICE block, or an inline `[…]`) is written element by element.
-    if eq.lhs.len() == 1 {
-        if let Expr::Array { items } = &eq.rhs {
+    // SCADE array structure operators that produce a whole array — element
+    // loops, like the array ops and iterators above (typecheck guarantees
+    // they are the whole rhs).
+    match &eq.rhs {
+        Expr::Replicate { value, size } => {
             let lhs = ctx.scope.ref_var(&eq.lhs[0]);
-            for (i, item) in items.iter().enumerate() {
-                let (stmts, e) = lower_anf(item, ctx);
-                for s in stmts {
-                    out.push_str(&s);
-                }
-                let _ = writeln!(out, "  {lhs}[{i}] = {e};");
+            let n = size.const_int().unwrap_or(0);
+            let seq = ctx.iter_seq;
+            ctx.iter_seq += 1;
+            let (stmts, v) = lower_anf(value, ctx);
+            for s in stmts {
+                out.push_str(&s);
             }
+            let i = format!("__rep{seq}i");
+            let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {lhs}[{i}] = {v};");
+            return;
+        }
+        Expr::Slice { base, lo, hi } => {
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            let a = lower_operand(base, ctx);
+            let lo_v = lo.const_int().unwrap_or(0);
+            let hi_v = hi.const_int().unwrap_or(0);
+            let n = (hi_v - lo_v + 1).max(0);
+            let seq = ctx.iter_seq;
+            ctx.iter_seq += 1;
+            let i = format!("__slc{seq}i");
+            let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {lhs}[{i}] = {a}[{lo_v} + {i}];");
+            return;
+        }
+        Expr::Transpose { base } => {
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            let a = lower_operand(base, ctx);
+            let m = array_len_of(base, ctx).unwrap_or(0);
+            let n = match expr_type(base, ctx) {
+                Some(Type::Array { elem, .. }) => match *elem {
+                    Type::Array { len, .. } => len,
+                    _ => 0,
+                },
+                _ => 0,
+            };
+            let seq = ctx.iter_seq;
+            ctx.iter_seq += 1;
+            let (r, c) = (format!("__tp{seq}r"), format!("__tp{seq}c"));
+            let _ = writeln!(
+                out,
+                "  for (int {r} = 0; {r} < {m}; {r}++) for (int {c} = 0; {c} < {n}; {c}++) {lhs}[{c}][{r}] = {a}[{r}][{c}];"
+            );
+            return;
+        }
+        Expr::Update { base, index: Some(idx), value, .. } => {
+            // Copy the array, then overwrite one element.
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            let a = lower_operand(base, ctx);
+            let n = array_len_of(base, ctx).unwrap_or(0);
+            let seq = ctx.iter_seq;
+            ctx.iter_seq += 1;
+            let (si, iexpr) = lower_anf(idx, ctx);
+            for s in si {
+                out.push_str(&s);
+            }
+            let (sv, v) = lower_anf(value, ctx);
+            for s in sv {
+                out.push_str(&s);
+            }
+            let i = format!("__upd{seq}i");
+            let j = format!("__upd{seq}j");
+            let _ = writeln!(out, "  for (int {i} = 0; {i} < {n}; {i}++) {lhs}[{i}] = {a}[{i}];");
+            // Bounds-safe write: out-of-range index leaves the copy unchanged.
+            let _ = writeln!(out, "  {{ int64_t {j} = (int64_t)({iexpr}); if ({j} >= 0 && {j} < {n}) {lhs}[{j}] = {v}; }}");
+            return;
+        }
+        Expr::Update { base, field: Some(fname), value, index: None } => {
+            // Records are C structs: whole-struct copy, then set one field.
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            let a = lower_operand(base, ctx);
+            let (sv, v) = lower_anf(value, ctx);
+            for s in sv {
+                out.push_str(&s);
+            }
+            let _ = writeln!(out, "  {lhs} = {a};");
+            let _ = writeln!(out, "  {lhs}.{} = {v};", c_ident(fname));
+            return;
+        }
+        _ => {}
+    }
+
+    // C has no whole-array assignment, so an array-literal RHS (an array MAKE or
+    // SLICE block, or an inline `[…]`) is written element by element. Nested
+    // literals (`[[a;b];[c;d]]` — a matrix) recurse with a full index path.
+    if eq.lhs.len() == 1 {
+        if let Expr::Array { .. } = &eq.rhs {
+            let lhs = ctx.scope.ref_var(&eq.lhs[0]);
+            emit_array_literal(&lhs, &eq.rhs, ctx, out);
             return;
         }
     }
@@ -939,6 +1089,27 @@ fn emit_equation_body(eq: &Equation, ctx: &mut EmitCtx, out: &mut String) {
     }
     let lhs = ctx.scope.ref_var(&eq.lhs[0]);
     let _ = writeln!(out, "  {lhs} = {rhs_expr};");
+}
+
+/// Write an array-literal expression into `dest` (a C lvalue path) element by
+/// element. A nested literal recurses with an extended path (`dest[i][j]…`),
+/// so a matrix literal `[[a;b];[c;d]]` becomes scalar assignments to each
+/// leaf — C has no whole-array assignment.
+fn emit_array_literal(dest: &str, expr: &Expr, ctx: &mut EmitCtx, out: &mut String) {
+    if let Expr::Array { items } = expr {
+        for (i, item) in items.iter().enumerate() {
+            let cell = format!("{dest}[{i}]");
+            if matches!(item, Expr::Array { .. }) {
+                emit_array_literal(&cell, item, ctx, out);
+            } else {
+                let (stmts, e) = lower_anf(item, ctx);
+                for s in stmts {
+                    out.push_str(&s);
+                }
+                let _ = writeln!(out, "  {cell} = {e};");
+            }
+        }
+    }
 }
 
 /// Emit an array iterator as a `for` loop. The iterated `F` is a stateless
@@ -1499,6 +1670,41 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
         // as a sub-expression — typecheck guarantees they are the whole RHS.
         Expr::Iterate { .. } => (vec![], "/* iterator is not an expression */ 0".into()),
         Expr::ArrayOp { .. } => (vec![], "/* array op is not an expression */ 0".into()),
+        // SCADE `#(a, b, …)`: at most one true — sum the booleans, compare ≤ 1.
+        Expr::Sharp { args } => {
+            let mut stmts = Vec::new();
+            let terms: Vec<String> = args
+                .iter()
+                .map(|a| {
+                    let (s, e) = lower_anf(a, ctx);
+                    stmts.extend(s);
+                    format!("({e} ? 1 : 0)")
+                })
+                .collect();
+            if terms.is_empty() {
+                (stmts, "true".into())
+            } else {
+                (stmts, format!("(({}) <= 1)", terms.join(" + ")))
+            }
+        }
+        // SCADE bounds-safe dynamic projection: the element or the default.
+        // The length is known statically from the array's type.
+        Expr::DynIndex { base, index, default } => {
+            let (mut s, b) = lower_anf(base, ctx);
+            let (si, i) = lower_anf(index, ctx);
+            let (sd, d) = lower_anf(default, ctx);
+            s.extend(si);
+            s.extend(sd);
+            let n = array_len_of(base, ctx).unwrap_or(0);
+            (s, format!("(((int64_t)({i}) >= 0 && (int64_t)({i}) < {n}) ? {b}[{i}] : {d})"))
+        }
+        // These produce whole arrays/records and are emitted at the equation
+        // level (element loops / struct copy), never as sub-expressions —
+        // like the array ops and iterators above.
+        Expr::Replicate { .. } => (vec![], "/* replicate is not an expression */ 0".into()),
+        Expr::Slice { .. } => (vec![], "/* slice is not an expression */ 0".into()),
+        Expr::Transpose { .. } => (vec![], "/* transpose is not an expression */ 0".into()),
+        Expr::Update { .. } => (vec![], "/* update is not an expression */ 0".into()),
         // The terminal write happens only in debug builds; production C-Lite
         // stays free of I/O. The expression's value is the terminal_out wire.
         Expr::Printout { args } => {
@@ -1545,9 +1751,19 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
 /// Emit a complete C declarator (`<type> <name>`, with array brackets after the
 /// name as C requires). Caller appends `;` or `= ...` etc.
 fn type_decl(ty: &Type, name: &str) -> String {
-    match ty {
-        Type::Array { elem, len } => format!("{} {name}[{len}]", elem.c_name()),
-        other => format!("{} {name}", other.c_name()),
+    // Collect every array dimension so a nested array (a matrix) declares all
+    // of them: `int32_t m[2][3]`, not `int32_t m[2]`. The base is the first
+    // non-array element type.
+    let mut dims = String::new();
+    let mut cur = ty;
+    while let Type::Array { elem, len } = cur {
+        dims.push_str(&format!("[{len}]"));
+        cur = elem;
+    }
+    if dims.is_empty() {
+        format!("{} {name}", cur.c_name())
+    } else {
+        format!("{} {name}{dims}", cur.c_name())
     }
 }
 
@@ -1653,7 +1869,8 @@ fn collect_pre_vars(
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 collect_pre_vars(a, env, out, seen);
             }
@@ -1662,6 +1879,28 @@ fn collect_pre_vars(
         Expr::Index { base, index } => {
             collect_pre_vars(base, env, out, seen);
             collect_pre_vars(index, env, out, seen);
+        }
+        Expr::DynIndex { base, index, default } => {
+            collect_pre_vars(base, env, out, seen);
+            collect_pre_vars(index, env, out, seen);
+            collect_pre_vars(default, env, out, seen);
+        }
+        Expr::Replicate { value, size } => {
+            collect_pre_vars(value, env, out, seen);
+            collect_pre_vars(size, env, out, seen);
+        }
+        Expr::Slice { base, lo, hi } => {
+            collect_pre_vars(base, env, out, seen);
+            collect_pre_vars(lo, env, out, seen);
+            collect_pre_vars(hi, env, out, seen);
+        }
+        Expr::Transpose { base } => collect_pre_vars(base, env, out, seen),
+        Expr::Update { base, index, value, .. } => {
+            collect_pre_vars(base, env, out, seen);
+            if let Some(i) = index {
+                collect_pre_vars(i, env, out, seen);
+            }
+            collect_pre_vars(value, env, out, seen);
         }
         Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {

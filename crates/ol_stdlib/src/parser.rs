@@ -69,6 +69,8 @@ enum Tok {
     Semi,     // ;
     Colon,    // :
     Dot,
+    DotDot,   // .. (array slice bounds)
+    Hash,     // # (SCADE sharp: at most one true)
     CharLit(u8), // 'a'
     Str(String), // "ab"
     TypedInt(i64, Type),   // 8_i32
@@ -108,6 +110,8 @@ impl Tok {
             Tok::Semi => ";".into(),
             Tok::Colon => ":".into(),
             Tok::Dot => ".".into(),
+            Tok::DotDot => "..".into(),
+            Tok::Hash => "#".into(),
             Tok::CharLit(b) => format!("'{}'", *b as char),
             Tok::Str(s) => format!("\"{s}\""),
             Tok::TypedInt(n, ty) => format!("{n}_{}", ty.lustre_name()),
@@ -155,6 +159,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             ';' => { out.push(Tok::Semi); i += 1; }
             ':' => { out.push(Tok::Colon); i += 1; }
             ',' => { out.push(Tok::Comma); i += 1; }
+            '.' if bytes.get(i + 1) == Some(&b'.') => { out.push(Tok::DotDot); i += 2; }
             '.' => { out.push(Tok::Dot); i += 1; }
             // Character literal `'a'` (with the usual escapes).
             '\'' => {
@@ -217,6 +222,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             '&' => { out.push(Tok::Amp); i += 1; }
             '|' => { out.push(Tok::Pipe); i += 1; }
             '^' => { out.push(Tok::Caret); i += 1; }
+            '#' => { out.push(Tok::Hash); i += 1; }
             _ if c.is_ascii_digit() => {
                 let start = i;
                 // 0x... hex literal.
@@ -578,6 +584,31 @@ impl Parser {
             match self.peek() {
                 Some(Tok::Dot) => {
                     self.bump();
+                    // `base.[i] default d` — SCADE's bounds-safe dynamic
+                    // projection. A plain `.field` is a record access.
+                    if matches!(self.peek(), Some(Tok::LBracket)) {
+                        self.bump();
+                        let index = self.parse_expr()?;
+                        self.expect(&Tok::RBracket)?;
+                        // The `default` clause is required — it is what makes
+                        // the access total (no out-of-range fault).
+                        match self.peek() {
+                            Some(Tok::Ident(k)) if k == "default" => { self.bump(); }
+                            other => {
+                                return Err(ParseError::Expected {
+                                    expected: "`default <expr>` after a dynamic projection `base.[i]`".into(),
+                                    found: other.map(|t| t.describe()).unwrap_or_else(|| "<eof>".into()),
+                                })
+                            }
+                        }
+                        let default = self.parse_expr()?;
+                        e = Expr::DynIndex {
+                            base: Box::new(e),
+                            index: Box::new(index),
+                            default: Box::new(default),
+                        };
+                        continue;
+                    }
                     match self.bump() {
                         Some(Tok::Ident(field)) => {
                             e = Expr::Field {
@@ -596,11 +627,24 @@ impl Parser {
                 Some(Tok::LBracket) => {
                     self.bump();
                     let index = self.parse_expr()?;
-                    self.expect(&Tok::RBracket)?;
-                    e = Expr::Index {
-                        base: Box::new(e),
-                        index: Box::new(index),
-                    };
+                    // `base[lo .. hi]` — an array slice (inclusive bounds,
+                    // SCADE style). A single index is an element access.
+                    if matches!(self.peek(), Some(Tok::DotDot)) {
+                        self.bump();
+                        let hi = self.parse_expr()?;
+                        self.expect(&Tok::RBracket)?;
+                        e = Expr::Slice {
+                            base: Box::new(e),
+                            lo: Box::new(index),
+                            hi: Box::new(hi),
+                        };
+                    } else {
+                        self.expect(&Tok::RBracket)?;
+                        e = Expr::Index {
+                            base: Box::new(e),
+                            index: Box::new(index),
+                        };
+                    }
                 }
                 _ => break,
             }
@@ -608,13 +652,74 @@ impl Parser {
         Ok(e)
     }
 
+    /// After `(base with`, parse the `[i] = v` or `.field = v` tail into an
+    /// [`Expr::Update`].
+    fn parse_update_tail(&mut self, base: Expr) -> Result<Expr, ParseError> {
+        match self.peek() {
+            Some(Tok::LBracket) => {
+                self.bump();
+                let index = self.parse_expr()?;
+                self.expect(&Tok::RBracket)?;
+                self.expect(&Tok::Eq)?;
+                let value = self.parse_expr()?;
+                Ok(Expr::update_index(base, index, value))
+            }
+            Some(Tok::Dot) => {
+                self.bump();
+                let field = match self.bump() {
+                    Some(Tok::Ident(f)) => f,
+                    other => {
+                        return Err(ParseError::Expected {
+                            expected: "field name after `with .`".into(),
+                            found: other.map(|t| t.describe()).unwrap_or_else(|| "<eof>".into()),
+                        })
+                    }
+                };
+                self.expect(&Tok::Eq)?;
+                let value = self.parse_expr()?;
+                Ok(Expr::update_field(base, &field, value))
+            }
+            other => Err(ParseError::Expected {
+                expected: "`[index] = value` or `.field = value` after `with`".into(),
+                found: other.map(|t| t.describe()).unwrap_or_else(|| "<eof>".into()),
+            }),
+        }
+    }
+
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match self.peek().cloned() {
             Some(Tok::LParen) => {
                 self.bump();
                 let e = self.parse_expr()?;
+                // `(base with [i] = v)` / `(base with .field = v)` — SCADE's
+                // functional update. `with` is a contextual keyword valid only
+                // right after a parenthesized base.
+                if matches!(self.peek(), Some(Tok::Ident(k)) if k == "with") {
+                    self.bump();
+                    let upd = self.parse_update_tail(e)?;
+                    self.expect(&Tok::RParen)?;
+                    return Ok(upd);
+                }
                 self.expect(&Tok::RParen)?;
                 Ok(e)
+            }
+            // SCADE's `#(a, b, …)`: at most one operand is true.
+            Some(Tok::Hash) => {
+                self.bump();
+                self.expect(&Tok::LParen)?;
+                let mut args = Vec::new();
+                if !matches!(self.peek(), Some(Tok::RParen)) {
+                    loop {
+                        args.push(self.parse_expr()?);
+                        if matches!(self.peek(), Some(Tok::Comma)) {
+                            self.bump();
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                self.expect(&Tok::RParen)?;
+                Ok(Expr::Sharp { args })
             }
             Some(Tok::Int(n)) => {
                 self.bump();
@@ -914,6 +1019,29 @@ impl Parser {
                             init: Box::new(init),
                             body: Box::new(Expr::Pre { arg: Box::new(x) }),
                         });
+                    }
+                    // SCADE array structure operators in call position:
+                    // `replicate(value, size)` (SCADE's `value ^ size`) and
+                    // `transpose(matrix)`.
+                    if name == "replicate" {
+                        if args.len() != 2 {
+                            return Err(ParseError::Expected {
+                                expected: "replicate(value, size)".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        let size = args.pop().unwrap();
+                        let value = args.pop().unwrap();
+                        return Ok(Expr::replicate(value, size));
+                    }
+                    if name == "transpose" {
+                        if args.len() != 1 {
+                            return Err(ParseError::Expected {
+                                expected: "transpose(matrix)".into(),
+                                found: format!("{} arguments", args.len()),
+                            });
+                        }
+                        return Ok(Expr::transpose(args.pop().unwrap()));
                     }
                     // `merge(c, a, b)` joins two complementary clocked
                     // streams; the clock must be a variable name.

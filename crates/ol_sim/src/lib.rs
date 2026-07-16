@@ -1110,6 +1110,119 @@ fn eval(
                 }
             }
         }
+        // SCADE `#(a, b, …)`: true iff at most one operand is true.
+        Expr::Sharp { args } => {
+            let mut trues = 0;
+            for a in args {
+                if eval(a, env, state, call_states, project, site_clocks, cov)?
+                    .as_bool()
+                    .ok_or_else(|| SimError::EvalError("`#` operand is not boolean".into()))?
+                {
+                    trues += 1;
+                }
+            }
+            Ok(Value::Bool(trues <= 1))
+        }
+        // SCADE bounds-safe dynamic projection: element or the default.
+        Expr::DynIndex { base, index, default } => {
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
+            let iv = eval(index, env, state, call_states, project, site_clocks, cov)?;
+            let i = iv.as_int().ok_or_else(|| {
+                SimError::EvalError(format!("dynamic index must be int, got {iv:?}"))
+            })?;
+            match bv {
+                Value::Array(xs) if i >= 0 && (i as usize) < xs.len() => Ok(xs[i as usize].clone()),
+                Value::Array(_) => eval(default, env, state, call_states, project, site_clocks, cov),
+                other => Err(SimError::EvalError(format!("dynamic projection of non-array: {other:?}"))),
+            }
+        }
+        // SCADE replication: `n` copies of the value.
+        Expr::Replicate { value, size } => {
+            let n = size
+                .const_int()
+                .filter(|n| *n >= 0)
+                .ok_or_else(|| SimError::EvalError("replication size is not a constant".into()))?;
+            let v = eval(value, env, state, call_states, project, site_clocks, cov)?;
+            Ok(Value::Array(vec![v; n as usize]))
+        }
+        // SCADE slice `base[lo .. hi]` — inclusive.
+        Expr::Slice { base, lo, hi } => {
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
+            let (lo_v, hi_v) = (
+                lo.const_int().ok_or_else(|| SimError::EvalError("slice lo not constant".into()))?,
+                hi.const_int().ok_or_else(|| SimError::EvalError("slice hi not constant".into()))?,
+            );
+            match bv {
+                Value::Array(xs) if lo_v >= 0 && hi_v >= lo_v && (hi_v as usize) < xs.len() => {
+                    Ok(Value::Array(xs[lo_v as usize..=hi_v as usize].to_vec()))
+                }
+                Value::Array(xs) => Err(SimError::EvalError(format!(
+                    "slice [{lo_v} .. {hi_v}] out of range (len {})",
+                    xs.len()
+                ))),
+                other => Err(SimError::EvalError(format!("slicing non-array: {other:?}"))),
+            }
+        }
+        // SCADE transpose of a rectangular 2-D array.
+        Expr::Transpose { base } => {
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
+            match bv {
+                Value::Array(rows) => {
+                    let m = rows.len();
+                    let inner: Vec<Vec<Value>> = rows
+                        .into_iter()
+                        .map(|r| match r {
+                            Value::Array(c) => Ok(c),
+                            other => Err(SimError::EvalError(format!("transpose row is not an array: {other:?}"))),
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let n = inner.first().map(|r| r.len()).unwrap_or(0);
+                    let mut out = Vec::with_capacity(n);
+                    for c in 0..n {
+                        let mut col = Vec::with_capacity(m);
+                        for row in &inner {
+                            col.push(row[c].clone());
+                        }
+                        out.push(Value::Array(col));
+                    }
+                    Ok(Value::Array(out))
+                }
+                other => Err(SimError::EvalError(format!("transpose of non-array: {other:?}"))),
+            }
+        }
+        // SCADE functional update: a copy with one position replaced.
+        Expr::Update { base, index, field, value } => {
+            let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
+            let nv = eval(value, env, state, call_states, project, site_clocks, cov)?;
+            match (index, field) {
+                (Some(idx), None) => {
+                    let iv = eval(idx, env, state, call_states, project, site_clocks, cov)?;
+                    let i = iv.as_int().ok_or_else(|| {
+                        SimError::EvalError(format!("update index must be int, got {iv:?}"))
+                    })?;
+                    match bv {
+                        Value::Array(mut xs) => {
+                            // Bounds-safe like dynamic projection: an
+                            // out-of-range index leaves the array unchanged,
+                            // never a fault (the SCADE no-runtime-error rule).
+                            if i >= 0 && (i as usize) < xs.len() {
+                                xs[i as usize] = nv;
+                            }
+                            Ok(Value::Array(xs))
+                        }
+                        other => Err(SimError::EvalError(format!("array update of non-array: {other:?}"))),
+                    }
+                }
+                (None, Some(fname)) => match bv {
+                    Value::Record(mut m) => {
+                        m.insert(fname.clone(), nv);
+                        Ok(Value::Record(m))
+                    }
+                    other => Err(SimError::EvalError(format!("field update of non-record: {other:?}"))),
+                },
+                _ => Err(SimError::EvalError("update needs exactly one of index/field".into())),
+            }
+        }
         // Only the matching arm evaluates — like if/then/else and merge,
         // inactive branches must not run.
         Expr::Case { sel, arms, default } => {

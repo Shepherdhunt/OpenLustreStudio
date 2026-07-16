@@ -406,6 +406,85 @@ fn format_expr_prec(expr: &Expr, parent_prec: u8, lustre: bool) -> String {
             parts.extend(arrays.iter().map(|a| format_expr_prec(a, 0, lustre)));
             (format!("{name}({})", parts.join(", ")), 100)
         }
+        // SCADE `#(a, b, …)`. Surface view keeps `#(…)` so it round-trips.
+        // Kind 2 view expands to the provable boolean "no two both true".
+        Expr::Sharp { args } => {
+            if lustre {
+                if args.len() < 2 {
+                    ("true".to_string(), 100)
+                } else {
+                    let mut pairs = Vec::new();
+                    for i in 0..args.len() {
+                        for j in (i + 1)..args.len() {
+                            pairs.push(format!(
+                                "not ({} and {})",
+                                format_expr_prec(&args[i], 60, true),
+                                format_expr_prec(&args[j], 60, true),
+                            ));
+                        }
+                    }
+                    (pairs.join(" and "), 10)
+                }
+            } else {
+                let parts = args
+                    .iter()
+                    .map(|a| format_expr_prec(a, 0, false))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                (format!("#({parts})"), 100)
+            }
+        }
+        // SCADE bounds-safe dynamic projection `(base.[i] default d)`.
+        Expr::DynIndex { base, index, default } => (
+            format!(
+                "({}.[{}] default {})",
+                format_expr_prec(base, 100, lustre),
+                format_expr_prec(index, 0, lustre),
+                format_expr_prec(default, 0, lustre),
+            ),
+            100,
+        ),
+        // SCADE replication `replicate(v, n)` (SCADE's `v ^ n`).
+        Expr::Replicate { value, size } => (
+            format!(
+                "replicate({}, {})",
+                format_expr_prec(value, 0, lustre),
+                format_expr_prec(size, 0, lustre),
+            ),
+            100,
+        ),
+        // SCADE slice `base[lo .. hi]` (inclusive).
+        Expr::Slice { base, lo, hi } => (
+            format!(
+                "{}[{} .. {}]",
+                format_expr_prec(base, 100, lustre),
+                format_expr_prec(lo, 0, lustre),
+                format_expr_prec(hi, 0, lustre),
+            ),
+            100,
+        ),
+        Expr::Transpose { base } => {
+            (format!("transpose({})", format_expr_prec(base, 0, lustre)), 100)
+        }
+        // SCADE functional update `(base with [i] = v)` / `(base with .f = v)`.
+        Expr::Update { base, index, field, value } => {
+            let pos = if let Some(i) = index {
+                format!("[{}]", format_expr_prec(i, 0, lustre))
+            } else if let Some(f) = field {
+                format!(".{f}")
+            } else {
+                "[?]".to_string()
+            };
+            (
+                format!(
+                    "({} with {} = {})",
+                    format_expr_prec(base, 0, lustre),
+                    pos,
+                    format_expr_prec(value, 0, lustre),
+                ),
+                100,
+            )
+        }
     };
     if prec < parent_prec {
         format!("({text})")

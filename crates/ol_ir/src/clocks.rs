@@ -256,10 +256,24 @@ fn natural_clock(expr: &Expr, var_clocks: &HashMap<String, Clock>) -> Option<Clo
         Expr::Index { base, index } => {
             natural_clock(base, var_clocks).or_else(|| natural_clock(index, var_clocks))
         }
+        Expr::DynIndex { base, index, default } => natural_clock(base, var_clocks)
+            .or_else(|| natural_clock(index, var_clocks))
+            .or_else(|| natural_clock(default, var_clocks)),
+        Expr::Replicate { value, size } => {
+            natural_clock(value, var_clocks).or_else(|| natural_clock(size, var_clocks))
+        }
+        Expr::Slice { base, lo, hi } => natural_clock(base, var_clocks)
+            .or_else(|| natural_clock(lo, var_clocks))
+            .or_else(|| natural_clock(hi, var_clocks)),
+        Expr::Transpose { base } => natural_clock(base, var_clocks),
+        Expr::Update { base, index, value, .. } => natural_clock(base, var_clocks)
+            .or_else(|| index.as_deref().and_then(|i| natural_clock(i, var_clocks)))
+            .or_else(|| natural_clock(value, var_clocks)),
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             args.iter().find_map(|a| natural_clock(a, var_clocks))
         }
         Expr::Tuple { items } | Expr::Array { items } => {
@@ -361,10 +375,33 @@ fn check_expr(
         // Stateless applications: every operand shares the site's clock.
         Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 check_expr(a, expected, var_clocks, eq, info);
             }
+        }
+        Expr::DynIndex { base, index, default } => {
+            check_expr(base, expected, var_clocks, eq, info);
+            check_expr(index, expected, var_clocks, eq, info);
+            check_expr(default, expected, var_clocks, eq, info);
+        }
+        Expr::Replicate { value, size } => {
+            check_expr(value, expected, var_clocks, eq, info);
+            check_expr(size, expected, var_clocks, eq, info);
+        }
+        Expr::Slice { base, lo, hi } => {
+            check_expr(base, expected, var_clocks, eq, info);
+            check_expr(lo, expected, var_clocks, eq, info);
+            check_expr(hi, expected, var_clocks, eq, info);
+        }
+        Expr::Transpose { base } => check_expr(base, expected, var_clocks, eq, info),
+        Expr::Update { base, index, value, .. } => {
+            check_expr(base, expected, var_clocks, eq, info);
+            if let Some(i) = index {
+                check_expr(i, expected, var_clocks, eq, info);
+            }
+            check_expr(value, expected, var_clocks, eq, info);
         }
         // Like if/then/else: selector and every arm run on the site's clock.
         Expr::Case { sel, arms, default } => {

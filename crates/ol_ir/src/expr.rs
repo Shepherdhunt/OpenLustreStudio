@@ -237,6 +237,59 @@ pub enum Expr {
         arms: Vec<CaseArm>,
         default: Option<Box<Expr>>,
     },
+    /// SCADE's `#` (sharp): true when **at most one** of the boolean operands
+    /// is true. All operands are boolean; the result is boolean. A scalar
+    /// value-form operator (unlike the array structure ops).
+    Sharp {
+        args: Vec<Expr>,
+    },
+    /// SCADE's bounds-safe dynamic projection `(base.[index] default d)`:
+    /// the element `base[index]` when `index` is in range, else `d`. Unlike
+    /// [`Expr::Index`] (which requires a statically known, in-range index),
+    /// this admits a computed index and can never fault — the reason SCADE
+    /// keeps dynamic array access side-effect- and error-free. `base` is an
+    /// array, `index` an integer, and `d`/the element share the element type.
+    DynIndex {
+        base: Box<Expr>,
+        index: Box<Expr>,
+        default: Box<Expr>,
+    },
+    /// SCADE's array replication `value ^ size` (surface: `replicate(value,
+    /// size)`): an array of `size` copies of the scalar `value`. `size` must
+    /// be a compile-time constant expression. Array-valued, so like the other
+    /// array structure ops it is the whole rhs of an equation.
+    Replicate {
+        value: Box<Expr>,
+        size: Box<Expr>,
+    },
+    /// SCADE's array slice `base[lo .. hi]`: the sub-array from index `lo`
+    /// through `hi` inclusive (length `hi - lo + 1`). `lo`/`hi` are
+    /// compile-time constants and must be in range — the static-bounds rule
+    /// [`Expr::Index`] follows. Array-valued.
+    Slice {
+        base: Box<Expr>,
+        lo: Box<Expr>,
+        hi: Box<Expr>,
+    },
+    /// SCADE's matrix transpose `transpose(base)`: for a `T[m][n]` (an array
+    /// of `m` rows of `n`), the `T[n][m]` with rows and columns swapped.
+    /// Array-valued.
+    Transpose {
+        base: Box<Expr>,
+    },
+    /// SCADE's functional update `(base with [i] = value)` or
+    /// `(base with .field = value)`: a copy of the array/record `base` with
+    /// one element/field replaced, `base` itself unchanged. The updated
+    /// position is an array index (`index`) or a record field (`field`) —
+    /// exactly one is set. Array/record-valued.
+    Update {
+        base: Box<Expr>,
+        /// The array index to replace (mutually exclusive with `field`).
+        index: Option<Box<Expr>>,
+        /// The record field to replace (mutually exclusive with `index`).
+        field: Option<String>,
+        value: Box<Expr>,
+    },
 }
 
 /// One `Variant: value` arm of an [`Expr::Case`]. The variant is a label
@@ -463,6 +516,41 @@ impl Expr {
     pub fn implies(lhs: Expr, rhs: Expr) -> Self {
         Self::bin(BinOp::Implies, lhs, rhs)
     }
+    pub fn sharp(args: Vec<Expr>) -> Self {
+        Expr::Sharp { args }
+    }
+    pub fn dyn_index(base: Expr, index: Expr, default: Expr) -> Self {
+        Expr::DynIndex {
+            base: Box::new(base),
+            index: Box::new(index),
+            default: Box::new(default),
+        }
+    }
+    pub fn replicate(value: Expr, size: Expr) -> Self {
+        Expr::Replicate { value: Box::new(value), size: Box::new(size) }
+    }
+    pub fn slice(base: Expr, lo: Expr, hi: Expr) -> Self {
+        Expr::Slice { base: Box::new(base), lo: Box::new(lo), hi: Box::new(hi) }
+    }
+    pub fn transpose(base: Expr) -> Self {
+        Expr::Transpose { base: Box::new(base) }
+    }
+    pub fn update_index(base: Expr, index: Expr, value: Expr) -> Self {
+        Expr::Update {
+            base: Box::new(base),
+            index: Some(Box::new(index)),
+            field: None,
+            value: Box::new(value),
+        }
+    }
+    pub fn update_field(base: Expr, field: &str, value: Expr) -> Self {
+        Expr::Update {
+            base: Box::new(base),
+            index: None,
+            field: Some(field.to_string()),
+            value: Box::new(value),
+        }
+    }
     pub fn arrow(init: Expr, body: Expr) -> Self {
         Expr::Arrow {
             init: Box::new(init),
@@ -614,10 +702,32 @@ impl Expr {
                         walk(d, f);
                     }
                 }
-                Expr::ArrayOp { args, .. } | Expr::Printout { args } => {
+                Expr::ArrayOp { args, .. } | Expr::Printout { args } | Expr::Sharp { args } => {
                     for a in args {
                         walk(a, f);
                     }
+                }
+                Expr::DynIndex { base, index, default } => {
+                    walk(base, f);
+                    walk(index, f);
+                    walk(default, f);
+                }
+                Expr::Replicate { value, size } => {
+                    walk(value, f);
+                    walk(size, f);
+                }
+                Expr::Slice { base, lo, hi } => {
+                    walk(base, f);
+                    walk(lo, f);
+                    walk(hi, f);
+                }
+                Expr::Transpose { base } => walk(base, f),
+                Expr::Update { base, index, value, .. } => {
+                    walk(base, f);
+                    if let Some(i) = index {
+                        walk(i, f);
+                    }
+                    walk(value, f);
                 }
             }
         }
@@ -659,11 +769,34 @@ impl Expr {
             | Expr::FloatIntrinsic { args, .. }
             | Expr::ArrayOp { args, .. }
             | Expr::Printout { args }
+            | Expr::Sharp { args }
             | Expr::Tuple { items: args }
             | Expr::Array { items: args } => {
                 for a in args {
                     a.visit_mut(f);
                 }
+            }
+            Expr::DynIndex { base, index, default } => {
+                base.visit_mut(f);
+                index.visit_mut(f);
+                default.visit_mut(f);
+            }
+            Expr::Replicate { value, size } => {
+                value.visit_mut(f);
+                size.visit_mut(f);
+            }
+            Expr::Slice { base, lo, hi } => {
+                base.visit_mut(f);
+                lo.visit_mut(f);
+                hi.visit_mut(f);
+            }
+            Expr::Transpose { base } => base.visit_mut(f),
+            Expr::Update { base, index, value, .. } => {
+                base.visit_mut(f);
+                if let Some(i) = index {
+                    i.visit_mut(f);
+                }
+                value.visit_mut(f);
             }
             Expr::Struct { fields, .. } => {
                 for fi in fields {
@@ -689,6 +822,33 @@ impl Expr {
             }
         }
         f(self);
+    }
+
+    /// Fold a compile-time constant integer, or `None` if the expression is
+    /// not a static integer. Handles integer literals, integer casts of them,
+    /// unary negation, and `+ - * / mod` over constants — enough for array
+    /// sizes and slice bounds (`replicate(v, 4)`, `a[1 .. n-1]` with `n` a
+    /// literal). Named constants are not folded here (their values live in
+    /// the project, not the expression).
+    pub fn const_int(&self) -> Option<i64> {
+        match self {
+            Expr::Const { lit: Literal::Int { value } } => Some(*value),
+            Expr::Const { lit: Literal::Char { value } } => Some(*value as i64),
+            Expr::Cast { to, arg } if to.is_integer() => arg.const_int(),
+            Expr::Unary { op: UnaryOp::Neg, arg } => arg.const_int().map(|v| -v),
+            Expr::Binary { op, lhs, rhs } => {
+                let (a, b) = (lhs.const_int()?, rhs.const_int()?);
+                match op {
+                    BinOp::Add => Some(a + b),
+                    BinOp::Sub => Some(a - b),
+                    BinOp::Mul => Some(a * b),
+                    BinOp::Div if b != 0 => Some(a / b),
+                    BinOp::Mod if b != 0 => Some(a % b),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// True if the expression syntactically contains any temporal operator.
@@ -791,10 +951,33 @@ impl Expr {
                     a.rename_var(from, to);
                 }
             }
-            Expr::ArrayOp { args, .. } | Expr::Printout { args } => {
+            Expr::ArrayOp { args, .. } | Expr::Printout { args } | Expr::Sharp { args } => {
                 for a in args {
                     a.rename_var(from, to);
                 }
+            }
+            Expr::DynIndex { base, index, default } => {
+                base.rename_var(from, to);
+                index.rename_var(from, to);
+                default.rename_var(from, to);
+            }
+            Expr::Replicate { value, size } => {
+                value.rename_var(from, to);
+                size.rename_var(from, to);
+            }
+            Expr::Slice { base, lo, hi } => {
+                base.rename_var(from, to);
+                lo.rename_var(from, to);
+                hi.rename_var(from, to);
+            }
+            Expr::Transpose { base } => base.rename_var(from, to),
+            // Field name is part of the record type, not a variable.
+            Expr::Update { base, index, value, .. } => {
+                base.rename_var(from, to);
+                if let Some(i) = index {
+                    i.rename_var(from, to);
+                }
+                value.rename_var(from, to);
             }
             // Arm variants are enum labels, not variables — only the selector
             // and the arm values rename.

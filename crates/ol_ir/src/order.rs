@@ -43,7 +43,8 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
         Expr::Call { args, .. }
         | Expr::FloatIntrinsic { args, .. }
         | Expr::ArrayOp { args, .. }
-        | Expr::Printout { args } => {
+        | Expr::Printout { args }
+        | Expr::Sharp { args } => {
             for a in args {
                 same_cycle_reads(a, out);
             }
@@ -51,6 +52,28 @@ fn same_cycle_reads(e: &Expr, out: &mut BTreeSet<String>) {
         Expr::Index { base, index } => {
             same_cycle_reads(base, out);
             same_cycle_reads(index, out);
+        }
+        Expr::DynIndex { base, index, default } => {
+            same_cycle_reads(base, out);
+            same_cycle_reads(index, out);
+            same_cycle_reads(default, out);
+        }
+        Expr::Replicate { value, size } => {
+            same_cycle_reads(value, out);
+            same_cycle_reads(size, out);
+        }
+        Expr::Slice { base, lo, hi } => {
+            same_cycle_reads(base, out);
+            same_cycle_reads(lo, out);
+            same_cycle_reads(hi, out);
+        }
+        Expr::Transpose { base } => same_cycle_reads(base, out),
+        Expr::Update { base, index, value, .. } => {
+            same_cycle_reads(base, out);
+            if let Some(i) = index {
+                same_cycle_reads(i, out);
+            }
+            same_cycle_reads(value, out);
         }
         Expr::Tuple { items } | Expr::Array { items } => {
             for i in items {
