@@ -54,6 +54,7 @@ fn traffic_light_project() -> Project {
         ],
         contract: None,
         owner: None,
+        layout: Default::default(),
     };
     Project {
         name: "tl".into(),
@@ -218,6 +219,7 @@ fn mode_project() -> Project {
         states: vec![idle, active],
         contract: None,
         owner: None,
+        layout: Default::default(),
     };
     Project {
         name: "mode".into(),

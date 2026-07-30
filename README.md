@@ -48,7 +48,10 @@ flow-direction pennants and wires run orthogonally with rounded corners,
 annotated at their source pin. The canvas zooms (Ctrl+wheel about the cursor,
 zoom-to-fit, 100%), pans with middle-drag, rubber-band multi-selects, drags
 whole selections, nudges with the arrow keys, aligns and distributes through
-the Diagram menu, and exports the diagram as SVG or PNG.
+the Diagram menu, copies/pastes selections across operators (fresh names,
+intra-group wiring kept), carries a minimap overview, and exports the diagram
+as SVG or PNG. State charts are draggable too — arrange a machine's states
+and the layout persists into the model file.
 
 ![The SCADE-style glyph set on the OpenLustre Studio canvas — input pennants feeding OR, XOR and NOT gates, a selector trapezoid, an FBY memory block and a literal tag, wired orthogonally into output flags.](docs/screenshots/03-scade-glyphs.png)
 

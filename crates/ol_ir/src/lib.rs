@@ -34,7 +34,7 @@ pub use project::{ConstDef, Package, Project, TypeDef, TypeBody, EnumDef, Record
 pub use slice::slice_for_root;
 pub use state_machine::{
     lower as lower_state_machine, resolve_refines, LoweredMachine, Region, StateDef,
-    StateMachineDef, Transition,
+    StateMachineDef, StatePos, Transition,
 };
 pub use types::Type;
 pub use loader::{load_project, LoadError};

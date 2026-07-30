@@ -260,6 +260,7 @@ impl LibBlock {
             states,
             contract: contract.as_ref().map(|_| self.contract_name()),
             owner: None,
+            layout: Default::default(),
         };
         let lowered = lower_state_machine(&sm).map_err(|e| LowerError::StateMachine {
             block: self.name.clone(),

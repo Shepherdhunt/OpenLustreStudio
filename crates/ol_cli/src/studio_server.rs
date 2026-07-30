@@ -311,6 +311,9 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/update_state_machine") => {
             apply_edit_response(ctx, body, edit_update_state_machine)
         }
+        ("POST", "/api/edit/set_fsm_layout") => {
+            apply_edit_response(ctx, body, edit_set_fsm_layout)
+        }
         ("POST", "/api/edit/remove_state_machine") => {
             apply_edit_response(ctx, body, edit_remove_state_machine)
         }
@@ -1557,6 +1560,9 @@ fn fsm_get(
                             })).collect::<Vec<_>>(),
                             "initial_state": m.initial_state,
                             "states": states,
+                            "layout": m.layout.iter().map(|(state, p)| {
+                                (state.clone(), serde_json::json!({ "x": p.x, "y": p.y }))
+                            }).collect::<serde_json::Map<_, _>>(),
                         });
                         return Ok(value.to_string());
                     }
@@ -1676,6 +1682,7 @@ fn parse_state_machine_req(req: &serde_json::Value) -> Result<ol_ir::StateMachin
         states,
         contract: None,
         owner,
+        layout: Default::default(),
     };
     Ok(machine)
 }
@@ -1795,15 +1802,50 @@ fn edit_update_state_machine(
     project: &mut ol_ir::Project,
     req: &serde_json::Value,
 ) -> Result<(), String> {
-    let machine = parse_state_machine_req(req)?;
+    let mut machine = parse_state_machine_req(req)?;
     validate_state_machine(project, &machine)?;
     for pkg in &mut project.packages {
         if let Some(slot) = pkg.state_machines.iter_mut().find(|m| m.name == machine.name) {
+            // The textual editor doesn't carry the chart layout — keep the
+            // stored one, dropping entries for states that no longer exist.
+            machine.layout = std::mem::take(&mut slot.layout);
+            machine
+                .layout
+                .retain(|state, _| machine.states.iter().any(|s| &s.name == state));
             *slot = machine;
             return Ok(());
         }
     }
     Err(format!("state machine `{}` not found", machine.name))
+}
+
+/// Persist the FSM chart layout: state name -> position, for one machine.
+/// Unknown state names are rejected so a stale editor can't litter the file.
+fn edit_set_fsm_layout(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let name = req_str(req, "machine")?.to_string();
+    let positions = req
+        .get("positions")
+        .and_then(|v| v.as_object())
+        .ok_or("missing object field `positions`")?;
+    for pkg in &mut project.packages {
+        if let Some(m) = pkg.state_machines.iter_mut().find(|m| m.name == name) {
+            let mut map = std::collections::BTreeMap::new();
+            for (state, pos) in positions {
+                if !m.states.iter().any(|s| &s.name == state) {
+                    return Err(format!("machine `{name}` has no state `{state}`"));
+                }
+                let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
+                let y = pos.get("y").and_then(|v| v.as_f64()).ok_or("position missing y")?;
+                map.insert(state.clone(), ol_ir::StatePos { x, y });
+            }
+            m.layout = map;
+            return Ok(());
+        }
+    }
+    Err(format!("state machine `{name}` not found"))
 }
 
 fn edit_remove_state_machine(

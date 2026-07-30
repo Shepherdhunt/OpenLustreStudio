@@ -514,6 +514,60 @@ fn state_machine_owned_by_operator_create_edit_build_remove() {
     assert!(gone, "Toggle removed");
 }
 
+/// The FSM chart layout: `set_fsm_layout` persists per-state positions into
+/// the machine, `/api/fsm` serves them back, a textual machine update KEEPS
+/// the layout (dropping entries for states that no longer exist), and a
+/// position for an unknown state is rejected.
+#[test]
+fn fsm_chart_layout_persists_and_survives_update() {
+    let g = start_server_on_workspace("ws_sm_layout");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Switch","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Switch","side":"input","name":"flip","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Switch","side":"output","name":"lit","type":"bool"}"#);
+
+    let machine = |states: &str| -> String {
+        format!(
+            r#"{{"name":"Toggle","operator":"Switch","initial_state":"Off",
+                 "inputs":[{{"name":"flip","type":"bool"}}],
+                 "outputs":[{{"name":"lit","type":"bool"}}],
+                 "states":[{states}]}}"#
+        )
+    };
+    let off = r#"{"name":"Off","equations":[{"lhs":"lit","body":"false"}],"transitions":[{"guard":"flip","target":"On"}]}"#;
+    let on = r#"{"name":"On","equations":[{"lhs":"lit","body":"true"}],"transitions":[{"guard":"flip","target":"Off"}]}"#;
+    let blink = r#"{"name":"Blink","equations":[{"lhs":"lit","body":"true"}],"transitions":[]}"#;
+    post_ok(port, "/api/edit/add_state_machine", &machine(&format!("{off},{on},{blink}")));
+
+    // Drag result: every state gets a position; /api/fsm serves them back.
+    post_ok(
+        port,
+        "/api/edit/set_fsm_layout",
+        r#"{"machine":"Toggle","positions":{"Off":{"x":80,"y":90},"On":{"x":320,"y":90},"Blink":{"x":200,"y":230}}}"#,
+    );
+    let fsm = get_json(port, "/api/fsm?name=Toggle");
+    assert_eq!(fsm["layout"]["Off"]["x"].as_f64(), Some(80.0), "layout served: {fsm}");
+    assert_eq!(fsm["layout"]["Blink"]["y"].as_f64(), Some(230.0));
+
+    // A position for a state the machine doesn't have is rejected.
+    let (s, body) = request(
+        port,
+        "POST",
+        "/api/edit/set_fsm_layout",
+        r#"{"machine":"Toggle","positions":{"Nope":{"x":1,"y":2}}}"#,
+    )
+    .expect("bad state");
+    assert_eq!(s, 400, "unknown state must be rejected: {body}");
+
+    // A textual update that drops Blink keeps the surviving positions and
+    // discards the stale one.
+    post_ok(port, "/api/edit/update_state_machine", &machine(&format!("{off},{on}")));
+    let fsm = get_json(port, "/api/fsm?name=Toggle");
+    assert_eq!(fsm["layout"]["On"]["x"].as_f64(), Some(320.0), "kept across update: {fsm}");
+    assert!(fsm["layout"].get("Blink").is_none(), "dropped with its state: {fsm}");
+}
+
 /// A state machine that would not translate cleanly (a per-state output
 /// assigned a value of the wrong type) is REJECTED at create time — before it
 /// is ever saved — so the model never holds a machine that fails to lower to

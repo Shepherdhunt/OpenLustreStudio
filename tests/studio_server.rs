@@ -204,4 +204,7 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("wire-orth"), "orthogonal-wires toggle missing");
     assert!(html.contains("function shapeSvg"), "operator glyph renderer missing");
     assert!(html.contains("function zoomFit"), "zoom-to-fit missing");
+    assert!(html.contains("mm-show"), "minimap toggle missing");
+    assert!(html.contains("function copySelection"), "diagram clipboard missing");
+    assert!(html.contains("function fsmDraw"), "draggable state chart missing");
 }

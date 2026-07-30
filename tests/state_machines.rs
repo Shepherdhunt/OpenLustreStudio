@@ -49,6 +49,7 @@ fn toggle_machine() -> StateMachineDef {
         ],
         contract: None,
         owner: None,
+        layout: Default::default(),
     }
 }
 
@@ -226,6 +227,7 @@ fn three_state_traffic_light_simulates_correctly() {
         ],
         contract: None,
         owner: None,
+        layout: Default::default(),
     };
     let mut project = Project {
         name: "tl".into(),
@@ -333,6 +335,7 @@ fn hierarchical_mode_machine() -> StateMachineDef {
         states: vec![idle, active],
         contract: None,
         owner: None,
+        layout: Default::default(),
     }
 }
 
@@ -384,6 +387,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
         ],
         contract: None,
         owner: None,
+        layout: Default::default(),
     };
     let refmode = StateMachineDef {
         name: "RefMode".into(),
@@ -419,6 +423,7 @@ fn spin_and_refmode() -> Vec<StateMachineDef> {
         ],
         contract: None,
         owner: None,
+        layout: Default::default(),
     };
     vec![spin, refmode]
 }
@@ -498,6 +503,7 @@ fn operator_owned_machine_merges_into_the_operator_and_simulates() {
         ],
         contract: None,
         owner: Some("Lamp".into()), // operator-owned: merge into Lamp's body
+        layout: Default::default(),
     };
     let mut project = Project {
         name: "owned".into(),

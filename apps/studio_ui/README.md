@@ -34,8 +34,23 @@ The dataflow canvas is a SCADE-style drafting surface:
 - **Layout tools** — align lefts/rights/tops/bottoms/centers and
   distribute horizontally/vertically, from the Diagram menu or the
   canvas right-click menu; positions persist into the model file.
+- **Clipboard** — Ctrl+C / Ctrl+V / Ctrl+D (and the context menu's
+  Copy / Paste / Paste-here / Duplicate) copy a selection and paste it
+  into any operator's canvas: pasted results get fresh local names,
+  wiring inside the pasted group is kept, and references to signals the
+  target operator doesn't have surface as red pins to re-bind.
+- **Minimap** — a corner overview of the whole diagram with the
+  current viewport outlined; click or drag it to jump. View-menu
+  toggle.
 - **Export** — the Diagram menu writes the current diagram as a
   standalone `.svg` (styles inlined) or a 2× `.png`.
+
+The state-chart view in the State Machines dialog is a drafting surface
+too: drag states to arrange the chart (transitions re-route live, the
+arrowheads land on the target's rim, the initial state carries its entry
+arrow), and the arrangement persists into the model file per machine —
+`/api/edit/set_fsm_layout`, journaled like every other edit, kept across
+textual machine updates.
 
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram

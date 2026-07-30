@@ -84,6 +84,14 @@ pub struct Region {
     pub history: bool,
 }
 
+/// Persisted state-chart position of one state on the FSM canvas. Editor
+/// metadata: lowering and codegen never read it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct StatePos {
+    pub x: f64,
+    pub y: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateMachineDef {
     pub name: String,
@@ -101,6 +109,10 @@ pub struct StateMachineDef {
     /// machines (e.g. stdlib library blocks) lower to their own node.
     #[serde(default)]
     pub owner: Option<String>,
+    /// Persisted state-chart layout, keyed by state name. States without an
+    /// entry fall back to the editor's automatic circle placement.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub layout: std::collections::BTreeMap<String, StatePos>,
 }
 
 /// Lowering result: the auto-generated state-enum types (one per region — the
