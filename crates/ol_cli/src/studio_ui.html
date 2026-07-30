@@ -228,6 +228,12 @@
   svg .wire:hover { stroke-width: 2.4; }
   svg .wire.invalid { stroke: #d11a1a; stroke-width: 2; stroke-dasharray: 7 4; }
   svg .label { fill: #777; font-size: 9px; }
+  /* Rubber-band selection rectangle (drag on empty canvas). */
+  svg .marquee { fill: rgba(43,87,154,0.08); stroke: #2b579a; stroke-width: 1;
+                 stroke-dasharray: 4 3; pointer-events: none; }
+  /* Decorative strokes on operator glyphs: the XOR input arc, the memory
+     block's state bar. Stroked like the block outline, never filled. */
+  svg .glyph-line { fill: none; stroke: #2b579a; stroke-width: 1.1; pointer-events: none; }
   .problems {
     background: #fdeeee; border: 1px solid #d11a1a; color: #c42b1c;
     padding: 6px 10px; margin: 6px 0; font-size: 12px;
@@ -292,6 +298,23 @@
       <div class="mi" onclick="openLogMsgDialog()">Log Message…</div>
     </div>
   </div>
+  <div class="menu" data-menu="diagram">
+    <span class="menu-title">Diagram</span>
+    <div class="dropdown">
+      <div class="mi" onclick="alignSelected('left')">Align Lefts</div>
+      <div class="mi" onclick="alignSelected('right')">Align Rights</div>
+      <div class="mi" onclick="alignSelected('top')">Align Tops</div>
+      <div class="mi" onclick="alignSelected('bottom')">Align Bottoms</div>
+      <div class="mi" onclick="alignSelected('hcenter')">Align Horizontal Centers</div>
+      <div class="mi" onclick="alignSelected('vcenter')">Align Vertical Centers</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="alignSelected('dist-h')">Distribute Horizontally</div>
+      <div class="mi" onclick="alignSelected('dist-v')">Distribute Vertically</div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="exportDiagram('svg')">Export Diagram as SVG</div>
+      <div class="mi" onclick="exportDiagram('png')">Export Diagram as PNG</div>
+    </div>
+  </div>
   <div class="menu" data-menu="view">
     <span class="menu-title">View</span>
     <div class="dropdown">
@@ -307,6 +330,12 @@
       <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
       <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="wire-orth" checked onchange="renderDiagram()"> orthogonal wires</label></div>
+      <div class="menu-sep"></div>
+      <div class="mi" onclick="zoomIn()">Zoom In <span class="shortcut">Ctrl+=</span></div>
+      <div class="mi" onclick="zoomOut()">Zoom Out <span class="shortcut">Ctrl+−</span></div>
+      <div class="mi" onclick="zoomReset()">Zoom 100% <span class="shortcut">Ctrl+0</span></div>
+      <div class="mi" onclick="zoomFit()">Zoom to Fit</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="setSidePane('lustre')">Lustre Text Pane</div>
       <div class="mi" onclick="setSidePane('c')">Generated C Pane</div>
@@ -463,6 +492,7 @@
   <span class="err" id="err-count">0 errors</span>
   <span class="warn" id="warn-count">0 warnings</span>
   <span id="status-grid"></span>
+  <span id="status-zoom">zoom: 100%</span>
   <span class="simstate" id="status-sim"></span>
   <span id="diagram-status"></span>
   <span style="margin-left:auto">/api/inspect every 5 s</span>
@@ -707,6 +737,9 @@ const state = {
   inspect: null, selectedNode: null, stepHistory: "",
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
+  // Canvas view: zoom factor (viewBox scaling), plus the transient middle-drag
+  // pan and rubber-band marquee gestures.
+  view: { zoom: 1 }, pan: null, marquee: null, diagExtent: null,
   sim: { built: false, running: false, values: {} },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
@@ -1324,10 +1357,29 @@ document.addEventListener("keydown", ev => {
     deleteSelected();
     return;
   }
+  // Arrow keys nudge the selection one grid step (Shift: one pixel).
+  const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
+  if (arrow && !ev.ctrlKey && !ev.metaKey && state.selected.length && state.diagramData) {
+    ev.preventDefault();
+    const step = ev.shiftKey ? 1 : gridPitch();
+    for (const id of state.selected) {
+      const p = state.diagPos[id];
+      if (p) {
+        p.x = Math.max(0, p.x + arrow[0] * step);
+        p.y = Math.max(0, p.y + arrow[1] * step);
+      }
+    }
+    renderDiagram();
+    scheduleLayoutSave();
+    return;
+  }
   if ((ev.ctrlKey || ev.metaKey) && !ev.altKey) {
     const k = ev.key.toLowerCase();
     if (k === "z" && !ev.shiftKey) { ev.preventDefault(); editUndo(); }
     else if (k === "y" || (k === "z" && ev.shiftKey)) { ev.preventDefault(); editRedo(); }
+    else if (k === "=" || k === "+") { ev.preventDefault(); zoomIn(); }
+    else if (k === "-") { ev.preventDefault(); zoomOut(); }
+    else if (k === "0") { ev.preventDefault(); zoomReset(); }
   }
 });
 // Any click outside the menu dismisses it.
@@ -1709,9 +1761,32 @@ function renderProblems() {
 const DIAG = { ROW: 44, BOXH: 30, INW: 150, EQW: 280, OUTW: 170,
                X_IN: 16, X_EQ: 230, X_OUT: 580, PIN_PITCH: 16, PIN_MARGIN: 13 };
 
+// The SCADE glyph an equation block draws as. Gates, the selector and the
+// temporal blocks get real operator shapes; everything else stays a box
+// (with the big symbol text when the rhs has a recognizable shape).
+function eqShape(e) {
+  if (!e.symbol) return null;
+  if (e.symbol.kind === "const") return "const";
+  switch (e.symbol.text) {
+    case "AND": return "and";
+    case "OR": return "or";
+    case "XOR": return "xor";
+    case "NOT": return "not";
+    case "ITE": return "mux";
+    case "pre": case "FBY": case "->": return "mem";
+    default: return null;
+  }
+}
+
 // SCADE-style compact widths for symbol blocks; free-form text keeps the
 // wide box.
 function eqWidth(e) {
+  switch (eqShape(e)) {
+    case "and": case "or": case "xor": return 56;
+    case "not": return 44;
+    case "mux": return 48;
+    default: break;
+  }
   if (!e.symbol) return DIAG.EQW;
   const t = e.symbol.text || "";
   if (e.symbol.kind === "call") return Math.max(74, t.length * 7 + 26);
@@ -1750,8 +1825,10 @@ function boxLabelLines(it, p) {
 
 // A gate's height grows to seat its input pins on the left edge (SCADE
 // style): the pins are stacked PIN_PITCH apart and vertically centered.
+// The selector's condition pin sits on the top edge, not the left.
 function eqHeight(e) {
-  const n = (e.inputs || []).length;
+  let n = (e.inputs || []).length;
+  if (eqShape(e) === "mux" && n === 3) n -= 1;
   if (n <= 1) return DIAG.BOXH;
   return Math.max(DIAG.BOXH, (n - 1) * DIAG.PIN_PITCH + 2 * DIAG.PIN_MARGIN);
 }
@@ -1822,16 +1899,150 @@ function computePositions(d) {
   return pos;
 }
 
-// The y of input pin `port` on an equation block, relative to the SVG.
-function inputPinY(eqId, port) {
+// Where each input pin of an equation block sits, and which way its wire
+// approaches: {x, y, entry} per operand. Left-edge pins stack PIN_PITCH
+// apart, vertically centered; the selector's condition pin enters the
+// sloped top edge (SCADE style), so its wire drops in vertically.
+function eqPinGeom(eqId) {
   const p = state.diagPos[eqId];
   const e = state.diagramData.equations[+/^eq(\d+)$/.exec(eqId)[1]];
-  const n = (e.inputs || []).length;
-  if (!p || n === 0) return (p ? p.y + (p.h || DIAG.BOXH) / 2 : 0);
-  const span = (n - 1) * DIAG.PIN_PITCH;
-  const first = p.y + ((p.h || DIAG.BOXH) - span) / 2;
-  return first + port * DIAG.PIN_PITCH;
+  const pins = (e && e.inputs) || [];
+  if (!p || !pins.length) return [];
+  const h = p.h || DIAG.BOXH;
+  const res = [];
+  let left = pins.map((_, i) => i);
+  if (eqShape(e) === "mux" && pins.length === 3) {
+    res[0] = { x: p.x + p.w / 2, y: p.y + h * 0.125, entry: "top" };
+    left = [1, 2];
+  }
+  const span = (left.length - 1) * DIAG.PIN_PITCH;
+  const first = p.y + (h - span) / 2;
+  left.forEach((port, k) => res[port] = { x: p.x, y: first + k * DIAG.PIN_PITCH, entry: "left" });
+  return res;
 }
+
+// --- Wire routing: SCADE-style orthogonal runs (or the bezier fallback) ------
+
+// An orthogonal polyline drawn with rounded corners.
+function roundedPath(pts) {
+  const parts = ["M " + pts[0].x + " " + pts[0].y];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const a = pts[i - 1], p = pts[i], b = pts[i + 1];
+    const la = Math.hypot(p.x - a.x, p.y - a.y), lb = Math.hypot(b.x - p.x, b.y - p.y);
+    const r = Math.min(6, la / 2, lb / 2);
+    if (r < 0.75) { parts.push("L " + p.x + " " + p.y); continue; }
+    const ax = p.x + (a.x - p.x) * (r / la), ay = p.y + (a.y - p.y) * (r / la);
+    const bx = p.x + (b.x - p.x) * (r / lb), by = p.y + (b.y - p.y) * (r / lb);
+    parts.push("L " + ax + " " + ay, "Q " + p.x + " " + p.y + " " + bx + " " + by);
+  }
+  const last = pts[pts.length - 1];
+  parts.push("L " + last.x + " " + last.y);
+  return parts.join(" ");
+}
+
+// Route a wire from a source pin to a destination pin. `entry` is the side
+// the wire enters the destination on ("left" or "top"). Forward wires take
+// the classic H-V-H run; a backward (feedback) wire loops around with short
+// stubs so it never crosses back through its own blocks.
+function wireRoute(x1, y1, x2, y2, entry) {
+  const s = 12;
+  if (entry === "top") {
+    if (x2 >= x1 + s) return [{ x: x1, y: y1 }, { x: x2, y: y1 }, { x: x2, y: y2 }];
+    const ay = y2 - s;
+    return [{ x: x1, y: y1 }, { x: x1 + s, y: y1 }, { x: x1 + s, y: ay },
+            { x: x2, y: ay }, { x: x2, y: y2 }];
+  }
+  if (Math.abs(y1 - y2) < 0.5 && x2 >= x1) return [{ x: x1, y: y1 }, { x: x2, y: y2 }];
+  if (x2 - x1 >= 2 * s) {
+    const mx = (x1 + x2) / 2;
+    return [{ x: x1, y: y1 }, { x: mx, y: y1 }, { x: mx, y: y2 }, { x: x2, y: y2 }];
+  }
+  const my = (y1 + y2) / 2;
+  return [{ x: x1, y: y1 }, { x: x1 + s, y: y1 }, { x: x1 + s, y: my },
+          { x: x2 - s, y: my }, { x: x2 - s, y: y2 }, { x: x2, y: y2 }];
+}
+
+// The `d` attribute for one wire, honouring the View ▸ orthogonal toggle.
+function wirePathD(x1, y1, x2, y2, entry) {
+  const orth = document.getElementById("wire-orth");
+  if (orth && !orth.checked && entry !== "top") {
+    const mx = (x1 + x2) / 2;
+    return "M " + x1 + " " + y1 + " C " + mx + " " + y1 + ", " + mx + " " + y2 + ", " + x2 + " " + y2;
+  }
+  return roundedPath(wireRoute(x1, y1, x2, y2, entry));
+}
+
+// The outline of one diagram item as SVG. Recognized operators draw as real
+// SCADE shapes — MIL gates for AND/OR/XOR, the NOT triangle-and-bubble, the
+// selector trapezoid, a state-bar box for pre/FBY/->, a pointed tag for
+// literals — and inputs/outputs draw as flow-direction pennants. Everything
+// else stays a rectangle.
+function shapeSvg(it, p, cls) {
+  const x = p.x, y = p.y, w = p.w, h = p.h || DIAG.BOXH;
+  const path = d => '<path class="' + cls + '" d="' + d + '"/>';
+  switch (it.shape) {
+    case "and": {
+      // D-shape: flat left body, semicircular right nose.
+      const r = h / 2, fx = x + Math.max(w - r, w * 0.45);
+      return path("M " + x + " " + y + " L " + fx + " " + y +
+        " A " + r + " " + r + " 0 0 1 " + fx + " " + (y + h) +
+        " L " + x + " " + (y + h) + " Z");
+    }
+    case "or":
+    case "xor": {
+      // Curved-back OR body; XOR shifts the body right and adds the input arc.
+      const bx = it.shape === "xor" ? x + 6 : x;
+      const bw = x + w - bx;
+      let s = path("M " + bx + " " + y +
+        " Q " + (bx + bw * 0.62) + " " + y + " " + (bx + bw) + " " + (y + h / 2) +
+        " Q " + (bx + bw * 0.62) + " " + (y + h) + " " + bx + " " + (y + h) +
+        " Q " + (bx + bw * 0.3) + " " + (y + h / 2) + " " + bx + " " + y + " Z");
+      if (it.shape === "xor") {
+        s += '<path class="glyph-line" d="M ' + x + " " + y +
+          " Q " + (x + bw * 0.3) + " " + (y + h / 2) + " " + x + " " + (y + h) + '"/>';
+      }
+      return s;
+    }
+    case "not": {
+      // Triangle plus inversion bubble at the output.
+      const r = 3.5, tip = x + w - 2 * r;
+      return path("M " + x + " " + y + " L " + tip + " " + (y + h / 2) +
+          " L " + x + " " + (y + h) + " Z") +
+        '<circle class="' + cls + '" cx="' + (x + w - r) + '" cy="' + (y + h / 2) + '" r="' + r + '"/>';
+    }
+    case "mux":
+      // Selector trapezoid, narrowing in the flow direction; the condition
+      // pin drops onto the sloped top edge.
+      return path("M " + x + " " + y + " L " + (x + w) + " " + (y + h * 0.25) +
+        " L " + (x + w) + " " + (y + h * 0.75) + " L " + x + " " + (y + h) + " Z");
+    case "mem":
+      // Temporal block: a box with the SCADE state bar behind its left edge.
+      return path("M " + x + " " + y + " H " + (x + w) + " V " + (y + h) + " H " + x + " Z") +
+        '<line class="glyph-line" x1="' + (x + 6) + '" y1="' + y +
+        '" x2="' + (x + 6) + '" y2="' + (y + h) + '"/>';
+    case "const":
+      // Literal tag: flat left, pointed right — a value source, not a wire tap.
+      return path("M " + x + " " + y + " L " + (x + w - 8) + " " + y +
+        " L " + (x + w) + " " + (y + h / 2) + " L " + (x + w - 8) + " " + (y + h) +
+        " L " + x + " " + (y + h) + " Z");
+    case "in":
+      // Input pennant: the point aims into the diagram (flow direction).
+      return path("M " + x + " " + y + " L " + (x + w - 9) + " " + y +
+        " L " + (x + w) + " " + (y + h / 2) + " L " + (x + w - 9) + " " + (y + h) +
+        " L " + x + " " + (y + h) + " Z");
+    case "out":
+      // Output flag: notched left edge receives the wire, flat right edge.
+      return path("M " + x + " " + y + " L " + (x + w) + " " + y +
+        " L " + (x + w) + " " + (y + h) + " L " + x + " " + (y + h) +
+        " L " + (x + 9) + " " + (y + h / 2) + " Z");
+    default:
+      return '<rect class="' + cls + '" x="' + x + '" y="' + y +
+        '" width="' + w + '" height="' + h + '" rx="2"/>';
+  }
+}
+
+// Gate glyphs whose shape alone names the operator — no label text inside.
+const SHAPES_UNLABELLED = new Set(["and", "or", "xor", "not", "mux"]);
 
 function renderDiagram() {
   const d = state.diagramData;
@@ -1841,7 +2052,7 @@ function renderDiagram() {
   const collapsed = collapsedLocals(d);
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "in" }));
   (d.ghosts || []).forEach(g => {
     if (pinGhosts.has(g.name)) return; // shown as a red pin on its gate
     items.push({ id: g.name, label: g.name + " : ?", cls: "box ghost", reason: g.reason, h0: DIAG.BOXH });
@@ -1852,6 +2063,7 @@ function renderDiagram() {
     // the full equation text stays one hover away.
     label: e.symbol ? e.symbol.text : e.text,
     sym: !!e.symbol,
+    shape: eqShape(e),
     cls: (e.invalid ? "box eq invalid" : "box eq") + (e.symbol && e.symbol.kind === "const" ? " const" : ""),
     reason: (e.reason ? e.reason + " — " : "") + e.text,
     calls: e.calls || [],
@@ -1862,7 +2074,7 @@ function renderDiagram() {
     h0: eqHeight(e),
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "out" }));
   d.locals.forEach(l => {
     if (collapsed.has(l.name)) return; // lives on its gate, not its own box
     items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
@@ -1885,6 +2097,7 @@ function renderDiagram() {
     maxX = Math.max(maxX, p.x + p.w);
   }
   const W = Math.max(maxX + 40, 780), H = Math.max(maxY + 30, 240);
+  state.diagExtent = { W, H };
 
   // name -> type text, for SCADE-style wire labels.
   const typeOf = {};
@@ -1892,8 +2105,12 @@ function renderDiagram() {
   d.outputs.forEach(p => typeOf[p.name] = typeName(p.type));
   d.locals.forEach(l => typeOf[l.name] = typeName(l.type));
 
+  // The zoom scales the whole scene through the viewBox: the model keeps its
+  // own coordinates, the SVG's on-screen size carries the factor.
+  const z = state.view.zoom;
   const g = gridPitch();
-  let svg = '<svg id="diagram-svg" width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">';
+  let svg = '<svg id="diagram-svg" width="' + Math.round(W * z) + '" height="' + Math.round(H * z) +
+    '" viewBox="0 0 ' + W + " " + H + '" xmlns="http://www.w3.org/2000/svg">';
   if (document.getElementById("grid-show").checked) {
     // Engineering grid: minor lines every pitch, major every 5 pitches.
     svg += '<defs>' +
@@ -1913,22 +2130,24 @@ function renderDiagram() {
     const a = pos[fromId], b = pos[w.to];
     if (!a || !b) continue;
     const x1 = a.x + a.w, y1 = a.y + (a.h || DIAG.BOXH) / 2;
-    const x2 = b.x;
-    // Wires into a gate terminate at the specific input pin; everything else
-    // meets the box at its vertical centre.
-    const y2 = (w.to_port != null && /^eq\d+$/.test(w.to))
-      ? inputPinY(w.to, w.to_port)
-      : b.y + (b.h || DIAG.BOXH) / 2;
-    const mx = (x1 + x2) / 2;
+    // Wires into a gate terminate at the specific input pin (which knows the
+    // side it is entered on); everything else meets the box at its centre.
+    let x2 = b.x, y2 = b.y + (b.h || DIAG.BOXH) / 2, entry = "left";
+    if (w.to_port != null && /^eq\d+$/.test(w.to)) {
+      const pin = eqPinGeom(w.to)[w.to_port];
+      if (pin) { x2 = pin.x; y2 = pin.y; entry = pin.entry; }
+    }
     const cls = w.invalid ? "wire invalid" : "wire";
-    svg += '<path class="' + cls + '" d="M ' + x1 + ' ' + y1 + ' C ' + mx + ' ' + y1 + ', ' + mx + ' ' + y2 + ', ' + x2 + ' ' + y2 + '">' +
+    svg += '<path class="' + cls + '" d="' + wirePathD(x1, y1, x2, y2, entry) + '">' +
       (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
     if (showLabels) {
-      // The SCADE wire annotation: the carried variable and its type.
+      // The SCADE wire annotation: the carried variable and its type, seated
+      // just past the source pin (so parallel wires keep their labels apart —
+      // two wires from one source overprint the same text harmlessly).
       const v = /^eq\d+$/.test(w.from) ? w.to : w.from;
       const t = typeOf[v] || "?";
-      svg += '<text class="wire-label" x="' + mx + '" y="' + ((y1 + y2) / 2 - 4) +
-        '" text-anchor="middle">' + escapeHTML(v + ": " + t) + '</text>';
+      svg += '<text class="wire-label" x="' + (x1 + 8) + '" y="' + (y1 - 5) + '">' +
+        escapeHTML(v + ": " + t) + '</text>';
     }
   }
   for (const it of items) {
@@ -1940,19 +2159,21 @@ function renderDiagram() {
     svg += '<g class="diag-item" data-id="' + it.id + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
-    svg += '<rect class="' + it.cls + (selected ? ' selected' : '') + '" x="' + p.x + '" y="' + p.y +
-      '" width="' + p.w + '" height="' + h + '" rx="2"/>';
+    svg += shapeSvg(it, p, it.cls + (selected ? " selected" : ""));
     // Label: a single (truncated) line, or — when text-wrap is on for this box —
     // several lines via <tspan>, centered for symbol gates, left for text boxes.
-    const lines = p.wrap ? boxLabelLines(it, p)
-      : [it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label];
-    const tx = it.sym ? (p.x + p.w / 2) : (p.x + 8);
-    const firstY = p.y + h / 2 + (it.sym ? 5 : 4) - (lines.length - 1) * WRAP_LINEH / 2;
-    svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
-    lines.forEach((ln, li) => {
-      svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
-    });
-    svg += '</text>';
+    // Gate glyphs carry no text at all: the shape is the label.
+    if (!SHAPES_UNLABELLED.has(it.shape)) {
+      const lines = p.wrap ? boxLabelLines(it, p)
+        : [it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label];
+      const tx = it.sym ? (p.x + p.w / 2 + (it.shape === "mem" ? 3 : 0)) : (p.x + 8);
+      const firstY = p.y + h / 2 + (it.sym ? 5 : 4) - (lines.length - 1) * WRAP_LINEH / 2;
+      svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
+      lines.forEach((ln, li) => {
+        svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
+      });
+      svg += '</text>';
+    }
     if (divable) {
       svg += '<text class="label" x="' + (p.x + p.w - 12) + '" y="' + (p.y + 10) + '">▸</text>';
     }
@@ -1964,18 +2185,23 @@ function renderDiagram() {
     if (it.reason) {
       svg += '<title>' + escapeHTML(it.reason) + '</title>';
     }
-    // Input pins on the left edge (SCADE gates): one per operand, red when
-    // unbound. Each is a drop target for wiring a source onto that operand.
-    (it.inputs || []).forEach((pin, k) => {
-      const py = inputPinY(it.id, k);
-      // Bound pins name their source; unbound pins read as a neutral "input N"
-      // slot — wire it, or just type the expression in Properties.
-      const tip = pin.bound ? pin.name
-        : ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)");
-      svg += '<circle class="inpin' + (pin.bound ? "" : " unbound") + '" data-eq="' + it.id +
-        '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + p.x +
-        '" cy="' + py + '" r="4"><title>' + escapeHTML(tip) + '</title></circle>';
-    });
+    // Input pins (SCADE gates): one per operand, red when unbound, seated
+    // where the shape wants them (left edge, or the selector's top). Each is
+    // a drop target for wiring a source onto that operand.
+    if ((it.inputs || []).length) {
+      const geom = eqPinGeom(it.id);
+      it.inputs.forEach((pin, k) => {
+        const pg = geom[k];
+        if (!pg) return;
+        // Bound pins name their source; unbound pins read as a neutral "input N"
+        // slot — wire it, or just type the expression in Properties.
+        const tip = pin.bound ? pin.name
+          : ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)");
+        svg += '<circle class="inpin' + (pin.bound ? "" : " unbound") + '" data-eq="' + it.id +
+          '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + pg.x +
+          '" cy="' + pg.y + '" r="4"><title>' + escapeHTML(tip) + '</title></circle>';
+      });
+    }
     // Source pin on the right edge: drag it onto another box to wire. A gate
     // whose result is a collapsed local shows that result here — red ("output
     // needed") until something consumes it.
@@ -1998,6 +2224,12 @@ function renderDiagram() {
         (a.x + a.w) + ' ' + (a.y + (a.h || DIAG.BOXH) / 2) + ' L ' + state.wireDrag.x + ' ' + state.wireDrag.y + '"/>';
     }
   }
+  // Rubber-band selection rectangle while marquee-dragging.
+  if (state.marquee && state.marquee.moved) {
+    const m = state.marquee;
+    svg += '<rect class="marquee" x="' + Math.min(m.x0, m.x1) + '" y="' + Math.min(m.y0, m.y1) +
+      '" width="' + Math.abs(m.x1 - m.x0) + '" height="' + Math.abs(m.y1 - m.y0) + '"/>';
+  }
   svg += "</svg>";
   const host = document.getElementById("diagram-host");
   host.innerHTML = svg;
@@ -2017,11 +2249,20 @@ function boxCls(base, p) {
 
 function svgPoint(ev) {
   const r = document.getElementById("diagram-svg").getBoundingClientRect();
-  return { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  const z = state.view.zoom;
+  return { x: (ev.clientX - r.left) / z, y: (ev.clientY - r.top) / z };
 }
 
 function diagPointerDown(ev) {
   hideCtxMenu();
+  // Middle button pans the view (SCADE-style canvas navigation).
+  if (ev.button === 1) {
+    const host = document.getElementById("diagram-host");
+    state.pan = { sx: ev.clientX, sy: ev.clientY, sl: host.scrollLeft, st: host.scrollTop };
+    ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
+    ev.preventDefault();
+    return;
+  }
   // Grabbing a pin starts a wire, not a move.
   if (ev.target.classList && ev.target.classList.contains("pin")) {
     const pt = svgPoint(ev);
@@ -2042,26 +2283,68 @@ function diagPointerDown(ev) {
   }
   const g = ev.target.closest("g.diag-item");
   if (!g) {
-    // Clicking empty canvas clears the selection.
-    if (ev.button === 0) setSelection(null);
+    // Dragging on empty canvas rubber-bands a selection; a plain click
+    // (no movement) clears it on pointer-up.
+    if (ev.button === 0) {
+      const pt = svgPoint(ev);
+      state.marquee = {
+        x0: pt.x, y0: pt.y, x1: pt.x, y1: pt.y, moved: false,
+        base: (ev.shiftKey || ev.ctrlKey || ev.metaKey) ? [...state.selected] : [],
+      };
+      ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
+    }
     return;
   }
   const id = g.dataset.id;
   const pt = svgPoint(ev);
   const p = state.diagPos[id];
+  // Dragging a selected item moves the whole selection as a group; the
+  // members keep their offsets from the grabbed (snapped) anchor box.
+  const group = state.selected.includes(id) ? state.selected : [id];
+  const members = group.filter(m => state.diagPos[m])
+    .map(m => ({ id: m, ox: state.diagPos[m].x - p.x, oy: state.diagPos[m].y - p.y }));
   state.drag = {
     id, dx: pt.x - p.x, dy: pt.y - p.y, moved: false, call: g.dataset.call,
     additive: ev.shiftKey || ev.ctrlKey || ev.metaKey,
+    members,
+    minOx: Math.min(...members.map(m => m.ox)),
+    minOy: Math.min(...members.map(m => m.oy)),
   };
   ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
 }
 
 function diagPointerMove(ev) {
+  if (state.pan) {
+    const host = document.getElementById("diagram-host");
+    host.scrollLeft = state.pan.sl - (ev.clientX - state.pan.sx);
+    host.scrollTop = state.pan.st - (ev.clientY - state.pan.sy);
+    return;
+  }
   if (state.wireDrag) {
     const pt = svgPoint(ev);
     state.wireDrag.x = pt.x;
     state.wireDrag.y = pt.y;
     renderDiagram();
+    return;
+  }
+  if (state.marquee) {
+    const pt = svgPoint(ev);
+    const m = state.marquee;
+    m.x1 = pt.x; m.y1 = pt.y;
+    if (Math.abs(m.x1 - m.x0) + Math.abs(m.y1 - m.y0) > 4) m.moved = true;
+    if (m.moved) {
+      // Select every box the band touches (plus the ctrl-held base selection).
+      const x = Math.min(m.x0, m.x1), y = Math.min(m.y0, m.y1);
+      const X = Math.max(m.x0, m.x1), Y = Math.max(m.y0, m.y1);
+      const hit = [...m.base];
+      for (const [id, p] of Object.entries(state.diagPos)) {
+        const h = p.h || DIAG.BOXH;
+        if (p.x < X && p.x + p.w > x && p.y < Y && p.y + h > y && !hit.includes(id)) hit.push(id);
+      }
+      state.selected = hit;
+      state.selection = hit[hit.length - 1] || null;
+      renderDiagram();
+    }
     return;
   }
   if (state.resize) {
@@ -2078,16 +2361,31 @@ function diagPointerMove(ev) {
   if (!state.drag) return;
   const pt = svgPoint(ev);
   const p = state.diagPos[state.drag.id];
-  const nx = snap(Math.max(0, pt.x - state.drag.dx));
-  const ny = snap(Math.max(0, pt.y - state.drag.dy));
+  // The anchor snaps; members follow at their exact offsets, and the whole
+  // group stops at the canvas edge together (no member squashes to 0,0).
+  const nx = Math.max(-state.drag.minOx, snap(Math.max(0, pt.x - state.drag.dx)));
+  const ny = Math.max(-state.drag.minOy, snap(Math.max(0, pt.y - state.drag.dy)));
   if (Math.abs(nx - p.x) + Math.abs(ny - p.y) > 3) state.drag.moved = true;
   if (state.drag.moved) {
-    p.x = nx; p.y = ny;
+    for (const m of state.drag.members) {
+      const mp = state.diagPos[m.id];
+      if (mp) { mp.x = nx + m.ox; mp.y = ny + m.oy; }
+    }
     renderDiagram();
   }
 }
 
 async function diagPointerUp(ev) {
+  if (state.pan) { state.pan = null; return; }
+  if (state.marquee) {
+    const m = state.marquee;
+    state.marquee = null;
+    // A plain click on empty canvas clears the selection; a real band keeps
+    // what it captured.
+    if (!m.moved) setSelection(null);
+    else { renderDiagram(); renderProps(); }
+    return;
+  }
   if (state.resize) { state.resize = null; saveLayout(); return; }
   if (state.wireDrag) {
     const wd = state.wireDrag;
@@ -2239,6 +2537,58 @@ function gridChanged() {
   document.getElementById("status-grid").textContent = "grid: " + gridPitch() + " px";
   renderDiagram();
   saveLayout();
+}
+
+// --- Canvas zoom & pan --------------------------------------------------------
+
+const ZOOM_MIN = 0.25, ZOOM_MAX = 4;
+
+/// Set the zoom factor, keeping the model point under (cx, cy) — client
+/// coordinates, default the viewport centre — stationary on screen.
+function setZoom(z, cx, cy) {
+  const host = document.getElementById("diagram-host");
+  const r = host.getBoundingClientRect();
+  if (cx === undefined) { cx = r.left + r.width / 2; cy = r.top + r.height / 2; }
+  const old = state.view.zoom;
+  z = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  if (Math.abs(z - old) < 1e-9) return;
+  const mx = (host.scrollLeft + (cx - r.left)) / old;
+  const my = (host.scrollTop + (cy - r.top)) / old;
+  state.view.zoom = z;
+  renderDiagram();
+  host.scrollLeft = mx * z - (cx - r.left);
+  host.scrollTop = my * z - (cy - r.top);
+  updateZoomStatus();
+}
+
+function updateZoomStatus() {
+  document.getElementById("status-zoom").textContent =
+    "zoom: " + Math.round(state.view.zoom * 100) + "%";
+}
+
+function zoomIn() { setZoom(state.view.zoom * 1.2); }
+function zoomOut() { setZoom(state.view.zoom / 1.2); }
+function zoomReset() { setZoom(1); }
+
+/// Fit the whole diagram in the viewport (capped at 100% — a small diagram
+/// stays readable rather than ballooning).
+function zoomFit() {
+  const host = document.getElementById("diagram-host");
+  const e = state.diagExtent;
+  if (!e) return;
+  const z = Math.min((host.clientWidth - 16) / e.W, (host.clientHeight - 16) / e.H, 1);
+  state.view.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+  renderDiagram();
+  host.scrollLeft = 0;
+  host.scrollTop = 0;
+  updateZoomStatus();
+}
+
+// Debounced layout save, for gestures that fire in bursts (arrow-key nudges).
+let layoutSaveTimer = null;
+function scheduleLayoutSave() {
+  clearTimeout(layoutSaveTimer);
+  layoutSaveTimer = setTimeout(saveLayout, 500);
 }
 
 // --- Operations toolbox (right dock) -------------------------------------------
@@ -2557,6 +2907,12 @@ async function switchedWorkspace(note) {
 }
 
 const diagramHostEl = document.getElementById("diagram-host");
+// Ctrl+wheel zooms about the cursor (plain wheel keeps scrolling).
+diagramHostEl.addEventListener("wheel", ev => {
+  if (!ev.ctrlKey) return;
+  ev.preventDefault();
+  setZoom(state.view.zoom * (ev.deltaY < 0 ? 1.1 : 1 / 1.1), ev.clientX, ev.clientY);
+}, { passive: false });
 diagramHostEl.addEventListener("dragover", ev => ev.preventDefault());
 diagramHostEl.addEventListener("drop", async ev => {
   ev.preventDefault();
@@ -2567,8 +2923,9 @@ diagramHostEl.addEventListener("drop", async ev => {
   if (data === "sm:new") { openStateMachineForCurrent(); return; }
   const svgEl = document.getElementById("diagram-svg");
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
-  const x = snap(Math.max(0, ev.clientX - r.left));
-  const y = snap(Math.max(0, ev.clientY - r.top));
+  const z = state.view.zoom;
+  const x = snap(Math.max(0, (ev.clientX - r.left) / z));
+  const y = snap(Math.max(0, (ev.clientY - r.top) / z));
 
   // A type dropped from the Types section opens a kind-specific action menu
   // (MAKE/FLATTEN/SLICE for arrays, MAKE/FLATTEN for records, variant/compare/
@@ -2733,6 +3090,18 @@ function showCtxMenu(x, y) {
       html += '<div class="ctx-item" onclick="resetBoxSize()">Reset size</div>';
     }
   }
+  // Layout tools appear once there is a group to lay out.
+  if (n >= 2) {
+    html += '<div class="ctx-sep"></div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'left\')">Align Lefts</div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'top\')">Align Tops</div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'hcenter\')">Align Horizontal Centers</div>' +
+      '<div class="ctx-item" onclick="alignSelected(\'vcenter\')">Align Vertical Centers</div>';
+    if (n >= 3) {
+      html += '<div class="ctx-item" onclick="alignSelected(\'dist-v\')">Distribute Vertically</div>' +
+        '<div class="ctx-item" onclick="alignSelected(\'dist-h\')">Distribute Horizontally</div>';
+    }
+  }
   html += '<div class="ctx-sep"></div>' +
     '<div class="ctx-item" onclick="deleteSelected()">Delete' +
     (n > 1 ? " (" + n + " items)" : "") + "</div>";
@@ -2740,6 +3109,62 @@ function showCtxMenu(x, y) {
   m.style.left = x + "px";
   m.style.top = y + "px";
   m.style.display = "block";
+}
+
+// --- Align / distribute (the SCADE layout tools) ------------------------------
+
+/// Align or distribute the multi-selection. Alignment needs two boxes,
+/// distribution three; anything less reports what to do instead of guessing.
+function alignSelected(mode) {
+  hideCtxMenu();
+  const boxes = state.selected
+    .map(id => ({ id, p: state.diagPos[id] }))
+    .filter(b => b.p);
+  const dist = mode === "dist-h" || mode === "dist-v";
+  if (boxes.length < (dist ? 3 : 2)) {
+    wireStatus(dist ? "distribute needs 3+ selected boxes (drag a rubber band around them)"
+                    : "align needs 2+ selected boxes (drag a rubber band around them)");
+    return;
+  }
+  const H = b => b.p.h || DIAG.BOXH;
+  if (dist) {
+    // Keep the first and last (in flow order), spread the rest evenly between.
+    const horiz = mode === "dist-h";
+    boxes.sort((a, b) => horiz ? a.p.x - b.p.x : a.p.y - b.p.y);
+    const first = boxes[0], last = boxes[boxes.length - 1];
+    const span = horiz ? (last.p.x - first.p.x) : (last.p.y - first.p.y);
+    boxes.forEach((b, i) => {
+      const v = (horiz ? first.p.x : first.p.y) + (span * i) / (boxes.length - 1);
+      if (horiz) b.p.x = Math.round(v); else b.p.y = Math.round(v);
+    });
+  } else {
+    const xs = boxes.map(b => b.p.x);
+    const ys = boxes.map(b => b.p.y);
+    for (const b of boxes) {
+      switch (mode) {
+        case "left": b.p.x = Math.min(...xs); break;
+        case "right": b.p.x = Math.max(...boxes.map(o => o.p.x + o.p.w)) - b.p.w; break;
+        case "top": b.p.y = Math.min(...ys); break;
+        case "bottom": b.p.y = Math.max(...boxes.map(o => o.p.y + H(o))) - H(b); break;
+        // Horizontal centers line up on a vertical axis; vertical centers on a
+        // horizontal one (the SCADE menu wording).
+        case "hcenter": {
+          const c = boxes[0].p.x + boxes[0].p.w / 2;
+          b.p.x = Math.round(c - b.p.w / 2);
+          break;
+        }
+        case "vcenter": {
+          const c = boxes[0].p.y + H(boxes[0]) / 2;
+          b.p.y = Math.round(c - H(b) / 2);
+          break;
+        }
+      }
+    }
+  }
+  renderDiagram();
+  saveLayout();
+  wireStatus(mode.startsWith("dist") ? "distributed " + boxes.length + " boxes"
+                                     : "aligned " + boxes.length + " boxes");
 }
 
 // Per-box text-wrap toggle (right-click ▸ Wrap text). A wrapped box renders its
@@ -3901,6 +4326,76 @@ async function testsRecord() {
 }
 
 // --- Generate C-Lite: save each generated file via a data: download link. -------------
+
+// --- Export the diagram as an image (SVG / PNG) --------------------------------
+
+function downloadDataUrl(name, href) {
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+/// A standalone copy of the live diagram SVG: the canvas stylesheet rules are
+/// inlined so the file renders identically outside the Studio, and a white
+/// backing rect replaces the page background.
+function diagramSvgText() {
+  const svgEl = document.getElementById("diagram-svg");
+  if (!svgEl) return null;
+  let css = "";
+  for (const sheet of document.styleSheets) {
+    for (const rule of sheet.cssRules) {
+      if (rule.selectorText && /(^|,)\s*svg[ .]/.test(rule.selectorText)) css += rule.cssText + "\n";
+    }
+  }
+  const clone = svgEl.cloneNode(true);
+  clone.removeAttribute("id");
+  const e = state.diagExtent || { W: clone.width.baseVal.value, H: clone.height.baseVal.value };
+  // Export at model scale, whatever the on-screen zoom happens to be.
+  clone.setAttribute("width", e.W);
+  clone.setAttribute("height", e.H);
+  const style = document.createElementNS("http://www.w3.org/2000/svg", "style");
+  style.textContent = "svg { font-family: 'Segoe UI', sans-serif; }\n" + css;
+  clone.insertBefore(style, clone.firstChild);
+  const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bg.setAttribute("width", e.W);
+  bg.setAttribute("height", e.H);
+  bg.setAttribute("fill", "#fff");
+  clone.insertBefore(bg, style.nextSibling);
+  return new XMLSerializer().serializeToString(clone);
+}
+
+function exportDiagram(kind) {
+  const text = diagramSvgText();
+  if (!text || !state.diagramData) {
+    wireStatus("no diagram to export");
+    return;
+  }
+  const name = state.diagramData.node;
+  const svgUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
+  if (kind === "svg") {
+    downloadDataUrl(name + ".svg", svgUrl);
+    wireStatus("exported " + name + ".svg");
+    return;
+  }
+  // PNG: rasterize the standalone SVG at 2× for crisp lines.
+  const e = state.diagExtent;
+  const img = new Image();
+  img.onload = () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = e.W * 2;
+    canvas.height = e.H * 2;
+    const ctx = canvas.getContext("2d");
+    ctx.scale(2, 2);
+    ctx.drawImage(img, 0, 0);
+    downloadDataUrl(name + ".png", canvas.toDataURL("image/png"));
+    wireStatus("exported " + name + ".png");
+  };
+  img.onerror = () => wireStatus("PNG export failed — try SVG");
+  img.src = svgUrl;
+}
 
 async function downloadBuild() {
   const files = [

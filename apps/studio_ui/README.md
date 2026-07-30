@@ -15,6 +15,28 @@ simulation runner — no JS toolchain, no separate install, no Node, no
 Tauri build step. The page re-fetches the JSON inspection every five
 seconds so external edits to the model are picked up on the fly.
 
+The dataflow canvas is a SCADE-style drafting surface:
+
+- **Operator glyphs** — recognized blocks render as real shapes: MIL
+  AND/OR/XOR gates, the NOT triangle-and-bubble, the if/then/else
+  selector trapezoid (condition pin on the sloped top edge), temporal
+  blocks with a state bar, pointed literal tags; inputs and outputs are
+  flow-direction pennants and flags.
+- **Orthogonal wires** — rounded-corner Manhattan routing (with a
+  feedback loop-around for backward wires), source-anchored
+  `name: type` annotations, and a View-menu toggle back to curves.
+- **Navigation** — Ctrl+wheel zoom about the cursor (25%–400%),
+  Zoom to Fit / 100% in the View menu, middle-drag panning, and a
+  status-bar zoom readout.
+- **Selection** — rubber-band marquee on empty canvas, ctrl-click
+  toggling, group dragging of the whole selection, arrow-key nudging
+  (grid-step; Shift for 1 px), delete of everything selected.
+- **Layout tools** — align lefts/rights/tops/bottoms/centers and
+  distribute horizontally/vertically, from the Diagram menu or the
+  canvas right-click menu; positions persist into the model file.
+- **Export** — the Diagram menu writes the current diagram as a
+  standalone `.svg` (styles inlined) or a 2× `.png`.
+
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram
 ReactFlow canvas), but the back-end contract is what was actually

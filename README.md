@@ -40,6 +40,18 @@ its initial state (ringed), guarded transitions, and per-state outputs.
 
 ![An operator-owned state machine in OpenLustre Studio — the nested project-tree shape on the left and the Lights state chart (Red/Green/Yellow with tick and emergency transitions) on the canvas.](docs/screenshots/02-state-machine.png)
 
+**SCADE-style drafting.** Predefined operators draw as real glyphs — MIL-shape
+AND/OR/XOR gates, the NOT triangle, the if/then/else selector trapezoid with
+its condition pin on the sloped top edge, temporal blocks (`pre`, `FBY`) with
+a state bar, pointed literal tags — while inputs and outputs are
+flow-direction pennants and wires run orthogonally with rounded corners,
+annotated at their source pin. The canvas zooms (Ctrl+wheel about the cursor,
+zoom-to-fit, 100%), pans with middle-drag, rubber-band multi-selects, drags
+whole selections, nudges with the arrow keys, aligns and distributes through
+the Diagram menu, and exports the diagram as SVG or PNG.
+
+![The SCADE-style glyph set on the OpenLustre Studio canvas — input pennants feeding OR, XOR and NOT gates, a selector trapezoid, an FBY memory block and a literal tag, wired orthogonally into output flags.](docs/screenshots/03-scade-glyphs.png)
+
 ## Installing
 
 **Windows** — download `OpenLustreStudio-<version>-Setup.exe` from the

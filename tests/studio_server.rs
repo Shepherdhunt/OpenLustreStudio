@@ -193,4 +193,15 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("propsdock"), "Properties dock missing");
     assert!(html.contains("mi-undo"), "Edit > Undo missing");
     assert!(html.contains("data-dock=\"build\""), "Build dock tab missing");
+
+    // The SCADE-style canvas tooling: the Diagram menu (align / distribute /
+    // export), zoom (View menu items + the status-bar readout), the
+    // orthogonal-wire toggle, and the operator glyph renderer.
+    assert!(html.contains("data-menu=\"diagram\""), "Diagram menu missing");
+    assert!(html.contains("alignSelected"), "align/distribute commands missing");
+    assert!(html.contains("exportDiagram"), "diagram export missing");
+    assert!(html.contains("status-zoom"), "status-bar zoom readout missing");
+    assert!(html.contains("wire-orth"), "orthogonal-wires toggle missing");
+    assert!(html.contains("function shapeSvg"), "operator glyph renderer missing");
+    assert!(html.contains("function zoomFit"), "zoom-to-fit missing");
 }
