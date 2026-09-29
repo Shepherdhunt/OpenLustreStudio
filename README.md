@@ -94,6 +94,20 @@ stepping from where they end.
 
 ![A test scenario against its golden trace — the IR simulator's cmd differs at cycle 7 (10 where the golden has 14): the cell is banded red with "≠14" and the first divergence is marked on the axis.](docs/screenshots/08-waveform-divergence.png)
 
+**C in the loop.** Tick *C in the loop* and the Studio compiles the
+simulated operator's generated C and steps it in lockstep with the model:
+the same inputs each cycle, the outputs and contract-monitor columns
+compared as they come. The compiled C's values are drawn as the waveform's
+reference lanes, the watch table gets a C column, a disagreeing output shows
+"≠ C value" on the diagram, and a Run stops at the first cycle where model
+and code part. Attaching mid-run replays the session so far through the C
+first. On its first runs it caught two simulator bugs, both since fixed
+(sized integers didn't wrap on assignment; enum inputs were rejected). It
+also caught a gap that is still open: `float32` is simulated in double
+precision, so a long-running integrator drifts from the C.
+
+![C in the loop in OpenLustre Studio — a float32 integrator stopped at cycle 951, where the compiled C (12.3758) first departs from the model (12.376): the chip reads "C ≠ from cycle 951", the watch table's C column is red, the diagram shows "≠ C 12.3758" under the output, and the waveform marks the divergence.](docs/screenshots/09-c-in-the-loop.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 

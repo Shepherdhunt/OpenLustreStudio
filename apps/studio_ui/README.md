@@ -88,6 +88,19 @@ rejected). A step after a semantic model edit answers `409
 monitoring uses the same observer node as the generated C, so the modes
 and violations shown per cycle match a compiled run.
 
+`POST /api/sim/c {"on": true}` puts the generated C of the simulated
+operator in the loop: it is compiled (the build is reused while the model's
+semantic signature is unchanged) and its CSV driver runs as a child process,
+fed one input line per cycle (the driver flushes each output line). The
+answer is `{attached, reused_build, columns, rows: [{cycle, c, c_diff}],
+diverged_at}` — the session's history replayed through the C. From then on
+each step row carries `c` (the C's outputs and `active_mode` /
+`violations`, enums by name) and `c_diff` (the columns that disagree:
+floats within the driver's `%g` precision, everything else as text), and
+`"stop_on_divergence": true` ends a run on the first disagreeing cycle. A C
+program that exits, hangs (5 s) or prints something unexpected is detached
+and reported in `c_error`. `{"on": false}` detaches it.
+
 A step can also carry `"sequence": [{name: "text"}, …]` — one input set
 per cycle, with `inputs` filling any gaps — which is how a test scenario
 or a Kind 2 counterexample is replayed in the session. Every step of the

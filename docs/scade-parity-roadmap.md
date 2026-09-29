@@ -33,8 +33,8 @@ no GUI at all.
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
 | C-Lite generation (selected root + closure) | ✅ | ✅ Generate / C pane / save files |
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
-| Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review** (was replay-from-zero) |
-| IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator** |
+| Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review; the compiled C stepped in lockstep ("C in the loop")** (was replay-from-zero) |
+| IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator; live, cycle by cycle, in the Simulation dock** |
 | Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples | ⚠️ default mode only; **counterexample as a waveform, replayable in the simulator** (was an ASCII block); **Kind 2 not bundled or in CI** |
 | Evidence report | ❌ | ❌ |
 | Imported C operators | ✅ manifests, wrappers, validation | ❌ no way to register or place one |
@@ -66,11 +66,23 @@ were silent):
   machine (or activation) — it now does.
 - The canvas showed generated `__sm_*` / `__act_*` internals for any
   operator owning a construct — constructs now render as single blocks.
+- Found by stepping the compiled C in lockstep with the simulator (item 6):
+  the simulator did not wrap sized integers on assignment (`uint8`
+  200 + 100 stayed 300; the C stores 44) — it now converts on store exactly
+  as C does; and it rejected enum-typed inputs outright — they now parse by
+  variant name.
 
 **Known semantic gap (documented):** activations are stage 1 — branches are
 *selected*, not *clocked*. `pre` inside a branch reads the previous cycle
 (like SCADE `last`), not the branch's previous activation. Models that rely
 on frozen inactive branches will behave differently than in SCADE.
+
+**Known fidelity gap (found by C in the loop):** the simulator carries
+`float32` values in double precision, while the generated C computes in
+`float`. An integrator (`pos = (0.0 -> pre pos) + v * 0.01` with `v = 1.3`)
+drifts past the comparison's six significant digits after ~950 cycles
+(model 12.376, C 12.3758). The batch harness compares traces as text, so it
+would also flag float values whose `%g` and Rust spellings differ.
 
 ## Recommendations
 
@@ -125,9 +137,20 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
    C naming operator / equation / diagram element, a machine-readable trace
    matrix, and a generation report (files, operators, state sizes). This is
    what KCG users expect and what DO-178C-style reviews need.
-6. **C-in-the-loop stepping (M).** Step the compiled executable next to the
-   IR simulator in the Simulation dock, flagging divergence live (the batch
-   comparison already exists in `test run --backend both`).
+6. ✅ **C-in-the-loop stepping — done.** A "C in the loop" toggle compiles
+   the simulated operator (reusing the build while the model is unchanged)
+   and runs its CSV driver as a child process, fed the same inputs each
+   cycle. Outputs and contract-monitor columns are compared every cycle
+   (enums by name, floats within `%g` precision); the waveform draws the C
+   as each lane's reference, the watch table gains a C column, the diagram
+   shows "≠ C value" under a disagreeing output, and a Run stops at the
+   first divergence. Attaching mid-session replays the history first. It
+   found two simulator bugs on its first runs (above) and one open gap
+   (`float32`, above).
+6b. **Float32 fidelity (S–M).** Round `float32` values to single precision
+   on store in the simulator (as it now does for sized integers), print them
+   by their `f32` spelling, and compare float columns numerically in the
+   batch harness as the Studio's lockstep comparison already does.
 7. **Target integration (M).** Cross-compilation toolchains (the Compile
    dialog's disabled option), cyclic-task wrapper templates (bare-metal loop,
    RTOS task), configurable symbol prefixes.
@@ -162,15 +185,12 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-The P0 items are done: contracts are authored in the Studio, the design →
-generate → run → simulate loop is closed with a live, incremental simulator
-on the diagram, and every trace the tool produces (sessions, test runs,
-counterexamples) is a waveform that can be replayed and reviewed cycle by
-cycle.
+The P0 items are done, and so is item 6: the compiled C now runs in
+lockstep with the simulator in the Simulation dock, so model-vs-code
+divergence shows on the cycle it happens rather than only in batch tests.
 
-Next is item **6** (C-in-the-loop stepping): step the compiled executable in
-lockstep with the IR simulator and show it on the same waveform, using the
-reference-lane overlay the Tests dock already uses to flag divergence the
-cycle it happens. That makes the "compile and run, then step" half of the
-working direction interactive rather than batch. After it, item **4**
-(clocked activation) closes the one known semantic gap with SCADE.
+Next is item **6b** (float32 fidelity): it is small, and it closes the one
+model-vs-code gap C in the loop surfaced that is still open — which matters
+directly for the project's claim that the generated C is equivalent to the
+simulated model. After it, item **4** (clocked activation) closes the known
+semantic gap with SCADE's activate-if.
