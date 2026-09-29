@@ -1,6 +1,7 @@
 # Continuous integration. `test` runs the whole suite; `prove` installs the
 # pinned Kind 2 + Z3, proves every example for real (the Kind 2 conformance
-# tests refuse to skip there), and keeps the evidence reports as artifacts.
+# and runtime-error tests refuse to skip there), runs the SMS project's own
+# verification script with this build, and keeps the evidence reports.
 
 name: ci
 
@@ -40,7 +41,10 @@ jobs:
           OPENLUSTRE_KIND2: ${{ env.OPENLUSTRE_TOOLS }}/bin/kind2
           OPENLUSTRE_Z3: ${{ env.OPENLUSTRE_TOOLS }}/bin/z3
           OPENLUSTRE_REQUIRE_KIND2: "1"
-        run: cargo test -p openlustre_integration_tests --test kind2_projection --test sms_example
+        run: cargo test -p openlustre_integration_tests --test kind2_projection --test runtime_errors --test sms_example
+
+      - name: The SMS project's own verification, with this build
+        run: OPENLUSTRE=$PWD/target/debug/openlustre examples/sms/scripts/verify.sh --quick
 
       - name: Prove the examples and build their evidence
         run: tools/prove-examples.sh ./target/debug/openlustre evidence

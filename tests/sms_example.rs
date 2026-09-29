@@ -65,6 +65,46 @@ fn every_scenario_matches_on_the_model_and_the_generated_c_with_full_mcdc() {
     assert!(text.contains("MC/DC: 151/151 conditions independent (96/96 decisions fully covered)"), "{text}");
 }
 
+/// The flight code: the C generated for SMS, compiled with the platform
+/// integration (examples/sms/integration), flies the scripted 50 s mission
+/// and logs exactly what the project recorded.
+#[test]
+fn the_generated_flight_code_flies_the_scripted_mission() {
+    if !has_cc() {
+        eprintln!("no C compiler: skipping the mission");
+        return;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let out = std::env::temp_dir().join(format!("ol_sms_mission_{stamp}"));
+    let o = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "emit-clite"])
+        .arg(sms().join("sms.wksc"))
+        .args(["--root", "SMS", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let integration = sms().join("integration");
+    let exe = out.join("sms_mission");
+    let cc = ["cc", "gcc", "clang"].into_iter().find(|c| Command::new(c).arg("--version").output().is_ok()).unwrap();
+    let o = Command::new(cc)
+        .args(["-std=c11", "-O2", "-Wall", "-Wextra", "-Wno-unused-but-set-variable", "-Wno-unused-variable", "-Werror"])
+        .arg(format!("-I{}", out.join("clite").display()))
+        .arg(format!("-I{}", integration.display()))
+        .arg(out.join("clite/openlustre_generated.c"))
+        .arg(integration.join("sms_task.c"))
+        .arg(integration.join("mission_sim.c"))
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let log = Command::new(&exe).output().unwrap();
+    let _ = std::fs::remove_dir_all(&out);
+    let expected = std::fs::read_to_string(integration.join("expected_mission.txt")).unwrap();
+    assert_eq!(String::from_utf8(log.stdout).unwrap(), expected);
+}
+
 /// The C test driver reads and prints enums by name, as the simulator's
 /// traces do — the SMS's inputs and outputs are mostly enums.
 #[test]

@@ -201,8 +201,14 @@ else                       → Clear
 5. **Traceability** — each generated C equation carries an `@trace` back to
    its diagram element; the generation report fingerprints the sources.
 6. **Evidence** — `openlustre evidence sms.wksc --root SMS --prove` gathers
-   all of the above into one document; CI (`tools/prove-examples.sh`) proves
-   the project and keeps the report.
+   all of the above into one document.
+7. **Flight code** — the C generated for `SMS`, compiled with the platform
+   integration (`integration/`) and run on a scripted 50 s mission whose log
+   is compared with the recorded one.
+
+`scripts/verify.sh` runs 1–7; CI (`.github/workflows/verify.yml`) runs it on
+every push with the OpenLustre Studio pinned in `OPENLUSTRE_VERSION`, and
+keeps the generated code and the evidence.
 
 ## 5. Implementation steps
 
@@ -216,6 +222,9 @@ else                       → Clear
 | 6 | Scenarios and golden traces; decision / MC/DC coverage | done |
 | 7 | Kind 2 proofs; model ≡ C; evidence report | done |
 | 8 | Studio walkthrough, README | done |
+| 9 | Runtime errors proved (RTE-1); the phase counter saturates | done |
+| 10 | Flight code: cyclic task, platform interface, scripted mission | done |
+| 11 | Standalone repository: pinned toolchain, install / verify scripts, CI | done |
 
 **Result.** The evidence report for `SMS` is **PASS** with no gaps: static
 checks clean across the 8 operators; 171 of 171 properties proved by Kind 2

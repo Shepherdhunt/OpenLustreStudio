@@ -7,13 +7,28 @@ hooks. It **identifies** what is loaded on each hook, keeps the vehicle
 it is safe to. [PLAN.md](PLAN.md) is the specification: requirements with
 ids, architecture, verification plan and results.
 
-![The SMS root operator in OpenLustre Studio — commands and flight state top left, the four stations below, station decoding, balance and release planning, the Inhibit decision tree and the release sequencer, outputs grouped by release, plan, balance and inventory.](../../docs/screenshots/13-sms-diagram.png)
+![The SMS root operator in OpenLustre Studio — commands and flight state top left, the four stations below, station decoding, balance and release planning, the Inhibit decision tree and the release sequencer, outputs grouped by release, plan, balance and inventory.](docs/screenshots/13-sms-diagram.png)
 
-## Open it
+## Built with OpenLustre Studio
+
+The SMS is modelled, tested, proved and turned into flight code with
+[OpenLustre Studio](https://github.com/Shepherdhunt/OpenLustreStudio) — the
+way a SCADE project is built with SCADE Suite. `OPENLUSTRE_VERSION` pins the
+version it is built with (a commit or a release tag), like a SCADE project's
+tool version; `scripts/install-openlustre.sh` builds that version into
+`.openlustre/` (needs [Rust](https://rustup.rs) and git) together with its
+prover, Kind 2 v2.2.0 and Z3.
 
 ```sh
-openlustre studio launch examples/sms
+scripts/install-openlustre.sh   # once, and after changing OPENLUSTRE_VERSION
+scripts/studio.sh               # open the SMS in the Studio (browser)
+scripts/verify.sh               # check, test, flight code, proof, evidence
 ```
+
+An `openlustre` already on `PATH` (or `$OPENLUSTRE`) works as well; then
+`openlustre studio launch .` opens the project.
+
+## The model
 
 | operator | kind | what it does |
 |----------|------|--------------|
@@ -28,9 +43,9 @@ Types (`StoreKind`, `StationStatus`, `SeqPhase`, `Inhibit`) and constants
 `types.json`. Every operator has a contract whose clause names are the
 requirement ids of the plan.
 
-![The Sequencer state machine: Safe, Ready, Firing, Jettison and Verify.](../../docs/screenshots/14-sms-sequencer.png)
+![The Sequencer state machine: Safe, Ready, Firing, Jettison and Verify.](docs/screenshots/14-sms-sequencer.png)
 
-![The Inhibit decision tree: not armed, on the ground, station fault, too low, no such store, would unbalance, else clear.](../../docs/screenshots/15-sms-inhibit.png)
+![The Inhibit decision tree: not armed, on the ground, station fault, too low, no such store, would unbalance, else clear.](docs/screenshots/15-sms-inhibit.png)
 
 ## How it keeps the vehicle balanced
 
@@ -59,16 +74,17 @@ above every bound it is compared with, and all 60 checks hold.
 
 ## Check, test, prove
 
+`scripts/verify.sh` runs all of it — and so does CI
+(`.github/workflows/verify.yml`) on every push. Step by step:
+
 ```sh
-openlustre check examples/sms/sms.wksc
-openlustre test run examples/sms/sms.wksc --scenarios examples/sms/scenarios
+openlustre check sms.wksc
+openlustre test run sms.wksc --scenarios scenarios
 #   16 passed (8 scenarios on the model and the compiled C); MC/DC 151/151
-openlustre kind2 install            # once (Linux/macOS)
-openlustre prove examples/sms/sms.wksc --timeout 600
+openlustre prove sms.wksc --timeout 600
 #   prove: 171 of 171 hold
 #   prove: runtime errors — 60 of 60 checks hold (overflow, division by zero, bounds, conversion)
-openlustre evidence examples/sms/sms.wksc --scenarios examples/sms/scenarios \
-    --prove --timeout 600 --out evidence/
+openlustre evidence sms.wksc --scenarios scenarios --prove --timeout 600 --out out/evidence
 #   evidence for `SMS`: PASS
 ```
 
@@ -82,9 +98,43 @@ openlustre evidence examples/sms/sms.wksc --scenarios examples/sms/scenarios \
 | `interlocks` | every refusal reason; disarming mid-pulse; a request during a release ignored |
 | `jettison` | emergency jettison below the release altitude; losing the arm stops it |
 
-![The Verify dock: 171 of 171 properties proved by Kind 2 v2.2.0 with Z3 — the mode coverage of SMS_contract, then the Runtime errors group: 60 of 60 checks hold in the context of SMS, each named by its call path (Balance#1, Balance#1 › Abs#1, PlanRelease#1, …) with what must hold (m1 + m2 + m3 + m4 fits int32).](../../docs/screenshots/16-sms-verify.png)
+![The Verify dock: 171 of 171 properties proved by Kind 2 v2.2.0 with Z3 — the mode coverage of SMS_contract, then the Runtime errors group: 60 of 60 checks hold in the context of SMS, each named by its call path (Balance#1, Balance#1 › Abs#1, PlanRelease#1, …) with what must hold (m1 + m2 + m3 + m4 fits int32).](docs/screenshots/16-sms-verify.png)
 
-![The Evidence Report for SMS: PASS — static checks, contract, Kind 2 proof (171 of 171, among them 60 of 60 runtime-error checks; realizable), 8 of 8 scenarios, if-decisions 58/58 and MC/DC 151/151, compiled C matches the model on 182 cycles, 104 of 104 equations traced.](../../docs/screenshots/17-sms-evidence.png)
+![The Evidence Report for SMS: PASS — static checks, contract, Kind 2 proof (171 of 171, among them 60 of 60 runtime-error checks; realizable), 8 of 8 scenarios, if-decisions 58/58 and MC/DC 151/151, compiled C matches the model on 182 cycles, 104 of 104 equations traced.](docs/screenshots/17-sms-evidence.png)
+
+## The flight code
+
+```sh
+openlustre emit-clite sms.wksc --root SMS --out out/code
+```
+
+generates the SMS as C11 (`out/code/clite/openlustre_generated.{h,c}`): one
+step function over explicit state — `SMS_init(&state)` once, then
+`SMS_step(&state, &in, &out)` every 10 ms — with no allocation, no globals
+and no library calls, every equation traced back to the diagram
+(`trace.json`, `generation_report.md`). `integration/` puts it on a vehicle:
+
+| file | what |
+|------|------|
+| `sms_platform.h` | what the flight computer provides: sample the inputs, drive the hooks, `SMS_PERIOD_MS` |
+| `sms_task.c` | the 100 Hz cyclic task: read, step, write (`--realtime` paces it on the clock) |
+| `mission_sim.c` | a desktop platform: a simulated vehicle, hooks (one of them jammed) and operator flying a 50 s mission |
+| `expected_mission.txt` | the mission's log, which `scripts/verify.sh` and CI compare against |
+
+```
+t=  2.00 s  #200   operator: release MedKit -> refused: OnGround (alt 0 m)
+t=  5.00 s  #500   operator: release MedKit -> refused: LowAltitude (alt 6 m)
+t= 15.00 s  #1500  operator: release MedKit -> accepted, plan 1---
+t= 15.01 s  #1501  hooks: FIRE 1---
+t= 15.02 s  #1502  payload: 3500 g, roll 100000 g*mm, pitch -165000 g*mm, balanced
+t= 20.09 s  #2009  station 4: Hung
+t= 25.00 s  #2500  operator: release WaterPack -> refused: WouldUnbalance (alt 30 m)
+t= 30.01 s  #3001  hooks: FIRE -234
+```
+
+On real hardware, replace `mission_sim.c` with drivers for the hook
+sensors, tag readers, altimeter and release actuators, and run `sms_task.c`'s
+loop as the RTOS task that owns the SMS.
 
 ## Files
 
@@ -94,4 +144,13 @@ openlustre evidence examples/sms/sms.wksc --scenarios examples/sms/scenarios \
 | `*.lus` | each operator's Lustre, as Build writes it (the prover's view) |
 | `scenarios/` | input vectors and recorded golden traces |
 | `PLAN.md` | the implementation plan |
+| `integration/` | the platform around the generated code, and the scripted mission |
+| `OPENLUSTRE_VERSION` | the OpenLustre Studio version the project is built with |
+| `scripts/` | install the toolchain, open the Studio, verify everything |
+| `.github/workflows/verify.yml` | CI: the same verification on every push, generated code and evidence kept |
 | `build/` | how the project was built in the Studio (`build_sms.py` replays it through the editing API from `sms_source.lus`) and how the scenarios were written (`make_scenarios.py`) |
+| `docs/screenshots/` | the pictures in this file |
+| `out/` | generated: flight code, evidence, the mission log (not committed) |
+
+This project started as `examples/sms` in the OpenLustreStudio repository,
+where a copy stays as a regression test of the tool.

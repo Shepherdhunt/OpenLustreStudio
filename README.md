@@ -209,8 +209,13 @@ operator. Its evidence report is a clean PASS: 171 of 171 properties proved
 by Kind 2 — among them 60 runtime-error checks, so no moment, sum or counter
 can overflow `int32` however long it flies — 8 scenarios passing on the model
 and the generated C with MC/DC 151/151, and every generated equation traced.
+Its generated C runs in a 100 Hz cyclic task against a scripted 50 s mission
+(`examples/sms/integration`). The SMS is set up as a project of its own — it
+pins the OpenLustre Studio version it is built with, installs and verifies
+itself, and has its own CI — so `tools/export-sms.sh <new-repo-url>` makes it
+a separate repository, history included.
 
-![The SMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](docs/screenshots/13-sms-diagram.png)
+![The SMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](examples/sms/docs/screenshots/13-sms-diagram.png)
 
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
@@ -325,7 +330,7 @@ crates/
 libraries/           the standard block library (YAML, contract-carrying)
 examples/            ReleaseLogic MVP; SMS, a complete drone stores
                      management system (plan, model, scenarios, proofs)
-tools/               prove-examples.sh (CI), Kind 2 WSL / Docker wrappers
+tools/               prove-examples.sh (CI), Kind 2 WSL / Docker wrappers, export-sms.sh
 apps/studio_ui/      GUI architecture notes (browser SPA ships in the binary)
 ```
 

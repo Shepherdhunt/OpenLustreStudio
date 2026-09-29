@@ -15,18 +15,28 @@ through the same HTTP endpoints the Studio's dialogs use:
 
     python3 build_sms.py [path/to/openlustre] [workspace-dir]
 
-Refuses to overwrite an existing workspace. The workspace files are the
+`openlustre` defaults to $OPENLUSTRE, then the project-local install
+(scripts/install-openlustre.sh), then PATH. Refuses to overwrite an existing
+workspace. The workspace files are the
 source of truth afterwards: edit them in the Studio, not here.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OL = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "../../../target/debug/openlustre")
+def find_openlustre():
+    local = os.path.join(HERE, "..", ".openlustre", "bin", "openlustre")
+    return os.environ.get("OPENLUSTRE") or (local if os.path.exists(local) else shutil.which("openlustre"))
+
+
+OL = sys.argv[1] if len(sys.argv) > 1 else find_openlustre()
+if not OL:
+    raise SystemExit("openlustre not found: run scripts/install-openlustre.sh, or pass its path")
 WS = sys.argv[2] if len(sys.argv) > 2 else os.path.join(HERE, "..")
 
 

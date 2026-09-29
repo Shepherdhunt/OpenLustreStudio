@@ -1,0 +1,51 @@
+# Build and verify the SMS on every push: the OpenLustre Studio pinned in
+# OPENLUSTRE_VERSION (built from source, cached), its Kind 2 + Z3, then
+# scripts/verify.sh — checks, the scenarios on the model and the generated C,
+# the flight code and its scripted mission, and the evidence report with the
+# Kind 2 proof. The generated code and the evidence are kept as artifacts.
+#
+# If OpenLustreStudio is a private repository, add a repository secret
+# OPENLUSTRE_TOKEN (a token that can read it) so the build can fetch it.
+
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      OPENLUSTRE_TOKEN: ${{ secrets.OPENLUSTRE_TOKEN }}
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache OpenLustre Studio and Kind 2
+        uses: actions/cache@v4
+        with:
+          path: .openlustre
+          key: openlustre-${{ runner.os }}-${{ hashFiles('OPENLUSTRE_VERSION') }}
+
+      - name: Access OpenLustreStudio (private repository)
+        if: env.OPENLUSTRE_TOKEN != ''
+        run: git config --global url."https://x-access-token:${OPENLUSTRE_TOKEN}@github.com/".insteadOf "https://github.com/"
+
+      - name: Install OpenLustre Studio and Kind 2
+        run: scripts/install-openlustre.sh
+
+      - name: Verify the SMS
+        run: scripts/verify.sh
+
+      - name: Keep the flight code and the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sms-${{ github.sha }}
+          path: |
+            out/code/
+            out/evidence/
+            out/mission.txt
