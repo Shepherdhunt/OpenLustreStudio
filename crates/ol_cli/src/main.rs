@@ -1305,7 +1305,7 @@ fn cmd_studio_launch(
 /// it (the installers put it there), or the source checkout's when run from
 /// `target/<profile>/`.
 fn sample_dirs() -> Vec<PathBuf> {
-    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) else {
+    let Some(dir) = prover::exe_dir() else {
         return Vec::new();
     };
     [dir.join("examples"), dir.join("../../examples")].into_iter().filter(|d| d.is_dir()).collect()

@@ -6,19 +6,47 @@
  * On the flight computer this loop is the RTOS task (or the timer
  * interrupt) that owns the PMS; the platform functions are its drivers.
  */
+#if !defined(_WIN32) && !defined(__APPLE__)
 #define _POSIX_C_SOURCE 200809L
+#endif
+#include <stdint.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <time.h>
+#endif
 
 #include "pms_platform.h"
 
-static void wait_next_period(struct timespec* next) {
-    next->tv_nsec += (long)PMS_PERIOD_MS * 1000000L;
-    while (next->tv_nsec >= 1000000000L) {
-        next->tv_nsec -= 1000000000L;
-        next->tv_sec += 1;
+/* The period clock: milliseconds from a monotonic clock. The task sleeps
+   until the next period's start (not for a fixed time), so it never
+   drifts. On the flight computer, the RTOS's periodic timer replaces this. */
+static uint64_t now_ms(void) {
+#ifdef _WIN32
+    return (uint64_t)GetTickCount64();
+#else
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000u + (uint64_t)t.tv_nsec / 1000000u;
+#endif
+}
+
+static void sleep_ms(uint64_t ms) {
+#ifdef _WIN32
+    Sleep((DWORD)ms);
+#else
+    struct timespec d = { (time_t)(ms / 1000u), (long)(ms % 1000u) * 1000000L };
+    nanosleep(&d, NULL);
+#endif
+}
+
+static void wait_next_period(uint64_t* next) {
+    *next += PMS_PERIOD_MS;
+    uint64_t now = now_ms();
+    if (*next > now) {
+        sleep_ms(*next - now);
     }
-    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, next, NULL);
 }
 
 int main(int argc, char** argv) {
@@ -26,8 +54,7 @@ int main(int argc, char** argv) {
     PMS_State state;
     PMS_Input in;
     PMS_Output out;
-    struct timespec next;
-    clock_gettime(CLOCK_MONOTONIC, &next);
+    uint64_t next = now_ms();
 
     PMS_init(&state);
     for (uint32_t cycle = 0;; cycle++) {

@@ -167,6 +167,16 @@ impl Toolchain {
     }
 }
 
+/// The folder the running program really lives in. On macOS the path of
+/// the running program is the one it was started by — a symlink such as
+/// /usr/local/bin/openlustre — so resolve it to the installed file, next to
+/// which the bundled tools and samples are.
+pub fn exe_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+    exe.parent().map(Path::to_path_buf)
+}
+
 /// Where `install` puts the tools: `OPENLUSTRE_TOOLS`, else
 /// `~/.openlustre/tools` (`%LOCALAPPDATA%\OpenLustre\tools` on Windows).
 pub fn tools_dir() -> PathBuf {
@@ -202,7 +212,7 @@ fn find(stem: &str, env: &str) -> Option<Located> {
     if let Some(l) = in_dir(&tools.join("bin"), "tools directory").or_else(|| in_dir(&tools, "tools directory")) {
         return Some(l);
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = exe_dir() {
         if let Some(l) = in_dir(&dir.join("tools").join("bin"), "bundled")
             .or_else(|| in_dir(&dir.join("tools"), "bundled"))
             .or_else(|| in_dir(&dir, "bundled"))
