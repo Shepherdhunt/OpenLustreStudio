@@ -595,13 +595,20 @@ impl CompiledModel {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("spawning compiled model: {e}"))?;
-        child
-            .stdin
-            .as_mut()
-            .ok_or("no stdin")?
-            .write_all(input_csv.as_bytes())
-            .map_err(|e| e.to_string())?;
+        // Feed the inputs from another thread while the outputs are read:
+        // writing them all first deadlocks once the program's output fills
+        // the pipe (a scenario of a few thousand cycles).
+        let mut stdin = child.stdin.take().ok_or("no stdin")?;
+        let input = input_csv.to_string();
+        let feeder = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
         let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        match feeder.join() {
+            Ok(Ok(())) => {}
+            // The program stopped reading (it failed): its exit status says why.
+            Ok(Err(e)) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+            Ok(Err(e)) => return Err(format!("feeding the compiled model: {e}")),
+            Err(_) => return Err("feeding the compiled model: the writer panicked".into()),
+        }
         if !out.status.success() {
             return Err(format!(
                 "compiled model exited with {:?}: {}",

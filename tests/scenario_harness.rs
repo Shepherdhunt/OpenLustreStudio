@@ -95,6 +95,45 @@ fn record_then_run_passes_on_both_backends() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// A scenario long enough that the compiled C's output overflows a pipe
+/// buffer. The runner used to write every input before reading any output,
+/// and both sides blocked forever (found by a 50 000-cycle stress run).
+#[test]
+fn a_long_scenario_runs_on_the_compiled_c() {
+    let tmp = make_tempdir("scen_long");
+    let model = setup_project(&tmp);
+    let scen = tmp.join("scenarios");
+    let mut csv = String::from("master_arm,station_selected,consent,fault_present,release_request\n");
+    for i in 0..20_000u32 {
+        let b = |k: u32| if (i / k) % 2 == 0 { "true" } else { "false" };
+        csv.push_str(&format!("{},{},{},{},{}\n", b(7), b(3), b(5), b(11), b(2)));
+    }
+    std::fs::write(scen.join("nominal.csv"), csv).unwrap();
+    let (ok, out) = openlustre(&["test", "record", model.to_str().unwrap(), "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record failed: {out}");
+    // Run with a deadline: the bug showed as a hang, not a failure.
+    let mut child = Command::new(env!("CARGO"))
+        .args(["run", "-q", "-p", "ol_cli", "--", "test", "run", model.to_str().unwrap(), "--scenarios"])
+        .arg(&scen)
+        .args(["--backend", "c"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(300);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("`test run --backend c` hung on a 20 000-cycle scenario");
+        }
+        sleep(Duration::from_millis(200));
+    }
+    let out = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && text.contains("[PASS] nominal (c )"), "{text}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn behavioral_model_change_is_caught_with_cycle_level_diffs() {
     let tmp = make_tempdir("scen_regress");

@@ -140,6 +140,13 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
     let mut i = 0;
     let mut out = Vec::new();
     while i < bytes.len() {
+        // Lustre is ASCII outside string and character literals (which read
+        // their payload bytes themselves): anything else is an unexpected
+        // character, reported whole, never a token cut mid-character.
+        if !bytes[i].is_ascii() {
+            let ch = src[i..].chars().next().unwrap_or(char::REPLACEMENT_CHARACTER);
+            return Err(ParseError::BadChar(ch, i));
+        }
         let c = bytes[i] as char;
         if c.is_whitespace() {
             i += 1;
@@ -252,7 +259,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
                 if bytes.get(i) == Some(&b'_') {
                     let s = i + 1;
                     let mut j = s;
-                    while j < bytes.len() && (bytes[j] as char).is_alphanumeric() {
+                    while j < bytes.len() && bytes[j].is_ascii_alphanumeric() {
                         j += 1;
                     }
                     if let Some(ty) = numeric_suffix_type(&src[s..j]) {
@@ -280,7 +287,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, ParseError> {
             _ if c.is_alphabetic() || c == '_' => {
                 let start = i;
                 while i < bytes.len()
-                    && ((bytes[i] as char).is_alphanumeric() || bytes[i] == b'_')
+                    && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
                 {
                     i += 1;
                 }
@@ -884,6 +891,17 @@ mod tests {
 
     fn p(s: &str) -> Expr {
         parse_expr(s).unwrap_or_else(|e| panic!("parse `{s}` failed: {e}"))
+    }
+
+    /// Found by fuzzing Import Lustre: a non-ASCII character used to start
+    /// an identifier and end it mid-character (a panic in the Studio).
+    #[test]
+    fn non_ascii_outside_literals_is_an_error_not_a_panic() {
+        for src in ["x th\u{e9}en 0", "\u{e9}", "a + \u{1F680}", "1_\u{e9}", "a\u{a0}b", "caf\u{e9} = 1"] {
+            assert!(matches!(parse_expr(src), Err(ParseError::BadChar(..))), "{src:?}");
+        }
+        // Inside a string literal the bytes are the payload.
+        assert!(parse_expr("\"caf\u{e9}\"").is_ok());
     }
 
     #[test]

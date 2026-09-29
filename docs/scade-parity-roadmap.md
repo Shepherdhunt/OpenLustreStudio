@@ -35,7 +35,7 @@ no GUI at all.
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
 | Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review; the compiled C stepped in lockstep ("C in the loop")** (was replay-from-zero) |
 | IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator; live, cycle by cycle, in the Simulation dock** |
-| Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples | ⚠️ default mode only; **counterexample as a waveform, replayable in the simulator** (was an ASCII block); **Kind 2 not bundled or in CI** |
+| Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples; runtime errors over machine integers | ✅ Prove / Realizability / Mode coverage, runtime-error group; counterexample as a waveform, replayable in the simulator; Kind 2 + Z3 installable from the Studio, bundled in Linux/macOS release archives, run in CI |
 | Evidence report | ✅ `openlustre evidence` (HTML + JSON, fails on FAIL) | ✅ Project ▸ Evidence Report (verdict, sections, full page, downloads) |
 | Imported C operators | ✅ manifests, wrappers, validation | ❌ no way to register or place one |
 
