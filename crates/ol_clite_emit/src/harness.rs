@@ -111,6 +111,7 @@ fn emit_driver(node: &NodeDef, monitor_contract_name: Option<&str>, enums: &Enum
     let _ = writeln!(s, "#include <stdio.h>");
     let _ = writeln!(s, "#include <stdlib.h>");
     let _ = writeln!(s, "#include <string.h>");
+    s.push_str(BINARY_STDOUT_INCLUDES);
     s.push('\n');
     if node.outputs.iter().any(|p| is_real(&p.ty)) {
         s.push_str(PRINT_REAL);
@@ -118,6 +119,7 @@ fn emit_driver(node: &NodeDef, monitor_contract_name: Option<&str>, enums: &Enum
     }
     emit_enum_helpers(&mut s, node, enums);
     let _ = writeln!(s, "int main(void) {{");
+    s.push_str(BINARY_STDOUT);
     if node.kind != NodeKind::Function {
         let _ = writeln!(s, "  {prefix}_State state;");
         let _ = writeln!(s, "  {prefix}_init(&state);");
@@ -310,8 +312,10 @@ pub fn emit_debug_driver(
     let _ = writeln!(s, "#include <string.h>");
     // `_step` reads this flag (under OL_DEBUG) to decide when to print probes.
     let _ = writeln!(s, "int ol_dbg_print = 0;");
+    s.push_str(BINARY_STDOUT_INCLUDES);
     s.push('\n');
     let _ = writeln!(s, "int main(void) {{");
+    s.push_str(BINARY_STDOUT);
     let _ = writeln!(
         s,
         "  printf(\"=== OpenLustre debug run: {prefix} (held inputs, every {STRIDE} steps) ===\\n\");"
@@ -417,3 +421,9 @@ fn print_stmt(ty: &Type, expr: &str, enums: &EnumNames) -> String {
         _ => format!("printf(\"%lld\", (long long){expr});"),
     }
 }
+
+/// A driver's output is the same bytes on every OS: on Windows, stdout in
+/// text mode would turn each `\\n` into `\\r\\n` (found running the trace
+/// tests on Windows).
+const BINARY_STDOUT_INCLUDES: &str = "#ifdef _WIN32\n#include <fcntl.h>\n#include <io.h>\n#endif\n";
+const BINARY_STDOUT: &str = "#ifdef _WIN32\n  _setmode(_fileno(stdout), _O_BINARY);\n#endif\n";

@@ -689,9 +689,11 @@ pub fn cc_available() -> bool {
 }
 
 /// The flags the generated C is compiled with for the C backend (warnings
-/// are errors: the generated code must compile cleanly).
-pub const C_FLAGS: [&str; 6] = [
+/// are errors: the generated code must compile cleanly; no fused
+/// multiply-add, so reals round exactly as the model's do).
+pub const C_FLAGS: [&str; 7] = [
     "-std=c11",
+    "-ffp-contract=off",
     "-Wall",
     "-Wextra",
     "-Wno-unused-but-set-variable",
@@ -769,7 +771,7 @@ pub(crate) fn compile_in_dir_defs(
         CompilerKind::Posix(name) => {
             let exe = dir.join(exe_name);
             let mut cmd = Command::new(name);
-            cmd.current_dir(dir).args(["-std=c11", "-Wall", "-O2", "-o"]).arg(&exe);
+            cmd.current_dir(dir).args(["-std=c11", "-Wall", "-O2", "-ffp-contract=off", "-o"]).arg(&exe);
             for d in defines {
                 cmd.arg(format!("-D{d}"));
             }

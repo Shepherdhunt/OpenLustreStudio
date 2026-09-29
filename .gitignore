@@ -2,3 +2,9 @@
 **/*.rs.bk
 tests/__trace_tmp_*
 packaging/windows/dist/
+
+# Downloads built by packaging/*/build.sh
+/dist/
+# Object files from compiling generated C
+*.o
+*.obj
