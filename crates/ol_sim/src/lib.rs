@@ -314,17 +314,7 @@ impl<'a> Sim<'a> {
                 Some(&self.clock_info.site_clocks),
                 &mut self.coverage,
             )?;
-            if eq.lhs.len() == 1 {
-                env.insert(eq.lhs[0].clone(), value);
-            } else if let Value::Tuple(items) = value {
-                for (n, v) in eq.lhs.iter().zip(items.into_iter()) {
-                    env.insert(n.clone(), v);
-                }
-            } else {
-                return Err(SimError::EvalError(format!(
-                    "multi-output equation produced a non-tuple value: {value:?}"
-                )));
-            }
+            bind_lhs(&mut env, eq, value, self.node)?;
         }
 
         // Count this cycle for every chain that was active, so clocked
@@ -453,7 +443,7 @@ impl<'a> Sim<'a> {
             .iter()
             .find(|p| p.name == name)
             .ok_or_else(|| SimError::EvalError(format!("`{name}` is not an input of `{}`", self.node.name)))?;
-        parse_value(raw.trim(), &p.ty).map_err(|_| SimError::ParseError {
+        parse_value(raw.trim(), &p.ty, self.project).map_err(|_| SimError::ParseError {
             value: raw.into(),
             col: p.name.clone(),
             ty: p.ty.clone(),
@@ -567,7 +557,7 @@ fn enum_variant_value(name: &str, project: &Project) -> Option<Value> {
     None
 }
 
-fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
+fn parse_value(raw: &str, ty: &Type, project: &Project) -> Result<Value, ()> {
     match ty {
         Type::Bool => match raw.to_ascii_lowercase().as_str() {
             "true" | "1" | "t" => Ok(Value::Bool(true)),
@@ -595,9 +585,19 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
             }
             let mut vals = Vec::with_capacity(parts.len());
             for p in parts {
-                vals.push(parse_value(p.trim(), elem)?);
+                vals.push(parse_value(p.trim(), elem, project)?);
             }
             Ok(Value::Array(vals))
+        }
+        // An enum input is written by variant name; an alias parses as its
+        // target type.
+        Type::Named { name } => {
+            let def = project.packages.iter().flat_map(|p| &p.types).find(|t| t.name() == name).ok_or(())?;
+            match &def.body {
+                TypeBody::Enum(e) if e.variants.iter().any(|v| v == raw) => Ok(Value::Enum(raw.to_string())),
+                TypeBody::Alias { target, .. } => parse_value(raw, target, project),
+                _ => Err(()),
+            }
         }
         _ => Err(()),
     }
@@ -619,7 +619,10 @@ pub struct Observed {
 
 /// `a|b|c`, or `<none>` — the trace's rendering of a mode / violation list
 /// (commas become `;` so the CSV stays well-formed).
-fn label_list(items: &[String]) -> String {
+/// Mode names or violated clause labels as one CSV cell — the form the
+/// `active_mode` / `violations` columns take in both the simulator's trace
+/// and the generated C driver's.
+pub fn label_list(items: &[String]) -> String {
     if items.is_empty() {
         "<none>".to_string()
     } else {
@@ -652,6 +655,29 @@ fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
         }
     };
     Ok(out)
+}
+
+/// A value as a variable of type `ty` holds it once assigned. Integer
+/// arithmetic is carried in `i64`; storing into a sized integer wraps it to
+/// that width exactly as the generated C's typed field does (`uint8`
+/// 200 + 100 stores 44, not 300) — found by stepping the compiled C in
+/// lockstep with this simulator.
+fn fit_to(ty: &Type, v: Value) -> Value {
+    match (ty, v) {
+        (t, Value::Int(i)) if t.is_integer() => Value::Int(narrow_int(t, i)),
+        (Type::Array { elem, .. }, Value::Array(xs)) => Value::Array(xs.into_iter().map(|x| fit_to(elem, x)).collect()),
+        (_, v) => v,
+    }
+}
+
+/// The declared type of an output or local of `node`.
+fn declared_type<'n>(node: &'n NodeDef, name: &str) -> Option<&'n Type> {
+    node.outputs
+        .iter()
+        .map(|p| (&p.name, &p.ty))
+        .chain(node.locals.iter().map(|l| (&l.name, &l.ty)))
+        .find(|(n, _)| n.as_str() == name)
+        .map(|(_, t)| t)
 }
 
 fn narrow_int(t: &Type, i: i64) -> i64 {
@@ -1063,7 +1089,7 @@ fn call_function_values(
     for &i in &order {
         let eq = &callee.equations[i];
         let v = eval_eq_rhs(&eq.rhs, &callee_env, &mut throwaway, &mut sub_calls, project, None, cov)?;
-        bind_lhs(&mut callee_env, eq, v)?;
+        bind_lhs(&mut callee_env, eq, v, callee)?;
     }
     extract_output(callee, &mut callee_env)
 }
@@ -1179,7 +1205,7 @@ fn step_instance(
                     Some(&callee_clocks.site_clocks),
                     cov,
                 )?;
-                bind_lhs(&mut callee_env, eq, v)?;
+                bind_lhs(&mut callee_env, eq, v, callee)?;
             }
             extract_output(callee, &mut callee_env)
         }
@@ -1210,7 +1236,7 @@ fn step_instance(
                     Some(&callee_clocks.site_clocks),
                     cov,
                 )?;
-                bind_lhs(&mut callee_env, eq, v)?;
+                bind_lhs(&mut callee_env, eq, v, callee)?;
             }
             for ck in &callee_clocks.chains {
                 if clock_active(ck, &callee_env)? {
@@ -1228,17 +1254,28 @@ fn step_instance(
     }
 }
 
+/// Store an equation's value into its left-hand side variable(s) of `node`,
+/// each converted to the variable's declared type the way C converts on
+/// assignment (see [`fit_to`]).
 fn bind_lhs(
     env: &mut BTreeMap<String, Value>,
     eq: &ol_ir::Equation,
     value: Value,
+    node: &NodeDef,
 ) -> Result<(), SimError> {
+    let store = |env: &mut BTreeMap<String, Value>, n: &String, v: Value| {
+        let v = match declared_type(node, n) {
+            Some(t) => fit_to(t, v),
+            None => v,
+        };
+        env.insert(n.clone(), v);
+    };
     if eq.lhs.len() == 1 {
-        env.insert(eq.lhs[0].clone(), value);
+        store(env, &eq.lhs[0], value);
         Ok(())
     } else if let Value::Tuple(items) = value {
         for (n, v) in eq.lhs.iter().zip(items.into_iter()) {
-            env.insert(n.clone(), v);
+            store(env, n, v);
         }
         Ok(())
     } else {

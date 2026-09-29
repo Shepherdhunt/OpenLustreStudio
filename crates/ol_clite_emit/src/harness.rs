@@ -58,6 +58,9 @@ pub fn emit_csv_driver_with_monitor(
         header_parts.push("violations".into());
     }
     let _ = writeln!(s, "  printf(\"{}\\n\");", header_parts.join(","));
+    // Flushed per line so a caller can drive the program one cycle at a
+    // time over pipes (the Studio's C-in-the-loop stepping).
+    let _ = writeln!(s, "  fflush(stdout);");
 
     let _ = writeln!(s, "  int cycle = 0;");
     let _ = writeln!(s, "  while (fgets(line, sizeof(line), stdin)) {{");
@@ -108,6 +111,7 @@ pub fn emit_csv_driver_with_monitor(
         let _ = writeln!(s, "    printf(\",%s,%s\", mode_buf, viol_buf);");
     }
     let _ = writeln!(s, "    printf(\"\\n\");");
+    let _ = writeln!(s, "    fflush(stdout);");
     let _ = writeln!(s, "    cycle++;");
     let _ = writeln!(s, "  }}");
     let _ = writeln!(s, "  return 0;");

@@ -574,7 +574,7 @@ fn parse_csv(text: &str) -> Csv {
 
 // --- C backend: compile once, run per scenario ---
 
-struct CompiledModel {
+pub(crate) struct CompiledModel {
     /// Owns the temp dir so it lives as long as the binary.
     #[allow(dead_code)]
     dir: TempDir,
@@ -582,6 +582,11 @@ struct CompiledModel {
 }
 
 impl CompiledModel {
+    /// The compiled CSV-driver executable.
+    pub(crate) fn exe(&self) -> &Path {
+        &self.exe
+    }
+
     fn run(&self, input_csv: &str) -> Result<String, String> {
         use std::io::Write as _;
         let mut child = Command::new(&self.exe)
@@ -779,7 +784,7 @@ pub(crate) fn compile_in_dir_defs(
     Ok(format!("[{desc}] compiled {exe_name}\n{log}"))
 }
 
-fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledModel, String> {
+pub(crate) fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result<CompiledModel, String> {
     // Selected-root generation: compile only the node under test and what it
     // transitively uses, exactly as the production emit path does.
     let project = &project.slice_for_root(node_name)?;

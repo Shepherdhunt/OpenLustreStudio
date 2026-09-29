@@ -131,6 +131,76 @@ fn cast_traces_match_between_ir_and_compiled_c() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+// --- Implicit narrowing: a sized integer wraps when it is stored -------------
+//
+// Found by stepping the compiled C in lockstep with the simulator: storing
+// `a + 100` into a uint8 wraps in C (200 + 100 → 44), but the simulator used
+// to keep 300. Arithmetic is still carried wide (C's integer promotion), so a
+// comparison inside an expression sees the unwrapped value, as in C.
+
+fn wrap_model() -> serde_json::Value {
+    let e = |s: &str| serde_json::to_value(ol_stdlib::parse_expr(s).unwrap()).unwrap();
+    serde_json::json!({
+        "name": "wraps",
+        "packages": [{
+            "name": "user",
+            "nodes": [{
+                "name": "Wrap",
+                "kind": "Operator",
+                "inputs": [{"name": "a", "ty": {"kind": "Uint8"}}, {"name": "b", "ty": {"kind": "Int8"}}],
+                "outputs": [
+                    {"name": "s", "ty": {"kind": "Uint8"}},
+                    {"name": "d", "ty": {"kind": "Int8"}},
+                    {"name": "n", "ty": {"kind": "Uint8"}},
+                    {"name": "big", "ty": {"kind": "Bool"}}
+                ],
+                "equations": [
+                    {"lhs": ["s"], "rhs": e("a + 100")},
+                    {"lhs": ["d"], "rhs": e("b * 2")},
+                    {"lhs": ["n"], "rhs": e("(0 -> pre n) + 100")},
+                    {"lhs": ["big"], "rhs": e("a + 100 > 255")}
+                ]
+            }]
+        }],
+        "main": "Wrap"
+    })
+}
+
+#[test]
+fn sized_integers_wrap_on_assignment_in_the_simulator_and_in_c() {
+    let tmp = make_tempdir("wrap");
+    let model = tmp.join("model.json");
+    std::fs::write(&model, serde_json::to_string_pretty(&wrap_model()).unwrap()).unwrap();
+    let project = ol_ir::load_project(&model).unwrap();
+    let mut sim = ol_sim::Sim::new(&project, "Wrap").unwrap();
+    let csv = sim.run_csv("a,b\n200,100\n10,-100\n255,1\n").unwrap().to_csv();
+    let lines: Vec<&str> = csv.trim().lines().collect();
+    assert_eq!(lines[0], "cycle,s,d,n,big");
+    // 300 → 44 (uint8), 200 → -56 (int8), the accumulator wraps through its
+    // `pre`, and the comparison is made before the store (C promotion).
+    assert_eq!(lines[1], "0,44,-56,100,true");
+    assert_eq!(lines[2], "1,110,56,200,false");
+    assert_eq!(lines[3], "2,99,2,44,true");
+
+    let scen = tmp.join("scenarios");
+    std::fs::create_dir_all(&scen).unwrap();
+    std::fs::write(scen.join("overflow.csv"), "a,b\n200,100\n10,-100\n255,1\n0,127\n").unwrap();
+    let run = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(env!("CARGO"))
+            .args(["run", "-q", "-p", "ol_cli", "--"])
+            .args(args)
+            .output()
+            .unwrap();
+        (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+    };
+    let (ok, out) = run(&["test", "record", model.to_str().unwrap(), "--scenarios", scen.to_str().unwrap()]);
+    assert!(ok, "record: {out}");
+    let (ok, out) = run(&["test", "run", model.to_str().unwrap(), "--scenarios", scen.to_str().unwrap(), "--backend", "both"]);
+    assert!(ok, "run: {out}");
+    assert!(out.contains("[PASS] overflow (c )"), "the C wraps the same way: {out}");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 // --- Cast: typecheck rejects non-numeric operands ----------------------------
 
 #[test]

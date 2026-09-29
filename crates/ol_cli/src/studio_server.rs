@@ -50,6 +50,9 @@ pub struct ServerCtx {
     pub history: std::sync::Mutex<History>,
     /// The live simulation session (Simulation dock), if one is running.
     pub sim: std::sync::Mutex<Option<sim_session::SimSession>>,
+    /// The last root compiled for C-in-the-loop, keyed by the model's
+    /// semantic signature — so Reset / re-attach doesn't recompile.
+    pub c_cache: std::sync::Mutex<Option<(u64, String, std::sync::Arc<crate::scenario::CompiledModel>)>>,
 }
 
 impl ServerCtx {
@@ -78,6 +81,7 @@ impl ServerCtx {
         h.redo.clear();
         // A simulation of the previous document is meaningless now.
         *self.sim.lock().unwrap() = None;
+        *self.c_cache.lock().unwrap() = None;
     }
 }
 
@@ -270,6 +274,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             *ctx.sim.lock().unwrap() = None;
             (200, "application/json", b"{\"stopped\":true}".to_vec())
         }
+        ("POST", "/api/sim/c") => sim_c_response(ctx, body),
         ("GET", "/api/sim/state") => (200, "application/json", sim_state(ctx).to_string().into_bytes()),
         ("POST", "/api/simulate") => {
             let csv = std::str::from_utf8(body).unwrap_or("");
@@ -887,8 +892,15 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
             None => None,
             Some(text) => Some(parse_breakpoint(&project, session, text)?),
         };
-        let stop_on_violation = req.get("stop_on_violation").and_then(|v| v.as_bool()).unwrap_or(false);
-        session.run(sim_session::RunReq { inputs, sequence, count, brk, stop_on_violation })
+        let flag = |k: &str| req.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        session.run(sim_session::RunReq {
+            inputs,
+            sequence,
+            count,
+            brk,
+            stop_on_violation: flag("stop_on_violation"),
+            stop_on_divergence: flag("stop_on_divergence"),
+        })
     })())
 }
 
@@ -922,6 +934,68 @@ fn parse_breakpoint(
     Ok(expr)
 }
 
+/// POST /api/sim/c `{on}` — put the generated C of the simulated root in
+/// the loop (compiled, or reused from the last compile of the same model),
+/// or take it out. Attaching replays the session so far through the C and
+/// answers `{attached, columns, rows: [{cycle, c, c_diff}], diverged_at}`;
+/// from then on every step's rows carry the C's values and the differing
+/// columns.
+fn sim_c_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let req: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::json!({}));
+    let on = req.get("on").and_then(|v| v.as_bool()).unwrap_or(true);
+    let (root, signature) = {
+        let mut guard = ctx.sim.lock().unwrap();
+        let Some(session) = guard.as_mut() else {
+            return (409, "application/json", json_error("no simulation is running — start one").into_bytes());
+        };
+        if !on {
+            session.detach_c();
+            return (200, "application/json", serde_json::json!({ "attached": false }).to_string().into_bytes());
+        }
+        (session.root.clone(), session.signature)
+    };
+    let project = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (400, "application/json", json_error(&e).into_bytes()),
+    };
+    if semantic_signature(&project) != signature {
+        *ctx.sim.lock().unwrap() = None;
+        let v = serde_json::json!({ "stale": true, "error": "the model changed since the simulation started — start it again" });
+        return (409, "application/json", v.to_string().into_bytes());
+    }
+    json_response((|| {
+        if !crate::scenario::cc_available() {
+            return Err("no C compiler found (cc / gcc / clang on PATH, or MSVC) — the C can't be put in the loop".into());
+        }
+        // Compile outside the session lock; reuse the last build of this model.
+        let cached = ctx.c_cache.lock().unwrap().as_ref()
+            .filter(|(sig, r, _)| *sig == signature && *r == root)
+            .map(|(_, _, exe)| exe.clone());
+        let (exe, reused) = match cached {
+            Some(exe) => (exe, true),
+            None => {
+                let exe = std::sync::Arc::new(crate::scenario::compile_model(&project, &root)?);
+                *ctx.c_cache.lock().unwrap() = Some((signature, root.clone(), exe.clone()));
+                (exe, false)
+            }
+        };
+        let mut guard = ctx.sim.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .filter(|s| s.signature == signature && s.root == root)
+            .ok_or("the simulation was restarted while the C was compiling — try again")?;
+        let out = session.attach_c(exe)?;
+        Ok(serde_json::json!({
+            "attached": true,
+            "reused_build": reused,
+            "cycle": session.cycle,
+            "columns": out.columns,
+            "rows": out.rows,
+            "diverged_at": out.diverged_at,
+        }))
+    })())
+}
+
 /// GET /api/sim/state — the running session, if any.
 fn sim_state(ctx: &ServerCtx) -> serde_json::Value {
     match ctx.sim.lock().unwrap().as_ref() {
@@ -931,6 +1005,7 @@ fn sim_state(ctx: &ServerCtx) -> serde_json::Value {
             "cycle": s.cycle,
             "signals": s.signals,
             "monitored": s.monitored,
+            "c_columns": s.c_columns,
         }),
         None => serde_json::json!({ "active": false }),
     }

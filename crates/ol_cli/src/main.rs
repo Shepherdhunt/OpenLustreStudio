@@ -935,6 +935,7 @@ fn serve_studio(
         use_embedded,
         history: Default::default(),
         sim: Default::default(),
+        c_cache: Default::default(),
     };
     studio_server::serve(listener, ctx)?;
     Ok(())

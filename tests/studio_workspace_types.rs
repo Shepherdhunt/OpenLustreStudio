@@ -802,6 +802,84 @@ fn simulation_session_steps_runs_breaks_and_goes_stale() {
     assert_eq!(s, 409, "no session after stop");
 }
 
+/// C in the loop: the compiled root stepped in lockstep with the simulator.
+/// Attaching replays the session so far; every later row carries the C's
+/// values (enums by name, floats compared within `%g` precision) and the
+/// columns that differ; the build is reused on Reset; detaching stops it.
+#[test]
+fn c_in_the_loop_attaches_replays_and_steps_in_lockstep() {
+    let has_cc = ["cc", "gcc", "clang"].iter().any(|c| {
+        std::process::Command::new(c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    });
+    if !has_cc {
+        eprintln!("skipping: no C compiler");
+        return;
+    }
+    let g = start_server_on_workspace("ws_cil");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_type", r#"{"kind":"enum","name":"Gear","variants":["Park","Drive","Rev"]}"#);
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Box","kind":"operator"}"#);
+    for p in [
+        r#"{"node":"Box","side":"input","name":"g","type":"Gear"}"#,
+        r#"{"node":"Box","side":"input","name":"x","type":"float64"}"#,
+        r#"{"node":"Box","side":"output","name":"out_g","type":"Gear"}"#,
+        r#"{"node":"Box","side":"output","name":"y","type":"float64"}"#,
+        r#"{"node":"Box","side":"output","name":"n","type":"uint8"}"#,
+    ] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Box","lhs":"out_g","body":"g"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Box","lhs":"y","body":"x * 3.0"}"#);
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Box","lhs":"n","body":"(0 -> pre n) + 100"}"#);
+
+    // Not without a session.
+    let (s, _) = request(port, "POST", "/api/sim/c", r#"{"on":true}"#).expect("c");
+    assert_eq!(s, 409);
+
+    let (s, b) = request(port, "POST", "/api/sim/start", r#"{"node":"Box"}"#).expect("start");
+    assert_eq!(s, 200, "{b}");
+    let step = |body: &str| -> serde_json::Value {
+        let (s, b) = request(port, "POST", "/api/sim/step", body).expect("step");
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+    // Two cycles before the C joins: they are replayed on attach.
+    step(r#"{"inputs":{"g":"Drive","x":"0.1"},"count":2}"#);
+    let (s, b) = request(port, "POST", "/api/sim/c", r#"{"on":true}"#).expect("attach");
+    assert_eq!(s, 200, "{b}");
+    let a: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(a["attached"], true);
+    assert_eq!(a["columns"], serde_json::json!(["out_g", "y", "n"]));
+    assert_eq!(a["rows"].as_array().unwrap().len(), 2, "history replayed: {a}");
+    assert_eq!(a["diverged_at"], serde_json::Value::Null, "{a}");
+    // The enum comes back by name; 0.30000000000000004 (IR) and 0.3 (C %g)
+    // agree; the uint8 accumulator wraps identically (200 + 100 → 44).
+    assert_eq!(a["rows"][1]["c"], serde_json::json!(["Drive", "0.3", "200"]), "{a}");
+    let r = step(r#"{"inputs":{"g":"Rev","x":"0.1"},"count":3,"stop_on_divergence":true}"#);
+    assert_eq!(r["stopped"], "count", "{r}");
+    // Cycle 2: 200 + 100 wraps to 44 in both.
+    let first = &r["rows"][0];
+    assert_eq!(first["c"], serde_json::json!(["Rev", "0.3", "44"]), "{r}");
+    assert_eq!(first["values"][4], "44", "the simulator wraps too: {r}");
+    for row in r["rows"].as_array().unwrap() {
+        assert_eq!(row["c_diff"], serde_json::json!([]), "{r}");
+    }
+    assert_eq!(get_json(port, "/api/sim/state")["c_columns"], serde_json::json!(["out_g", "y", "n"]));
+
+    // Reset re-attaches from the same build.
+    let (s, _) = request(port, "POST", "/api/sim/start", r#"{"node":"Box"}"#).expect("restart");
+    assert_eq!(s, 200);
+    let (_, b) = request(port, "POST", "/api/sim/c", r#"{"on":true}"#).expect("re-attach");
+    let a: serde_json::Value = serde_json::from_str(&b).unwrap();
+    assert_eq!(a["reused_build"], true, "{a}");
+    assert!(a["rows"].as_array().unwrap().is_empty());
+    // Detach: rows stop carrying C values.
+    post_ok(port, "/api/sim/c", r#"{"on":false}"#);
+    let r = step(r#"{"inputs":{"g":"Park","x":"1"}}"#);
+    assert!(r["rows"][0].get("c").is_none(), "{r}");
+    assert_eq!(get_json(port, "/api/sim/state")["c_columns"], serde_json::Value::Null);
+}
+
 /// Contracts through the Studio: dry-run check, create (attached to its
 /// operator, interface copied from it), CoCoSpec emission, error vs. warning
 /// handling, and the attached contract staying in step with port renames and
