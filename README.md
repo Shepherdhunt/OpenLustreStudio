@@ -142,6 +142,21 @@ range) next to the sources.
 
 ![Model-to-code traceability in OpenLustre Studio — a click on a line of the generated C selected the CmdSelect activation block on the canvas; the C pane highlights the block's code with the clicked equation (branch Engaged computes cmd) marked, and the status bar names its origin and source.](docs/screenshots/10-traceability.png)
 
+**Evidence report.** One document per operator gathers what the tool chain
+can show about it: static checks (types, clocks, contracts), the contract
+in CoCoSpec, the Kind 2 proof, the recorded scenarios with decision and
+MC/DC coverage, the compiled generated C checked against the model cycle by
+cycle (with the compiler's identity and flags), and model-to-code
+traceability with every generated file's SHA-256 — plus the model files'
+SHA-256 and a layout-independent fingerprint of the operator, so the
+evidence names exactly what it covers. Each section is *pass*, *gaps*,
+*fail* or *not run*; the verdict is FAIL if any section fails, PASS WITH
+GAPS if any is incomplete. **Project ▸ Evidence Report…** shows it and
+opens the full page (print it to PDF); `openlustre evidence` writes the
+HTML and JSON and exits non-zero on FAIL, so CI can gate on it.
+
+![The Evidence Report dialog in OpenLustre Studio — PASS WITH GAPS for the Autopilot operator: static checks, contract, Kind 2 proof (3 of 3 properties valid), tests (2 of 2 scenarios), model ≡ generated code (24 cycles compared) and traceability (17 of 17 equations) pass; structural coverage shows gaps (if-decisions 4/6, MC/DC 7/9).](docs/screenshots/11-evidence.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 
@@ -212,6 +227,11 @@ openlustre test run    model.json --scenarios scenarios/ --backend both
 
 # 6. Prove properties with Kind 2 (counterexamples as per-cycle waveforms):
 openlustre prove model.json --timeout 30 --waveform
+
+# 7. The evidence report for an operator — checks, contract, proof, tests
+#    and coverage, model ≡ C, traceability — as HTML + JSON; fails on FAIL:
+openlustre evidence model.json --root MyOperator --scenarios scenarios/ \
+    --prove --out evidence/
 ```
 
 ## What makes it OpenLustre (differences from SCADE)

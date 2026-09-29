@@ -36,7 +36,7 @@ no GUI at all.
 | Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review; the compiled C stepped in lockstep ("C in the loop")** (was replay-from-zero) |
 | IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator; live, cycle by cycle, in the Simulation dock** |
 | Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples | ⚠️ default mode only; **counterexample as a waveform, replayable in the simulator** (was an ASCII block); **Kind 2 not bundled or in CI** |
-| Evidence report | ❌ | ❌ |
+| Evidence report | ✅ `openlustre evidence` (HTML + JSON, fails on FAIL) | ✅ Project ▸ Evidence Report (verdict, sections, full page, downloads) |
 | Imported C operators | ✅ manifests, wrappers, validation | ❌ no way to register or place one |
 
 ### Assessment
@@ -189,9 +189,16 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 12. **Provision Kind 2 (S–M).** Detect and guide installation (WSL/Docker on
     Windows), bundle on Linux/macOS releases, add a CI job that proves the
     examples; expose realizability and mode-coverage in the Verify dock.
-13. **Evidence report (M).** One HTML/PDF per operator: type and contract
-    checks, proofs, coverage (decision, MC/DC), IR-vs-C equivalence, trace
-    matrix — the plan's "evidence layer".
+13. ✅ **Evidence report — done.** One document per operator — the plan's
+    "evidence layer": identification (interface, contract, model files'
+    SHA-256, a layout-independent fingerprint of the operator's slice),
+    static checks, the contract in CoCoSpec, the Kind 2 proof, tests with
+    decision and MC/DC coverage, model ≡ generated code (compiler identity,
+    flags, cycles compared), and traceability (generated files' SHA-256,
+    trace matrix). Each section is pass / gaps / fail / not run, with an
+    overall verdict. `openlustre evidence` writes standalone HTML (print to
+    PDF) and JSON and exits non-zero on FAIL; the Studio shows it under
+    Project ▸ Evidence Report.
 14. **Imported C operators in the GUI (M).** Register a manifest, place it as
     a block, see its contract.
 
@@ -203,13 +210,14 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-With item 5 done, every P0 and P1 item except target integration (item 7)
-is complete: models are authored, simulated live, compared with their
-generated C cycle by cycle, and the C is traced back to the model line by
-line with a fingerprinted report.
+Item 13 is done: an operator's checks, contract, proof, tests and coverage,
+model ≡ code, and traceability now come out as one fingerprinted document,
+and CI can gate on its verdict.
 
-Next is item **13** (the evidence report), which now has every ingredient:
-type and contract checks, test results with decision and MC/DC coverage,
-IR-vs-C equivalence, and the trace matrix and generation report — bundled
-per operator into one reviewable document. Provisioning Kind 2 (item 12) is
-its natural companion, so the proof results can be part of it.
+The most valuable next step is item **12** (provisioning Kind 2): the
+evidence report's proof section is "not run" wherever Kind 2 is missing —
+which is most machines, and this one — and the clocked Lustre the
+activations now lower to has not yet been proved in CI. After it, item **7**
+(target integration: cross-compilation, cyclic-task wrappers) is the last P1
+item, and item **9** (drawing states and branches directly on the charts)
+the biggest remaining graphical gap with SCADE.

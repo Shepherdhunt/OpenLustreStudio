@@ -113,6 +113,13 @@ lines, bytes and SHA-256; operators with interface, step function, state
 fields, sub-instances, constructs and traced equations; coverage) and the
 same as `markdown`.
 
+`POST /api/evidence {node?, prove?, timeout?}` builds the evidence report
+for an operator (default: the build root) from the open workspace — its
+model files, its `scenarios/` and, with `prove`, Kind 2 on PATH — and
+returns `{operator, verdict, sections: [{id, title, status, summary}],
+evidence, html}`: the verdict, each section's status (`pass`, `gaps`,
+`fail`, `not_run`), the full report as JSON, and the standalone HTML page.
+
 A step can also carry `"sequence": [{name: "text"}, …]` — one input set
 per cycle, with `inputs` filling any gaps — which is how a test scenario
 or a Kind 2 counterexample is replayed in the session. Every step of the
