@@ -222,21 +222,12 @@ impl Project {
                         act.name.clone(),
                         act.owner.clone(),
                     )),
+                    // The activation defines variables the owner declares. If
+                    // one has since been removed (or turned into an input),
+                    // lowering still merges and the type checker reports it on
+                    // the equation (E0020 / E0022) — visible on the canvas,
+                    // never a load failure.
                     Some(node) => {
-                        // The driven variables must exist on the owner — the
-                        // activation is their definition, not their declaration.
-                        let known = |n: &str| {
-                            node.outputs.iter().any(|p| p.name == n)
-                                || node.locals.iter().any(|l| l.name == n)
-                        };
-                        if let Some(bad) = act.outputs.iter().find(|o| !known(&o.name)) {
-                            errors.push(crate::ActLowerError::OutputUnknownOnOwner(
-                                act.name.clone(),
-                                bad.name.clone(),
-                                act.owner.clone(),
-                            ));
-                            continue;
-                        }
                         node.locals.extend(low.locals);
                         node.equations.extend(low.equations);
                     }

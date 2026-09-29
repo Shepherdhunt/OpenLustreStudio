@@ -833,6 +833,86 @@ fn build_diagram(
         .find_node(&node_name)
         .ok_or_else(|| format!("node `{node_name}` not found"))?;
 
+    // Owned constructs (state machines, activations) lower into this node's
+    // body, APPENDED after the operator's own equations. SCADE draws each one
+    // as a single block inside the operator diagram, so the lowered tail is
+    // split off here and described as blocks instead of dumped as generated
+    // `__sm_*` / `__act_*` boxes. The operator's own equations keep indices
+    // 0..own_eq_count, so every `eqN` id the editor sends back stays valid.
+    let raw = load_raw(ctx).ok();
+    let own_eq_count = raw
+        .as_ref()
+        .and_then(|r| r.find_node(&node_name))
+        .map(|n| n.equations.len())
+        .unwrap_or(node.equations.len())
+        .min(node.equations.len());
+    struct Construct {
+        id: String,
+        kind: &'static str,
+        name: String,
+        drives: Vec<String>,
+        detail: Vec<String>,
+        eqs: Vec<usize>,
+    }
+    let mut constructs: Vec<Construct> = Vec::new();
+    for pkg in raw.iter().flat_map(|r| r.packages.iter()) {
+        for m in pkg.state_machines.iter().filter(|m| m.owner.as_deref() == Some(node_name.as_str())) {
+            constructs.push(Construct {
+                id: format!("sm:{}", m.name),
+                kind: "sm",
+                name: m.name.clone(),
+                drives: m.outputs.iter().map(|o| o.name.clone()).collect(),
+                detail: m
+                    .states
+                    .iter()
+                    .map(|s| {
+                        if s.name == m.initial_state { format!("▸ {}", s.name) } else { s.name.clone() }
+                    })
+                    .collect(),
+                eqs: vec![],
+            });
+        }
+        for a in pkg.activations.iter().filter(|a| a.owner == node_name) {
+            let mut detail: Vec<String> = a
+                .branches
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    format!(
+                        "{} {}",
+                        if i == 0 { "if" } else { "elsif" },
+                        ol_lustre_emit::format_expr(&b.condition)
+                    )
+                })
+                .collect();
+            detail.push("else".into());
+            constructs.push(Construct {
+                id: format!("act:{}", a.name),
+                kind: "act",
+                name: a.name.clone(),
+                drives: a.outputs.iter().map(|o| o.name.clone()).collect(),
+                detail,
+                eqs: vec![],
+            });
+        }
+    }
+    for i in own_eq_count..node.equations.len() {
+        let Some(lhs0) = node.equations[i].lhs.first() else { continue };
+        let owner = constructs
+            .iter()
+            .position(|c| match c.kind {
+                "sm" => lhs0.starts_with("__sm"),
+                _ => lhs0.starts_with(&format!("__act_{}_", c.name)),
+            })
+            .or_else(|| constructs.iter().position(|c| c.drives.contains(lhs0)));
+        if let Some(k) = owner {
+            constructs[k].eqs.push(i);
+        }
+    }
+    let hidden_local = |n: &str| {
+        !constructs.is_empty() && (n.starts_with("__sm") || n.starts_with("__act_"))
+    };
+
     let known: std::collections::HashSet<&str> = node
         .inputs
         .iter()
@@ -931,7 +1011,7 @@ fn build_diagram(
     let mut ghosts: std::collections::BTreeMap<String, String> = Default::default();
     let mut equations = Vec::new();
     let mut wires = Vec::new();
-    for (i, eq) in node.equations.iter().enumerate() {
+    for (i, eq) in node.equations.iter().enumerate().take(own_eq_count) {
         let eq_id = format!("eq{i}");
         let invalid = !eq_problems[i].is_empty();
         let reason = eq_problems[i].join("; ");
@@ -1047,6 +1127,54 @@ fn build_diagram(
         }));
     }
 
+    // One block per owned construct: its input pins are the operator signals
+    // its lowered equations read (internal state and its own driven outputs
+    // excluded — those are feedback inside the block), and it wires to every
+    // variable it drives. Problems on any of its lowered equations mark the
+    // whole block.
+    let mut construct_json = Vec::new();
+    for c in &constructs {
+        let mut pins: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = Default::default();
+        let msgs: Vec<String> = c.eqs.iter().flat_map(|&i| eq_problems[i].iter().cloned()).collect();
+        let invalid = !msgs.is_empty();
+        for &i in &c.eqs {
+            for v in node.equations[i].rhs.free_vars() {
+                if globals.contains(&v) || hidden_local(&v) || c.drives.contains(&v) || !seen.insert(v.clone()) {
+                    continue;
+                }
+                let port = pins.len();
+                if known.contains(v.as_str()) {
+                    wires.push(serde_json::json!({ "from": v.clone(), "to": c.id, "to_port": port }));
+                    pins.push(serde_json::json!({ "name": v, "bound": true }));
+                } else {
+                    let why = format!("`{v}` is not declared as an input, output, or local");
+                    ghosts.insert(v.clone(), why.clone());
+                    pins.push(serde_json::json!({ "name": v, "bound": false, "reason": why }));
+                }
+            }
+        }
+        for d in &c.drives {
+            if invalid {
+                wires.push(serde_json::json!({
+                    "from": c.id, "to": d, "invalid": true, "reason": msgs.join("; "),
+                }));
+            } else {
+                wires.push(serde_json::json!({ "from": c.id, "to": d }));
+            }
+        }
+        construct_json.push(serde_json::json!({
+            "id": c.id,
+            "kind": c.kind,
+            "name": c.name,
+            "detail": c.detail,
+            "inputs": pins,
+            "drives": c.drives,
+            "invalid": invalid,
+            "reason": if invalid { serde_json::Value::String(msgs.join("; ")) } else { serde_json::Value::Null },
+        }));
+    }
+
     let port_json = |name: &str, ty: &ol_ir::Type| {
         let mut v = serde_json::json!({ "name": name, "type": ty });
         if let Some(msgs) = box_problems.get(name) {
@@ -1067,11 +1195,14 @@ fn build_diagram(
         "grid": node.diagram.grid,
         "inputs": node.inputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
         "outputs": node.outputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
-        "locals": node.locals.iter().map(|l| port_json(&l.name, &l.ty)).collect::<Vec<_>>(),
+        "locals": node.locals.iter()
+            .filter(|l| !hidden_local(&l.name))
+            .map(|l| port_json(&l.name, &l.ty)).collect::<Vec<_>>(),
         "ghosts": ghosts.iter().map(|(name, reason)| serde_json::json!({
             "name": name, "reason": reason,
         })).collect::<Vec<_>>(),
         "equations": equations,
+        "constructs": construct_json,
         "wires": wires,
         "problems": problems,
         "probes": node.probes.iter().map(|p| serde_json::json!({
@@ -2643,11 +2774,13 @@ fn edit_update_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Re
     }
     let cur_name = new_name.unwrap_or_else(|| name.clone());
 
+    let mut retyped: Option<ol_ir::Type> = None;
     if let Some(t) = &new_type {
         let ty = ol_stdlib::parse_type(t).map_err(|e| format!("type `{t}`: {e}"))?;
         node.inputs.iter_mut().filter(|p| p.name == cur_name).for_each(|p| p.ty = ty.clone());
         node.outputs.iter_mut().filter(|p| p.name == cur_name).for_each(|p| p.ty = ty.clone());
         node.locals.iter_mut().filter(|l| l.name == cur_name).for_each(|l| l.ty = ty.clone());
+        retyped = Some(ty);
     }
 
     if let Some(r) = &new_role {
@@ -2673,13 +2806,80 @@ fn edit_update_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Re
                 }
             };
             match want {
-                Role::Input => node.inputs.push(ol_ir::Port { name: cur_name, ty }),
-                Role::Output => node.outputs.push(ol_ir::Port { name: cur_name, ty }),
-                Role::Local => node.locals.push(ol_ir::Local { name: cur_name, ty }),
+                Role::Input => node.inputs.push(ol_ir::Port { name: cur_name.clone(), ty }),
+                Role::Output => node.outputs.push(ol_ir::Port { name: cur_name.clone(), ty }),
+                Role::Local => node.locals.push(ol_ir::Local { name: cur_name.clone(), ty }),
             }
         }
     }
+    // The operator's state machine and activations refer to its signals by
+    // name and carry copies of their types: keep them pointing at the same
+    // signal (SCADE renames propagate model-wide).
+    propagate_port_change(project, &node_name, &name, &cur_name, retyped.as_ref());
     Ok(())
+}
+
+/// Apply a rename (`old` → `new`, possibly equal) and optional retype of one
+/// of operator `owner`'s signals to the constructs it owns: its state
+/// machine (ports, state equations, guards, nested regions) and its
+/// activations (driven outputs, conditions, branch equations).
+fn propagate_port_change(
+    project: &mut ol_ir::Project,
+    owner: &str,
+    old: &str,
+    new: &str,
+    new_ty: Option<&ol_ir::Type>,
+) {
+    fn rename_eqs(eqs: &mut [ol_ir::Equation], old: &str, new: &str) {
+        for eq in eqs {
+            for l in &mut eq.lhs {
+                if l == old {
+                    *l = new.to_string();
+                }
+            }
+            eq.rhs.rename_var(old, new);
+        }
+    }
+    fn rename_states(states: &mut [ol_ir::StateDef], old: &str, new: &str) {
+        for s in states {
+            rename_eqs(&mut s.equations, old, new);
+            for t in &mut s.transitions {
+                t.guard.rename_var(old, new);
+            }
+            for r in &mut s.regions {
+                rename_states(&mut r.states, old, new);
+            }
+        }
+    }
+    let fix_port = |p: &mut ol_ir::Port| {
+        if p.name == old {
+            p.name = new.to_string();
+        }
+        if p.name == new {
+            if let Some(t) = new_ty {
+                p.ty = t.clone();
+            }
+        }
+    };
+    for pkg in &mut project.packages {
+        for m in pkg.state_machines.iter_mut().filter(|m| m.owner.as_deref() == Some(owner)) {
+            m.inputs.iter_mut().for_each(fix_port);
+            m.outputs.iter_mut().for_each(fix_port);
+            if old != new {
+                rename_states(&mut m.states, old, new);
+            }
+        }
+        for a in pkg.activations.iter_mut().filter(|a| a.owner == owner) {
+            a.outputs.iter_mut().for_each(fix_port);
+            if old != new {
+                for b in &mut a.branches {
+                    b.condition.rename_var(old, new);
+                    rename_eqs(&mut b.equations, old, new);
+                }
+                rename_eqs(&mut a.else_equations, old, new);
+            }
+        }
+    }
 }
 
 /// Remove a variable. Equations that still reference it keep working as

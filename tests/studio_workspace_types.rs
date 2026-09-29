@@ -633,15 +633,66 @@ fn activation_create_validate_edit_build_remove() {
         "branch flags in the lustre: {bd}"
     );
 
+    // On the owner's canvas the tree is ONE block (SCADE style): its input
+    // pins are the signals it reads, it wires to what it drives, and none of
+    // the generated `__act_*` locals or selection-chain equations leak onto
+    // the diagram (Guard has no equations of its own).
+    let dg = get_json(port, "/api/diagram?node=Guard");
+    let cs = dg["constructs"].as_array().expect("constructs");
+    assert_eq!(cs.len(), 1, "one block for the activation: {dg}");
+    assert_eq!(cs[0]["id"], "act:Select");
+    let pins: Vec<&str> = cs[0]["inputs"].as_array().unwrap().iter()
+        .map(|p| p["name"].as_str().unwrap()).collect();
+    for s in ["fault", "arm", "x"] {
+        assert!(pins.contains(&s), "block reads `{s}`: {pins:?}");
+    }
+    assert_eq!(cs[0]["drives"], serde_json::json!(["cmd"]));
+    assert!(dg["equations"].as_array().unwrap().is_empty(), "lowered chains hidden: {dg}");
+    assert!(
+        !dg["locals"].as_array().unwrap().iter()
+            .any(|l| l["name"].as_str().unwrap().starts_with("__act_")),
+        "generated flags hidden: {dg}"
+    );
+    assert!(dg["wires"].as_array().unwrap().iter()
+        .any(|w| w["from"] == "act:Select" && w["to"] == "cmd"), "block drives cmd: {dg}");
+
     // GET returns the tree with expressions rendered back to text.
     let got = get_json(port, "/api/activation?name=Select");
     assert_eq!(got["branches"][1]["condition"], "arm", "{got}");
     assert_eq!(got["branches"][1]["equations"][0]["body"], "x + 1", "{got}");
 
-    // Update in place (new else body), then remove.
+    // Update in place (new else body).
     post_ok(port, "/api/edit/update_activation", &act("x - 1"));
     let got = get_json(port, "/api/activation?name=Select");
     assert_eq!(got["else"]["equations"][0]["body"], "x - 1", "{got}");
+
+    // Renaming an operator input propagates into the tree (conditions and
+    // branch equations), and the operator still builds.
+    post_ok(port, "/api/edit/update_port", r#"{"node":"Guard","name":"x","new_name":"speed"}"#);
+    let got = get_json(port, "/api/activation?name=Select");
+    assert_eq!(got["branches"][1]["equations"][0]["body"], "speed + 1", "{got}");
+    assert_eq!(got["else"]["equations"][0]["body"], "speed - 1", "{got}");
+    post_ok(port, "/api/edit/update_port", r#"{"node":"Guard","name":"arm","new_name":"armed"}"#);
+    let got = get_json(port, "/api/activation?name=Select");
+    assert_eq!(got["branches"][1]["condition"], "armed", "{got}");
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Guard"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "still builds after renames: {bd}");
+
+    // Deleting the driven output never breaks the Studio: the model still
+    // loads, and the dangling definition is reported (E0020), not hidden.
+    post_ok(port, "/api/edit/remove_port", r#"{"node":"Guard","name":"cmd"}"#);
+    let ins = get_json(port, "/api/inspect");
+    assert!(
+        ins["diagnostics"].as_array().unwrap().iter()
+            .any(|d| d["code"] == "E0020" && d["message"].as_str().unwrap().contains("`cmd`")),
+        "dangling driven variable reported: {ins}"
+    );
+    let (sd, _) = request(port, "GET", "/api/diagram?node=Guard", "").expect("diagram");
+    assert_eq!(sd, 200, "the canvas still loads");
+    post_ok(port, "/api/edit/undo", "{}");
+
     post_ok(port, "/api/edit/remove_activation", r#"{"name":"Select"}"#);
     let (sr, _) = request(port, "POST", "/api/edit/remove_activation", r#"{"name":"Select"}"#)
         .expect("re-remove");

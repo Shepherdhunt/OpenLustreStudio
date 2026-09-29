@@ -277,6 +277,12 @@ fn check_node(
                     Diagnostic::error("E0020", format!("equation defines unknown name `{lhs}`"))
                         .with_context(eq_ctx.clone()),
                 );
+            } else if node.inputs.iter().any(|p| &p.name == lhs) {
+                // Inputs are defined by the caller, never by the body.
+                diags.push(
+                    Diagnostic::error("E0022", format!("equation assigns input `{lhs}`"))
+                        .with_context(eq_ctx.clone()),
+                );
             }
             if !assigned.insert(lhs.clone()) {
                 diags.push(

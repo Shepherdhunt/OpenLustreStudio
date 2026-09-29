@@ -84,8 +84,6 @@ pub enum ActLowerError {
     DuplicateBranch(String, String),
     #[error("activation `{0}` is owned by operator `{1}`, which does not exist")]
     UnknownOwner(String, String),
-    #[error("activation `{0}` drives `{1}`, which is not an output or local of operator `{2}`")]
-    OutputUnknownOnOwner(String, String, String),
 }
 
 /// The dataflow an activation lowers to: locals (the per-branch selected
@@ -102,9 +100,10 @@ pub fn branch_flag(activation: &str, branch_index: usize) -> String {
     format!("__act_{activation}_b{}", branch_index + 1)
 }
 
-/// Validate and lower one activation. The owner-side checks (owner exists,
-/// outputs exist on the owner) belong to [`crate::Project::lower_activations`],
-/// which sees the whole project.
+/// Validate and lower one activation. Whether the owner exists is checked by
+/// [`crate::Project::lower_activations`], which sees the whole project; whether
+/// each driven variable is an output/local of the owner is the type checker's
+/// job (E0020 / E0022) on the merged body.
 pub fn lower(act: &ActivationDef) -> Result<LoweredActivation, ActLowerError> {
     if act.branches.is_empty() {
         return Err(ActLowerError::NoBranches(act.name.clone()));

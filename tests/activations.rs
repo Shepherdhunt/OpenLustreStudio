@@ -169,17 +169,30 @@ fn activation_exhaustiveness_and_owner_rules_are_enforced() {
     let errs = project.lower_activations().unwrap_err();
     assert!(errs.iter().any(|e| matches!(e, ol_ir::ActLowerError::UnknownOwner(_, o) if o == "Ghost")));
 
-    // … and the driven variables must exist on it.
+    // A driven variable the owner no longer declares (e.g. the port was
+    // deleted) does NOT fail the load: lowering merges and the type checker
+    // pins E0020 on the equation — visible on the canvas, never a crash.
     let mut project = guard_project();
-    project.packages[0].activations[0].outputs[0].name = "nope".into();
-    for b in &mut project.packages[0].activations[0].branches {
-        b.equations[0].lhs = vec!["nope".into()];
-    }
-    project.packages[0].activations[0].else_equations[0].lhs = vec!["nope".into()];
-    let errs = project.lower_activations().unwrap_err();
-    assert!(errs
-        .iter()
-        .any(|e| matches!(e, ol_ir::ActLowerError::OutputUnknownOnOwner(_, o, _) if o == "nope")));
+    project.packages[0].nodes[0].outputs.retain(|p| p.name != "safe");
+    project.lower_activations().expect("lowering tolerates a missing driven var");
+    let report = ol_typecheck::check_project(&project);
+    assert!(
+        report.errors().any(|d| d.code == "E0020" && d.message.contains("`safe`")),
+        "missing driven variable is reported: {:?}",
+        report.diagnostics
+    );
+
+    // Driving an INPUT (e.g. the port's role changed) is E0022.
+    let mut project = guard_project();
+    let safe = project.packages[0].nodes[0].outputs.pop().unwrap();
+    project.packages[0].nodes[0].inputs.push(safe);
+    project.lower_activations().expect("lowers");
+    let report = ol_typecheck::check_project(&project);
+    assert!(
+        report.errors().any(|d| d.code == "E0022" && d.message.contains("`safe`")),
+        "assigning an input is reported: {:?}",
+        report.diagnostics
+    );
 
     // An activation with no branches is rejected.
     let mut project = guard_project();
