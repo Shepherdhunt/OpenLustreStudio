@@ -35,12 +35,12 @@ jobs:
       - name: Check the prover
         run: ./target/debug/openlustre kind2 doctor
 
-      - name: Kind 2 conformance (clock elimination, C semantics, real proofs)
+      - name: Kind 2 conformance and the SMS proof (no skipping)
         env:
           OPENLUSTRE_KIND2: ${{ env.OPENLUSTRE_TOOLS }}/bin/kind2
           OPENLUSTRE_Z3: ${{ env.OPENLUSTRE_TOOLS }}/bin/z3
           OPENLUSTRE_REQUIRE_KIND2: "1"
-        run: cargo test -p openlustre_integration_tests --test kind2_projection
+        run: cargo test -p openlustre_integration_tests --test kind2_projection --test sms_example
 
       - name: Prove the examples and build their evidence
         run: tools/prove-examples.sh ./target/debug/openlustre evidence

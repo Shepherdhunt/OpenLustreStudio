@@ -219,6 +219,19 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
   The in-binary SPA is working, tested, and shipping; a stack switch now is
   churn that delivers none of the items above.
 
+## Reference project
+
+[`examples/sms`](../examples/sms) — a drone Stores Management System built
+end to end in the Studio from an implementation plan — exercises the whole
+chain on a realistic design: Import Lustre, an owned state machine, an
+activation decision tree, contracts on every operator, scenarios with full
+MC/DC, C equivalence, 111 Kind 2 proofs and a PASS evidence report. Building
+it surfaced and fixed: edits and the contract live check not seeing the
+workspace's `types.json`; enum outputs in state machines; unreachable
+terminal branches in state-machine and activation lowering that no test
+could cover; the C test driver not reading or printing enum names; and a
+false C0021 warning on constants in assumptions.
+
 ## Suggested next step
 
 Item 12 is done: proofs run for real — locally in one command, in the

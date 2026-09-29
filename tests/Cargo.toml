@@ -171,3 +171,7 @@ path = "evidence.rs"
 [[test]]
 name = "kind2_projection"
 path = "kind2_projection.rs"
+
+[[test]]
+name = "sms_example"
+path = "sms_example.rs"
