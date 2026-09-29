@@ -15,7 +15,8 @@
 set -eu
 cd "$(dirname "$0")/.."
 BRANCH_LOCAL=sms-export
-git subtree split --prefix=examples/sms -b "$BRANCH_LOCAL" > /dev/null
+git branch -D "$BRANCH_LOCAL" > /dev/null 2>&1 || true
+git subtree split -q --prefix=examples/sms -b "$BRANCH_LOCAL" > /dev/null
 echo "export: branch $BRANCH_LOCAL holds examples/sms as a project root ($(git rev-list --count "$BRANCH_LOCAL") commits)"
 if [ "${1:-}" = "--dir" ]; then
     DIR="$2"
