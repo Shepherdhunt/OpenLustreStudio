@@ -31,7 +31,7 @@ no GUI at all.
 | Type checking, function/operator rules | ✅ | ✅ errors mapped onto boxes and wires |
 | **CoCoSpec contracts: assume / guarantee / modes** | ✅ IR, checker (now type-checks clauses), CoCoSpec emit, observer-based runtime monitors | ✅ **contract editor: clause rows, mode table, CoCoSpec text, live checking** (was read-only) |
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
-| C-Lite generation (selected root + closure) | ✅ | ✅ Generate / C pane / save files |
+| C-Lite generation (selected root + closure) | ✅ `@trace` per equation, trace matrix, generation report (SHA-256) | ✅ Generate / C pane / save files; **click C ↔ select model element; generation report** |
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
 | Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review; the compiled C stepped in lockstep ("C in the loop")** (was replay-from-zero) |
 | IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator; live, cycle by cycle, in the Simulation dock** |
@@ -138,10 +138,15 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
    `last 'v`. The simulator, the generated C (byte-identical traces, and in
    lockstep under C in the loop) and the Lustre for Kind 2 (clocked locals
    declared `x: int when c`) all run the same lowered clocks.
-5. **Model-to-code traceability (M).** Per-equation comments in the generated
-   C naming operator / equation / diagram element, a machine-readable trace
-   matrix, and a generation report (files, operators, state sizes). This is
-   what KCG users expect and what DO-178C-style reviews need.
+5. ✅ **Model-to-code traceability — done.** Lowering records which owned
+   construct each equation came from; the generated C carries a one-line
+   ASCII `@trace` comment per equation (operator, diagram element, construct
+   role such as "branch Engaged computes cmd", model text); the trace matrix
+   gives each equation's line range; the generation report lists files with
+   SHA-256, operators (interface, step function, state fields, sub-instances,
+   constructs) and coverage. `emit-clite` writes `trace.json` and
+   `generation_report.{md,json}`; the Studio navigates C ↔ model both ways
+   and shows the report (Code ▸ Generation Report).
 6. ✅ **C-in-the-loop stepping — done.** A "C in the loop" toggle compiles
    the simulated operator (reusing the build while the model is unchanged)
    and runs its CSV driver as a child process, fed the same inputs each
@@ -198,14 +203,13 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-The P0 items and the P1 semantics items (4, 6, 6b) are done: activations are
-clocked like SCADE's, and model and generated C agree cycle by cycle —
-verified in batch, in lockstep, and over long float runs.
+With item 5 done, every P0 and P1 item except target integration (item 7)
+is complete: models are authored, simulated live, compared with their
+generated C cycle by cycle, and the C is traced back to the model line by
+line with a fingerprinted report.
 
-Next is item **5** (model-to-code traceability): per-equation comments in
-the generated C naming the operator, equation and diagram element, a
-machine-readable trace matrix, and a generation report. It is what KCG users
-expect, what DO-178C-style reviews need, and it feeds the evidence report
-(item 13). Provisioning Kind 2 (item 12) is the other gap worth closing
-soon: the clocked Lustre it now receives hasn't been proved in this
-environment.
+Next is item **13** (the evidence report), which now has every ingredient:
+type and contract checks, test results with decision and MC/DC coverage,
+IR-vs-C equivalence, and the trace matrix and generation report — bundled
+per operator into one reviewable document. Provisioning Kind 2 (item 12) is
+its natural companion, so the proof results can be part of it.

@@ -126,6 +126,22 @@ modelled rather than hidden).
 
 ![C in the loop in OpenLustre Studio — a float32 integrator after 10 000 cycles with the compiled C in lockstep: the chip reads "C ✓ in lockstep", the watch table's C column matches the model (pos = 130.004), and the waveform shows no differing cycles.](docs/screenshots/09-c-in-the-loop.png)
 
+**Model-to-code traceability.** Every equation in the generated C is
+preceded by a one-line `@trace` comment naming its operator, its diagram
+element (`eq3`, `sm:ModeLamp`, `act:CmdSelect`), what it is when lowered
+from a construct (`activation CmdSelect, branch Engaged computes cmd`) and
+the equation in model syntax. In the Studio's Generated C pane, click a
+traced line to open its operator with the element selected; select a block,
+a construct or a variable on the canvas to highlight the C it generates.
+**Code ▸ Generation Report** lists every generated file with its SHA-256,
+each operator's interface, step function and state, and the traceability
+coverage (every equation, or which aren't); `emit-clite` writes the same
+report (`generation_report.md` / `.json`) and the machine-readable trace
+matrix (`trace.json`: each equation's element, origin, source and line
+range) next to the sources.
+
+![Model-to-code traceability in OpenLustre Studio — a click on a line of the generated C selected the CmdSelect activation block on the canvas; the C pane highlights the block's code with the clicked equation (branch Engaged computes cmd) marked, and the status bar names its origin and source.](docs/screenshots/10-traceability.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 
@@ -186,6 +202,8 @@ openlustre emit-clite model.json --root MyOperator --with-stdlib libraries \
     --out build/ --driver
 cd build/clite && make        # → standalone executable named after the
                               #   user-designated main operator
+# build/trace.json             — every equation → diagram element + C lines
+# build/generation_report.md   — files (SHA-256), operators, state, coverage
 
 # 5. Verify model ↔ generated C equivalence with golden-trace scenarios:
 openlustre test record model.json --scenarios scenarios/

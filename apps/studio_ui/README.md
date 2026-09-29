@@ -102,6 +102,17 @@ round-trip algorithm, so equal means identical — everything else as text), and
 program that exits, hangs (5 s) or prints something unexpected is detached
 and reported in `c_error`. `{"on": false}` detaches it.
 
+`GET /api/clite/trace` returns the trace matrix of the generated C for the
+build root: `{root, file, entries: [{operator, equation, element, origin,
+lhs, source, file, first_line, last_line}]}` — each equation's diagram
+element (`eqN`, `sm:Name`, `act:Name`), the construct role when lowered
+from one, its model text, and its 1-based line range (the `@trace` comment
+through its last statement). The C pane uses it to navigate both ways.
+`GET /api/clite/report` returns the generation report (`report`: files with
+lines, bytes and SHA-256; operators with interface, step function, state
+fields, sub-instances, constructs and traced equations; coverage) and the
+same as `markdown`.
+
 A step can also carry `"sequence": [{name: "text"}, …]` — one input set
 per cycle, with `inputs` filling any gaps — which is how a test scenario
 or a Kind 2 counterexample is replayed in the session. Every step of the
