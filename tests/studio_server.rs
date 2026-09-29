@@ -221,4 +221,13 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("/api/sim/step") && html.contains("function simAdvance"), "sim session client missing");
     assert!(html.contains("id=\"sim-break\"") && html.contains("id=\"sim-stop-viol\""), "run controls missing");
     assert!(html.contains("function liveValues"), "live diagram overlay missing");
+    // The waveform viewer and its three uses: the session's cycles (with
+    // cycle review on the diagram), scenario runs against their goldens, and
+    // Kind 2 counterexamples — the last two replayable in the simulator.
+    assert!(html.contains("function waveMount") && html.contains("function waveDraw"), "waveform viewer missing");
+    assert!(html.contains("id=\"sim-wave\"") && html.contains("function simPick"), "simulation waveform missing");
+    assert!(html.contains("function testsWave") && html.contains("id=\"tests-wave\""), "scenario waveform missing");
+    assert!(html.contains("function verifyShowCex") && html.contains("id=\"verify-wave\""), "counterexample waveform missing");
+    assert!(html.contains("function simReplay") && html.contains("sequence"), "replay in the simulator missing");
+    assert!(html.contains("function dockToggleMax"), "resizable dock missing");
 }

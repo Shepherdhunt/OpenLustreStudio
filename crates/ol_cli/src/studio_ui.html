@@ -12,7 +12,7 @@
   body {
     display: grid;
     grid-template-columns: 250px 1fr 320px;
-    grid-template-rows: 30px 28px 1fr 200px 24px;
+    grid-template-rows: 30px 28px 1fr var(--dock-h, 200px) 24px;
     height: 100vh; background: #ececec; color: #1e1e1e; font-size: 12px;
   }
   #titlebar {
@@ -87,7 +87,10 @@
   #props-body { padding: 8px 10px; }
   #props-body .row { display: flex; gap: 6px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
   #props-body label { color: #555; min-width: 78px; font-size: 11px; }
-  #bottomdock .dock-title { display: flex; gap: 2px; align-items: center; }
+  /* Drag the dock's title bar to resize it; ⬒ (or a double-click) maximizes. */
+  #bottomdock .dock-title { display: flex; gap: 2px; align-items: center; cursor: ns-resize; }
+  #bottomdock .dock-title .dock-max { margin-left: auto; cursor: pointer; padding: 0 8px; font-size: 13px; }
+  #bottomdock .dock-title .dock-max:hover { color: #2b579a; }
   #bottomdock .dock-title .dock-tab {
     cursor: pointer; padding: 2px 12px; text-transform: none; font-weight: 400;
     border: 1px solid transparent; border-bottom: none;
@@ -244,17 +247,88 @@
   .sim-bar { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 2px 0 4px; }
   .sim-bar button { margin: 0; }
   .sim-bar label { color: #3c3c3c; }
-  .sim-cols { display: flex; gap: 16px; align-items: flex-start; }
-  .sim-cols .watch-table { width: auto; flex: 0 0 auto; margin: 0; }
-  .sim-cols .sim-right { flex: 1 1 auto; min-width: 0; }
+  #dock-simulation { display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+  .sim-cols { display: flex; gap: 12px; align-items: stretch; flex: 1; min-height: 0; }
+  .sim-cols .sim-watch-wrap { flex: 0 0 auto; overflow: auto; }
+  .sim-cols .watch-table { width: auto; margin: 0; }
+  .sim-cols .sim-right { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
   #sim-note.ok { color: #107c10; } #sim-note.warn { color: #9d5d00; } #sim-note.err { color: #c42b1c; }
-  #sim-monitor { margin: 2px 0 4px; }
+  #sim-monitor { margin: 0 0 3px; }
   #sim-monitor .err { color: #c42b1c; font-weight: 600; }
   .watch-internal td { color: #8a8a8a; font-size: 11px; }
-  #step-trace { max-height: 118px; overflow: auto; }
-  #step-trace table { width: auto; }
-  #step-trace th, #step-trace td { font-family: Consolas, monospace; font-size: 11px; padding: 1px 6px; }
-  #step-trace tr.viol td { background: #fdeeee; }
+  #sim-wave { flex: 1; min-height: 90px; }
+  /* --- Waveform viewer ---------------------------------------------------- */
+  .wave { display: flex; flex-direction: column; min-height: 0; border: 1px solid #d5d5d5; background: #fff; }
+  .wave.fixed { height: max(200px, calc(var(--dock-h, 200px) - 64px)); margin-top: 4px; }
+  .wave-bar { display: flex; align-items: center; gap: 4px 6px; padding: 2px 4px; flex-wrap: wrap;
+    border-bottom: 1px solid #e4e4e4; background: #fafafa; }
+  .wave-bar button { margin: 0; padding: 0 8px; font-size: 11px; }
+  .wave-bar label { color: #3c3c3c; font-size: 11px; }
+  .wave-info { color: #666; font-size: 11px; }
+  .wave-extra { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; }
+  .wave-legend { display: inline-flex; gap: 4px; align-items: center; color: #3c3c3c; font-size: 11px; }
+  .wave-legend .wl { display: inline-block; width: 16px; height: 0; margin-left: 6px; vertical-align: middle; }
+  .wave-legend .wl-val { border-top: 2px solid #2a78d6; }
+  .wave-legend .wl-ref { border-top: 2px dashed #6f6e69; }
+  .wave-legend .wl-diff { height: 10px; width: 12px; background: rgba(227, 73, 72, .22); }
+  .wave-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 20px 1fr; }
+  .wave-corner { font-size: 10px; color: #5a5a5a; padding: 3px 6px; white-space: nowrap; overflow: hidden;
+    border-right: 1px solid #e4e4e4; border-bottom: 1px solid #e4e4e4; }
+  .wave-axis { overflow: hidden; border-bottom: 1px solid #e4e4e4; }
+  .wave-axis text { font-size: 10px; fill: #5a5a5a; }
+  .wave-axis .wat { stroke: #c8c8c8; }
+  .wave-names { overflow: hidden; border-right: 1px solid #e4e4e4; }
+  .wave-plot { overflow: auto; outline: none; cursor: crosshair; }
+  .wave-plot:focus-visible { box-shadow: inset 0 0 0 2px #9fc0e8; }
+  .wave svg { display: block; }
+  .wn { display: grid; grid-template-columns: 1fr auto 12px; align-items: center; column-gap: 4px;
+    padding: 0 4px 0 6px; box-sizing: border-box; border-bottom: 1px solid #ececec; font-size: 11px; cursor: default; }
+  .wn.analog { cursor: pointer; align-content: center; }
+  .wn .wn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1e1e1e; }
+  .wn.in .wn-name { color: #2b579a; }
+  .wn .wn-val { font: 700 11px Consolas, monospace; color: #1e1e1e; white-space: nowrap; max-width: 110px;
+    overflow: hidden; text-overflow: ellipsis; }
+  .wn .wn-val.bad { color: #c42b1c; }
+  .wn .wn-hide { visibility: hidden; color: #8a8a8a; cursor: pointer; text-align: center; }
+  .wn:hover .wn-hide { visibility: visible; }
+  .wn .wn-range { grid-column: 1 / -1; font: 10px Consolas, monospace; color: #6f6e69; }
+  .wave .wg { stroke: #f1f1f1; }
+  .wave .ws { stroke: #ececec; }
+  .wave .wsig { fill: none; stroke: #2a78d6; stroke-width: 2; stroke-linejoin: round; }
+  .wave .whi { fill: #2a78d6; fill-opacity: .12; }
+  .wave .wref { fill: none; stroke: #6f6e69; stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .wave .wx { fill: #dcdcdc; }
+  .wave .wal { font: 10px Consolas, monospace; fill: #52514e; }
+  .wave .wbus { fill: #2a78d6; fill-opacity: .1; stroke: #2a78d6; stroke-width: 1; }
+  .wave .wnone { stroke: #c4c4c4; }
+  .wave .wbt { font: 10px Consolas, monospace; fill: #1e1e1e; text-anchor: middle; }
+  .wave .wdiff { fill: #e34948; fill-opacity: .18; }
+  .wave .wdt { font: 9px Consolas, monospace; fill: #c42b1c; }
+  .wave .wviol { fill: #e34948; }
+  .wave .wvt { fill: #fff; font-size: 10px; font-weight: 700; text-anchor: middle; }
+  .wave .wok { stroke: #c4c4c4; }
+  .wave .wm { stroke-width: 1.5; }
+  .wave .wm-fail, .wave .wm-diverge { stroke: #c42b1c; }
+  .wave .wm-break { stroke: #b86e00; }
+  /* Marker flags sit over the tick numbers: a white halo keeps them legible. */
+  .wave-axis .wmf { font-weight: 700; paint-order: stroke; stroke: #fff !important; stroke-width: 4px; stroke-linejoin: round; }
+  .wave-axis .wmf.wm-fail, .wave-axis .wmf.wm-diverge { fill: #c42b1c; }
+  .wave-axis .wmf.wm-break { fill: #9d5d00; }
+  .wave .wpin { fill: #2b579a; fill-opacity: .12; stroke: #2b579a; stroke-opacity: .55; }
+  .wave .whover { stroke: #1e1e1e; stroke-opacity: .45; pointer-events: none; }
+  .wave-table { flex: 1; min-height: 0; overflow: auto; }
+  .wave-table table { width: auto; }
+  .wave-table th, .wave-table td { font-family: Consolas, monospace; font-size: 11px; padding: 1px 6px; }
+  .wave-table td.tdiff { background: #fdeeee; color: #c42b1c; }
+  .wave-table tr.wmark td { border-top: 2px solid #c42b1c; }
+  .wave-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 8px; }
+  .wave-head .bad { color: #c42b1c; font-weight: 600; }
+  .wave-head .good { color: #107c10; font-weight: 600; }
+  .seg { display: inline-flex; }
+  .seg button { margin: 0; border-radius: 0; }
+  .seg button:first-child { border-radius: 3px 0 0 3px; }
+  .seg button:last-child { border-radius: 0 3px 3px 0; border-left: none; }
+  .seg button.on { background: #dcebfa; border-color: #2b579a; color: #2b579a; font-weight: 600; }
   svg text.wire-label.live { fill: #1d6b2f; font-weight: 600; }
   svg text.live-val { font-size: 11px; font-weight: 700; font-family: Consolas, monospace; }
   svg text.live-val.t { fill: #107c10; }
@@ -494,6 +568,7 @@
     <span class="dock-tab" data-dock="tests" onclick="showDock('tests'); loadTests()">Tests</span>
     <span class="dock-tab" data-dock="verify" onclick="showDock('verify')">Verify</span>
     <span class="dock-tab" data-dock="build" onclick="showDock('build')">Build</span>
+    <span class="dock-max" id="dock-max" onclick="dockToggleMax()" title="Maximize / restore the dock (drag the title bar to resize)">⬒</span>
   </div>
   <div class="dock-body">
     <div class="dock-pane" id="dock-messages"><div id="diagnostics"></div></div>
@@ -512,13 +587,15 @@
       </div>
       <div id="sim-note" class="build-note">Build an operator, then Simulate (Build dock ▸ 2, or Simulation ▸ Run). Inputs hold their values until you change them.</div>
       <div class="sim-cols">
-        <table id="sim-watch" class="watch-table">
-          <thead><tr><th>name : type</th><th>value</th></tr></thead>
-          <tbody id="sim-watch-body"></tbody>
-        </table>
+        <div class="sim-watch-wrap">
+          <table id="sim-watch" class="watch-table">
+            <thead><tr><th>name : type</th><th>value</th></tr></thead>
+            <tbody id="sim-watch-body"></tbody>
+          </table>
+        </div>
         <div class="sim-right">
           <div id="sim-monitor"></div>
-          <div id="step-trace"></div>
+          <div id="sim-wave"></div>
         </div>
       </div>
     </div>
@@ -531,6 +608,9 @@
       </div>
       <div id="tests-scenarios"></div>
       <div id="tests-results"></div>
+      <div id="tests-wave-head" class="wave-head"></div>
+      <div id="tests-wave" class="fixed" style="display:none"></div>
+      <div id="tests-coverage"></div>
     </div>
     <div class="dock-pane" id="dock-build" style="display:none">
       <div class="row" style="margin-bottom:6px">
@@ -566,6 +646,9 @@
         <span class="build-note" id="verify-status"></span>
       </div>
       <div id="verify-results"></div>
+      <div id="verify-wave-head" class="wave-head"></div>
+      <div id="verify-wave" class="fixed" style="display:none"></div>
+      <pre id="verify-text" style="display:none"></pre>
     </div>
   </div>
 </div>
@@ -899,7 +982,11 @@ const state = {
   // The live simulation: `session` is the server session ({root, signals,
   // monitored, cycle}), `last` the latest cycle ({cycle, values, modes,
   // violations}), `values` the sticky input texts of the watch table.
-  sim: { built: false, running: false, values: {}, session: null, last: null, violatedCycles: 0 },
+  // rows: every cycle of the session (the newest SIM_WAVE_ROWS) for the
+  // waveform; review: the index of the row shown on the diagram instead of
+  // the latest; marks: where runs stopped (breakpoint / violation).
+  sim: { built: false, running: false, values: {}, session: null, last: null, violatedCycles: 0,
+         rows: [], review: null, marks: [] },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
   pipeline: { built: false, generated: false, lustre: "", sig: "" },
@@ -1644,13 +1731,16 @@ function simRunN() {
   simAdvance(n, true);
 }
 
-function simRestart() { simStart(); }
+function simRestart() { simStart(state.sim.session ? state.sim.session.root : undefined); }
 
 async function simStop() {
   try { await fetch("/api/sim/stop", { method: "POST", body: "{}" }); } catch (_) {}
   state.sim.running = false;
   state.sim.session = null;
   state.sim.last = null;
+  state.sim.review = null; // the waveform keeps the stopped run for inspection
+  const latest = document.getElementById("sim-latest");
+  if (latest) latest.style.display = "none";
   document.getElementById("step-cycle").textContent = "0";
   document.getElementById("sim-monitor").innerHTML = "";
   // Reset the computed cells; keep the sticky input values for the next run.
@@ -1658,7 +1748,7 @@ async function simStop() {
   setMenuEnabled("mi-sim-step", false);
   setMenuEnabled("mi-sim-stop", false);
   setSimStatus("");
-  setSimNote("", "simulation stopped");
+  setSimNote("", "simulation stopped" + (state.sim.rows.length ? " — its waveform stays until the next run" : ""));
   renderSimChip();
   if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
 }
@@ -4055,30 +4145,98 @@ async function proveRun() {
   try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
   const host = document.getElementById("verify-results");
   document.getElementById("verify-status").textContent = "";
-  if (data.error) {
-    host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+  if (data.error || !data.kind2_found) {
+    host.innerHTML = data.error
+      ? '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>"
+      : '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
+    verifyCexClose();
     return;
   }
-  if (!data.kind2_found) {
-    host.innerHTML = '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
-    return;
-  }
+  state.proveData = data;
   let html = "";
   if (data.properties.length) {
-    html += "<table><thead><tr><th>property</th><th>status</th></tr></thead><tbody>";
-    for (const p of data.properties) {
+    html += "<table><thead><tr><th>property</th><th>status</th><th></th></tr></thead><tbody>";
+    data.properties.forEach((p, i) => {
       const ok = (p.status || "").toLowerCase() === "valid";
+      const cex = p.trace || p.waveform
+        ? '<button class="verify-cex-btn" data-i="' + i + '" title="Show the counterexample, cycle by cycle">〰 counterexample</button>'
+        : "";
       html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
-        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td></tr>";
-      if (p.waveform) {
-        html += '<tr><td colspan="2"><pre>' + escapeHTML(p.waveform) + "</pre></td></tr>";
-      }
-    }
+        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td><td>" + cex + "</td></tr>";
+    });
     html += "</tbody></table>";
   } else {
     html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
   }
   host.innerHTML = html;
+  host.querySelectorAll(".verify-cex-btn").forEach(b => b.onclick = () => verifyShowCex(Number(b.dataset.i)));
+  const first = data.properties.findIndex(p => p.trace || p.waveform);
+  if (first >= 0) verifyShowCex(first); else verifyCexClose();
+}
+
+/// A Kind 2 counterexample on the waveform viewer: every stream of the
+/// trace, the falsifying last cycle marked. The text table stays one click
+/// away, and Replay drives the live simulator with the counterexample's
+/// inputs so the failure can be stepped through on the diagram.
+function verifyShowCex(i) {
+  const data = state.proveData;
+  const p = data && data.properties[i];
+  if (!p) return;
+  const head = document.getElementById("verify-wave-head");
+  const host = document.getElementById("verify-wave");
+  const text = document.getElementById("verify-text");
+  const t = p.trace;
+  const falsified = "falsified at cycle " + (t ? t.cycles - 1 : "?");
+  head.innerHTML = "<b>" + escapeHTML(p.name) + "</b> · counterexample" +
+    (t ? ", " + t.cycles + (t.cycles === 1 ? " cycle" : " cycles") + ' — <span class="bad">✖ ' + falsified + "</span>" : "") +
+    (t ? ' <button id="verify-replay" title="Run the counterexample\'s inputs in the live simulator, then step through it on the diagram">▶ Replay in simulator</button>' : "") +
+    (t && p.waveform ? ' <button id="verify-text-btn" title="The counterexample as a text table">Text</button>' : "") +
+    ' <button onclick="verifyCexClose()" title="Close the counterexample">✕</button>';
+  text.textContent = p.waveform || "";
+  text.style.display = t ? "none" : "";
+  const tb = document.getElementById("verify-text-btn");
+  if (tb) tb.onclick = () => {
+    const showText = text.style.display === "none";
+    text.style.display = showText ? "" : "none";
+    host.style.display = showText ? "none" : "";
+    tb.textContent = showText ? "Waveform" : "Text";
+  };
+  if (!t) { host.style.display = "none"; return; }
+  const main = data.main;
+  const scopes = new Set(t.streams.map(st => st.scope));
+  const inMain = st => st.scope === main || scopes.size === 1;
+  // Main-operator streams first (inputs, then the rest), other scopes after.
+  const order = st => (inMain(st) ? 0 : 2) + (st.class === "input" ? 0 : 1);
+  const streams = t.streams.slice().sort((a, b) => order(a) - order(b));
+  const lanes = streams.map(st => ({
+    id: st.scope + "." + st.name,
+    name: inMain(st) ? st.name : st.scope + "." + st.name,
+    type: st.type, kind: st.class, values: st.values,
+  }));
+  const cycles = [];
+  for (let k = 0; k < t.cycles; k++) cycles.push(k);
+  host.style.display = "";
+  if (!state.verifyWave) state.verifyWave = waveMount(host, { fit: true });
+  const w = state.verifyWave;
+  w.fit = true;
+  waveSet(w, { cycles, lanes, markers: [{ at: t.cycles - 1, label: "✖ falsified", cls: "fail" }] });
+  wavePin(w, t.cycles - 1);
+  document.getElementById("verify-replay").onclick = () => {
+    const num = v => /^-?\d+\/\d+$/.test(v) ? String(waveNum(v)) : v;
+    const seq = cycles.map(k => {
+      const o = {};
+      t.streams.filter(inMain).forEach(st => { if (st.values[k] !== "") o[st.name] = num(st.values[k]); });
+      return o;
+    });
+    simReplay(main, seq, "the counterexample to " + p.name);
+  };
+  head.scrollIntoView({ block: "nearest" });
+}
+
+function verifyCexClose() {
+  document.getElementById("verify-wave-head").innerHTML = "";
+  document.getElementById("verify-wave").style.display = "none";
+  document.getElementById("verify-text").style.display = "none";
 }
 
 // --- Types: the SCADE-style types file --------------------------------------------
@@ -4296,8 +4454,9 @@ function fsmDraw() {
   }
   // While its operator is simulated, the current state is lit.
   const sim = state.sim;
-  const liveState = sim.session && sim.last && m.owner === sim.session.root
-    ? sim.last.values["__sm_state"] : null;
+  const shown = simShown();
+  const liveState = sim.session && shown && m.owner === sim.session.root
+    ? shown.values["__sm_state"] : null;
   for (const st of m.states) {
     const p = pos[st.name];
     const initial = st.name === m.initial_state;
@@ -4729,8 +4888,9 @@ function renderActTree(a) {
   // row when none of the conditions held).
   const sim = state.sim;
   let liveRow = null;
-  if (sim.session && sim.last && (a.owner || a.operator) === sim.session.root) {
-    const flags = (a.branches || []).map((_, i) => sim.last.values["__act_" + a.name + "_b" + (i + 1)]);
+  const shown = simShown();
+  if (sim.session && shown && (a.owner || a.operator) === sim.session.root) {
+    const flags = (a.branches || []).map((_, i) => shown.values["__act_" + a.name + "_b" + (i + 1)]);
     if (!flags.some(f => f === undefined)) liveRow = flags.indexOf("true") >= 0 ? flags.indexOf("true") : flags.length;
   }
   layout.forEach((L, i) => {
@@ -5407,9 +5567,10 @@ function renderContractChip(nodeName) {
   // While this operator is simulated, the chip carries the monitor's verdict
   // for the latest cycle: the active mode(s), and any violated clause.
   const s = state.sim;
-  if (n.contract && s.session && s.session.root === nodeName && s.session.monitored && s.last) {
-    const viol = s.last.violations;
-    chip.textContent += " · " + (s.last.modes.length ? "mode " + s.last.modes.join(", ") : "no mode") +
+  const shown = simShown();
+  if (n.contract && s.session && s.session.root === nodeName && s.session.monitored && shown) {
+    const viol = shown.violations;
+    chip.textContent += " · " + (shown.modes.length ? "mode " + shown.modes.join(", ") : "no mode") +
       (viol.length ? " · ✖ " + viol.join(", ") : " · ✓");
     chip.classList.add(viol.length ? "bad" : "live");
   }
@@ -5631,6 +5792,455 @@ function buildWatchTable() {
   e.outputs.forEach(p => row(p.name, p.type, " (out)", false));
 }
 
+// --- Waveform viewer -------------------------------------------------------------
+//
+// Signals as lanes over cycles, SCADE-simulator / logic-analyzer style:
+// Booleans as digital traces, numbers as stepped analog traces (click the
+// name for a bus view), enums, modes and anything else as bus segments, and
+// the contract check as a status lane. A lane may carry a reference trace (a
+// golden): it is drawn dashed underneath, every differing cycle is banded
+// red, and callers mark the first one. The name column is the readout —
+// every lane's value at the hovered cycle, else the pinned one, else the
+// last. Only the cycles around the viewport are drawn, so long traces stay
+// cheap; the Table button shows the same data as rows.
+//
+// model = { cycles: [label…], lanes: [{name, id?, type?, kind?, check?,
+//           values: [text…], ref?: [text…]}], markers: [{at, label, cls}],
+//           valLabel?, refLabel? }
+
+const WAVE_LANE_H = { digital: 20, analog: 40, bus: 20, check: 18 };
+const WAVE_TABLE_ROWS = 2000;
+
+function escAttr(s) { return escapeHTML(String(s)).replace(/"/g, "&quot;"); }
+
+/// A value as a number: plain numerals and Kind 2's rationals (`3/4`).
+function waveNum(v) {
+  if (v == null || v === "") return NaN;
+  const m = /^(-?\d+)\/(\d+)$/.exec(v);
+  return m ? Number(m[1]) / Number(m[2]) : Number(v);
+}
+
+/// How a lane draws: from its type, else guessed from its values.
+function waveStyleOf(lane) {
+  if (lane.check) return "check";
+  const t = String(lane.type || "").toLowerCase();
+  if (t === "bool") return "digital";
+  if (/^(u?int(8|16|32|64)?|float(32|64)?|real)$/.test(t) || t.includes("subrange")) return "analog";
+  if (t) return "bus";
+  const vs = lane.values.filter(v => v != null && v !== "");
+  if (vs.length && vs.every(v => v === "true" || v === "false")) return "digital";
+  if (vs.length && vs.every(v => !isNaN(waveNum(v)))) return "analog";
+  return "bus";
+}
+
+function waveMount(host, opts = {}) {
+  host.classList.add("wave");
+  host.innerHTML =
+    '<div class="wave-bar">' +
+      '<button data-act="out" title="Zoom out (Ctrl+wheel)">−</button>' +
+      '<button data-act="in" title="Zoom in (Ctrl+wheel)">+</button>' +
+      '<button data-act="fit" title="Fit every cycle in view">Fit</button>' +
+      '<span class="wave-info"></span>' +
+      '<label class="wave-int"><input type="checkbox" data-act="int"> internals</label>' +
+      '<button data-act="unhide" style="display:none"></button>' +
+      '<span class="wave-legend"></span>' +
+      '<span class="wave-extra"></span>' +
+      '<button data-act="table" class="wave-tbtn" title="The same data as a table">Table</button>' +
+    "</div>" +
+    '<div class="wave-grid">' +
+      '<div class="wave-corner"></div>' +
+      '<div class="wave-axis"><svg></svg></div>' +
+      '<div class="wave-names"></div>' +
+      '<div class="wave-plot" tabindex="0"><svg></svg></div>' +
+    "</div>" +
+    '<div class="wave-table" style="display:none"></div>';
+  const q = s => host.querySelector(s);
+  const w = {
+    host, opts, model: null, px: opts.px || 24, fit: !!opts.fit, atEnd: true,
+    hidden: new Set(), styleOver: {}, internals: false, pinned: null, hover: null,
+    drawn: null, lanes: [], H: 0, tableView: false,
+    bar: q(".wave-bar"), grid: q(".wave-grid"), corner: q(".wave-corner"),
+    axis: q(".wave-axis"), names: q(".wave-names"), plot: q(".wave-plot"),
+    table: q(".wave-table"), extra: q(".wave-extra"),
+  };
+  w.bar.addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-act]");
+    if (!b) return;
+    const a = b.dataset.act;
+    if (a === "in") waveZoom(w, 1.5);
+    else if (a === "out") waveZoom(w, 1 / 1.5);
+    else if (a === "fit") { w.fit = true; waveRender(w); }
+    else if (a === "unhide") { w.hidden.clear(); waveRender(w); }
+    else if (a === "table") { w.tableView = !w.tableView; waveRender(w); }
+  });
+  q('input[data-act="int"]').addEventListener("change", ev => { w.internals = ev.target.checked; waveRender(w); });
+  w.plot.addEventListener("scroll", () => {
+    w.axis.scrollLeft = w.plot.scrollLeft;
+    w.names.scrollTop = w.plot.scrollTop;
+    w.atEnd = w.plot.scrollLeft + w.plot.clientWidth >= w.plot.scrollWidth - 4;
+    const [a, b] = waveVisible(w);
+    if (w.drawn && (a < w.drawn[0] || b > w.drawn[1])) waveDraw(w);
+  });
+  w.plot.addEventListener("pointermove", ev => {
+    const i = waveIndexAt(w, ev);
+    if (i !== w.hover) { w.hover = i; waveCursor(w); }
+  });
+  w.plot.addEventListener("pointerleave", () => { w.hover = null; waveCursor(w); });
+  w.plot.addEventListener("click", ev => {
+    const i = waveIndexAt(w, ev);
+    if (i != null) { w.plot.focus({ preventScroll: true }); wavePin(w, i); }
+  });
+  // ←/→ walk the pinned cycle, Home/End jump — reviewing a run cycle by cycle.
+  w.plot.addEventListener("keydown", ev => {
+    if (!w.model || !w.model.cycles.length) return;
+    const n = w.model.cycles.length;
+    const cur = w.pinned != null ? w.pinned : n - 1;
+    const to = { ArrowLeft: cur - 1, ArrowRight: cur + 1, Home: 0, End: n - 1 }[ev.key];
+    if (to === undefined) return;
+    ev.preventDefault();
+    wavePin(w, Math.max(0, Math.min(n - 1, to)));
+  });
+  w.plot.addEventListener("wheel", ev => {
+    if (!ev.ctrlKey) return;
+    ev.preventDefault();
+    waveZoom(w, ev.deltaY < 0 ? 1.25 : 0.8, ev);
+  }, { passive: false });
+  w.names.addEventListener("wheel", ev => { w.plot.scrollTop += ev.deltaY; ev.preventDefault(); }, { passive: false });
+  w.names.addEventListener("click", ev => {
+    const row = ev.target.closest(".wn");
+    if (!row) return;
+    const lane = w.lanes.find(l => l.key === row.dataset.key);
+    if (!lane) return;
+    if (ev.target.closest(".wn-hide")) { w.hidden.add(lane.key); waveRender(w); return; }
+    if (lane.baseStyle === "analog") {
+      w.styleOver[lane.key] = lane.style === "analog" ? "bus" : "analog";
+      waveRender(w);
+    }
+  });
+  if (window.ResizeObserver) {
+    let pending = false;
+    new ResizeObserver(() => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        if (!w.model || w.tableView) return;
+        if (w.fit) waveRender(w); else waveDraw(w);
+      });
+    }).observe(w.plot);
+  }
+  return w;
+}
+
+/// Show a model. `follow` views (a running simulation) stay scrolled to the
+/// newest cycle unless the user has scrolled away from it.
+function waveSet(w, model) {
+  const follow = w.opts.follow && w.atEnd;
+  w.model = model;
+  if (w.pinned != null && w.pinned >= model.cycles.length) w.pinned = null;
+  waveRender(w);
+  if (follow && !w.tableView) w.plot.scrollLeft = w.plot.scrollWidth;
+}
+
+function waveRender(w) {
+  const m = w.model;
+  if (!m) return;
+  const n = m.cycles.length;
+  w.bar.querySelector(".wave-tbtn").textContent = w.tableView ? "Waveform" : "Table";
+  w.grid.style.display = w.tableView ? "none" : "";
+  w.table.style.display = w.tableView ? "" : "none";
+  w.host.querySelector(".wave-int").style.display = m.lanes.some(l => l.name.startsWith("__")) ? "" : "none";
+  w.lanes = m.lanes
+    .map(l => Object.assign({}, l, { key: l.id || l.name }))
+    .filter(l => !w.hidden.has(l.key) && (w.internals || !l.name.startsWith("__")))
+    .map(l => {
+      const baseStyle = waveStyleOf(l);
+      return Object.assign(l, { baseStyle, style: w.styleOver[l.key] || baseStyle });
+    });
+  const unhide = w.bar.querySelector('[data-act="unhide"]');
+  unhide.style.display = w.hidden.size ? "" : "none";
+  unhide.textContent = "show " + w.hidden.size + " hidden";
+  const hasRef = w.lanes.some(l => l.ref);
+  w.bar.querySelector(".wave-legend").innerHTML = hasRef
+    ? '<span class="wl wl-val"></span>' + escapeHTML(m.valLabel || "actual") +
+      '<span class="wl wl-ref"></span>' + escapeHTML(m.refLabel || "reference") +
+      '<span class="wl wl-diff"></span>differs'
+    : "";
+  w.bar.querySelector(".wave-info").textContent = n + (n === 1 ? " cycle" : " cycles");
+  if (w.tableView) { waveTable(w); return; }
+  if (w.fit && w.plot.clientWidth > 0) {
+    w.px = n ? Math.max(2, Math.min(64, (w.plot.clientWidth - 14) / n)) : 24;
+    w.fit = false;
+  }
+  // Lane geometry, analog ranges, and the name / readout column.
+  let y = 0;
+  let names = "";
+  for (const l of w.lanes) {
+    l.y = y;
+    l.h = WAVE_LANE_H[l.style];
+    y += l.h;
+    if (l.style === "analog") {
+      const nums = l.values.concat(l.ref || []).map(waveNum).filter(v => !isNaN(v));
+      l.min = nums.length ? Math.min(...nums) : 0;
+      l.max = nums.length ? Math.max(...nums) : 0;
+    }
+    const tip = l.name + (l.type ? " : " + l.type : "") + (l.kind ? " (" + l.kind + ")" : "") +
+      (l.baseStyle === "analog" ? " — click to switch between analog and bus views" : "");
+    names += '<div class="wn ' + l.style + (l.kind === "input" ? " in" : "") + '" data-key="' + escAttr(l.key) +
+      '" style="height:' + l.h + 'px" title="' + escAttr(tip) + '">' +
+      '<span class="wn-name">' + escapeHTML(l.name) + "</span>" +
+      '<span class="wn-val"></span><span class="wn-hide" title="Hide this lane">×</span>' +
+      (l.style === "analog" ? '<span class="wn-range">' + escapeHTML(l.min + " … " + l.max) + "</span>" : "") +
+      "</div>";
+  }
+  w.H = Math.max(y, 20);
+  w.names.innerHTML = names + '<div style="height:20px"></div>';
+  w.valEls = [...w.names.querySelectorAll(".wn-val")];
+  const W = n * w.px + 14;
+  const svg = w.plot.querySelector("svg");
+  svg.setAttribute("width", W);
+  svg.setAttribute("height", w.H);
+  const ax = w.axis.querySelector("svg");
+  ax.setAttribute("width", W + 320); // room for a marker flag on the last cycle
+  ax.setAttribute("height", 20);
+  waveDraw(w);
+}
+
+/// Cycle range [a, b) in view, plus a viewport's margin either side.
+function waveVisible(w) {
+  const n = w.model.cycles.length;
+  const vis = w.plot.clientWidth || 900;
+  const left = w.plot.scrollLeft;
+  return [Math.max(0, Math.floor((left - vis) / w.px)), Math.min(n, Math.ceil((left + 2 * vis) / w.px))];
+}
+
+function waveTickStep(px) {
+  for (const s of [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000, 50000]) {
+    if (s * px >= 34) return s;
+  }
+  return 100000;
+}
+
+/// Runs of equal `key(i)` over [a, b), as [start, end) pairs.
+function waveRuns(a, b, key) {
+  const runs = [];
+  let s = a;
+  for (let i = a + 1; i <= b; i++) {
+    if (i === b || key(i) !== key(s)) { runs.push([s, i]); s = i; }
+  }
+  return runs;
+}
+
+/// A value's text cut to fit `width` pixels of 10px monospace, or "".
+function waveFit(text, width) {
+  const room = Math.floor((width - 6) / 6.1);
+  if (room < 1) return "";
+  return text.length <= room ? text : room < 2 ? "" : text.slice(0, room - 1) + "…";
+}
+
+function waveDraw(w) {
+  const m = w.model;
+  const px = w.px, n = m.cycles.length, H = w.H;
+  const [c0, c1] = waveVisible(w);
+  w.drawn = [c0, c1];
+  const X = i => +(i * px).toFixed(2);
+  let g = "";
+  const step = waveTickStep(px);
+  let axis = "";
+  for (let i = Math.ceil(c0 / step) * step; i < c1; i += step) {
+    g += '<line class="wg" x1="' + X(i) + '" x2="' + X(i) + '" y1="0" y2="' + H + '"/>';
+    axis += '<line class="wat" x1="' + X(i) + '" x2="' + X(i) + '" y1="14" y2="20"/>' +
+      '<text x="' + (X(i) + 3) + '" y="12">' + escapeHTML(String(m.cycles[i])) + "</text>";
+  }
+  for (const l of w.lanes) {
+    const top = l.y + 4, bot = l.y + l.h - 4, mid = l.y + l.h / 2;
+    g += '<line class="ws" x1="0" x2="' + X(n) + '" y1="' + (l.y + l.h - 0.5) + '" y2="' + (l.y + l.h - 0.5) + '"/>';
+    const v = i => l.values[i] == null ? "" : l.values[i];
+    if (l.ref) {
+      const r = i => l.ref[i] == null ? "" : l.ref[i];
+      for (const [a, b] of waveRuns(c0, c1, i => v(i) !== r(i))) {
+        if (v(a) === r(a)) continue;
+        g += '<rect class="wdiff" x="' + X(a) + '" y="' + l.y + '" width="' + X(b - a) + '" height="' + (l.h - 1) + '"/>';
+        // The expected value, where a cycle is wide enough to say it.
+        if (l.style === "analog") {
+          for (let i = a; i < b; i++) {
+            const t = "≠" + (r(i) || "—");
+            if (waveFit(t, px) === t) g += '<text class="wdt" x="' + (X(i) + 2) + '" y="' + (l.y + l.h - 3) + '">' + escapeHTML(t) + "</text>";
+          }
+        }
+      }
+    }
+    if (l.style === "digital" || l.style === "analog") {
+      let yOf;
+      if (l.style === "digital") {
+        yOf = s => s === "true" ? top : s === "false" ? bot : null;
+      } else {
+        const span = l.max - l.min;
+        yOf = s => {
+          const x = waveNum(s);
+          if (isNaN(x)) return null;
+          return span ? +(bot - (x - l.min) / span * (bot - top)).toFixed(2) : mid;
+        };
+      }
+      const trace = get => {
+        let d = "", open = false;
+        for (const [a, b] of waveRuns(c0, c1, get)) {
+          const yy = yOf(get(a));
+          if (yy == null) { open = false; continue; }
+          d += (open ? "V" + yy : "M" + X(a) + " " + yy) + "H" + X(b);
+          open = true;
+        }
+        return d;
+      };
+      if (l.ref) g += '<path class="wref" d="' + trace(i => l.ref[i] == null ? "" : l.ref[i]) + '"/>';
+      for (const [a, b] of waveRuns(c0, c1, v)) {
+        const s = v(a);
+        if (l.style === "digital" && s === "true") {
+          g += '<rect class="whi" x="' + X(a) + '" y="' + top + '" width="' + X(b - a) + '" height="' + (bot - top) + '"/>';
+        } else if (s !== "" && yOf(s) == null) {
+          g += '<rect class="wx" x="' + X(a) + '" y="' + top + '" width="' + X(b - a) + '" height="' + (bot - top) + '"/>';
+        } else if (l.style === "analog" && s !== "") {
+          const t = waveFit(s, (b - a) * px);
+          if (t && t === s) {
+            const yy = yOf(s);
+            const ty = yy - 3 < top + 6 ? yy + 11 : yy - 3;
+            g += '<text class="wal" x="' + (X(a) + 3) + '" y="' + ty + '">' + escapeHTML(t) + "</text>";
+          }
+        }
+      }
+      g += '<path class="wsig" d="' + trace(v) + '"/>';
+    } else if (l.style === "bus") {
+      const key = l.ref ? (i => v(i) + "\u0000" + (l.ref[i] == null ? "" : l.ref[i])) : v;
+      for (const [a, b] of waveRuns(c0, c1, key)) {
+        const s = v(a), x0 = X(a), x1 = X(b), e = Math.min(3, (x1 - x0) / 2);
+        if (s === "") {
+          g += '<line class="wnone" x1="' + x0 + '" x2="' + x1 + '" y1="' + mid + '" y2="' + mid + '"/>';
+          continue;
+        }
+        g += '<polygon class="wbus" points="' + x0 + "," + mid + " " + (x0 + e) + "," + top + " " + (x1 - e) + "," + top +
+          " " + x1 + "," + mid + " " + (x1 - e) + "," + bot + " " + (x0 + e) + "," + bot + '"/>';
+        const t = waveFit(s, x1 - x0);
+        if (t) g += '<text class="wbt" x="' + ((x0 + x1) / 2) + '" y="' + (mid + 3.5) + '">' + escapeHTML(t) + "</text>";
+      }
+    } else {
+      // The contract check: red where a clause is violated, a quiet line elsewhere.
+      for (const [a, b] of waveRuns(c0, c1, i => v(i) !== "")) {
+        if (v(a) === "") {
+          g += '<line class="wok" x1="' + X(a) + '" x2="' + X(b) + '" y1="' + mid + '" y2="' + mid + '"/>';
+          continue;
+        }
+        g += '<rect class="wviol" x="' + X(a) + '" y="' + (l.y + 3) + '" width="' + X(b - a) + '" height="' + (l.h - 6) + '"/>';
+        if ((b - a) * px >= 12) g += '<text class="wvt" x="' + (X(a) + X(b)) / 2 + '" y="' + (mid + 3.5) + '">✖</text>';
+      }
+    }
+  }
+  for (const mk of m.markers || []) {
+    if (mk.at < c0 || mk.at >= c1) continue;
+    const x = X(mk.at) + px / 2;
+    g += '<line class="wm wm-' + mk.cls + '" x1="' + x + '" x2="' + x + '" y1="0" y2="' + H + '"/>';
+    axis += '<text class="wmf wm-' + mk.cls + '" x="' + (x + 3) + '" y="12">' + escapeHTML(mk.label) + "</text>";
+  }
+  g += '<rect class="wpin" y="0" height="' + H + '" width="' + px + '" style="display:none"/>' +
+    '<line class="whover" y1="0" y2="' + H + '" style="display:none"/>';
+  w.plot.querySelector("svg").innerHTML = g;
+  w.axis.querySelector("svg").innerHTML = axis;
+  waveCursor(w);
+}
+
+function waveIndexAt(w, ev) {
+  if (!w.model) return null;
+  const r = w.plot.querySelector("svg").getBoundingClientRect();
+  const i = Math.floor((ev.clientX - r.left) / w.px);
+  return i >= 0 && i < w.model.cycles.length ? i : null;
+}
+
+/// Move the hover hairline and pinned band; refresh the readout column.
+function waveCursor(w) {
+  const m = w.model;
+  if (!m || w.tableView) return;
+  const svg = w.plot.querySelector("svg");
+  const pin = svg.querySelector(".wpin"), hov = svg.querySelector(".whover");
+  if (pin) {
+    pin.style.display = w.pinned == null ? "none" : "";
+    if (w.pinned != null) pin.setAttribute("x", w.pinned * w.px);
+  }
+  if (hov) {
+    hov.style.display = w.hover == null ? "none" : "";
+    if (w.hover != null) { const x = w.hover * w.px + w.px / 2; hov.setAttribute("x1", x); hov.setAttribute("x2", x); }
+  }
+  const n = m.cycles.length;
+  const i = w.hover != null ? w.hover : w.pinned != null ? w.pinned : n - 1;
+  w.corner.textContent = n ? "value at cycle " + m.cycles[i] + (w.hover == null && w.pinned == null ? " (last)" : "") : "no cycles yet";
+  w.lanes.forEach((l, k) => {
+    const el = w.valEls[k];
+    if (!el) return;
+    const s = i >= 0 && l.values[i] != null ? l.values[i] : "";
+    const r = l.ref ? (l.ref[i] == null ? "" : l.ref[i]) : null;
+    let text = l.style === "check" ? (s ? "✖ " + s : n ? "✓" : "") : s === "" ? "—" : s;
+    el.className = "wn-val" + (l.style === "check" && s ? " bad" : "");
+    el.title = "";
+    if (r != null && r !== s) {
+      el.className = "wn-val bad";
+      text = "✖ " + (s === "" ? "—" : s);
+      el.title = (m.refLabel || "reference") + ": " + (r === "" ? "—" : r);
+    }
+    el.textContent = text;
+  });
+}
+
+function wavePin(w, i) {
+  w.pinned = i;
+  waveCursor(w);
+  const x = i * w.px;
+  if (x < w.plot.scrollLeft || x + w.px > w.plot.scrollLeft + w.plot.clientWidth) {
+    w.plot.scrollLeft = Math.max(0, x - w.plot.clientWidth / 2);
+  }
+  if (w.opts.onPick) w.opts.onPick(i);
+}
+
+/// Zoom about the pointer (or the view's centre), keeping that cycle put.
+function waveZoom(w, f, ev) {
+  if (!w.model) return;
+  const r = w.plot.getBoundingClientRect();
+  const off = ev ? ev.clientX - r.left : w.plot.clientWidth / 2;
+  const at = (w.plot.scrollLeft + off) / w.px;
+  w.px = Math.max(1, Math.min(120, w.px * f));
+  w.fit = false;
+  waveRender(w);
+  w.plot.scrollLeft = Math.max(0, at * w.px - off);
+}
+
+/// The same lanes as a table (cycles as rows) — readable without the chart.
+function waveTable(w) {
+  const m = w.model, n = m.cycles.length;
+  const from = w.opts.follow ? Math.max(0, n - WAVE_TABLE_ROWS) : 0;
+  const to = Math.min(n, from + WAVE_TABLE_ROWS);
+  let h = "<table><thead><tr><th>cycle</th>" +
+    w.lanes.map(l => '<th title="' + escAttr(l.type || "") + '">' + escapeHTML(l.name) + "</th>").join("") +
+    "</tr></thead><tbody>";
+  const marks = new Map((m.markers || []).map(mk => [mk.at, mk.label]));
+  for (let i = from; i < to; i++) {
+    h += "<tr" + (marks.has(i) ? ' class="wmark" title="' + escAttr(marks.get(i)) + '"' : "") + "><td>" +
+      escapeHTML(String(m.cycles[i])) + (marks.has(i) ? " ◂" : "") + "</td>";
+    for (const l of w.lanes) {
+      const s = l.values[i] == null ? "" : l.values[i];
+      const r = l.ref ? (l.ref[i] == null ? "" : l.ref[i]) : null;
+      if (r != null && r !== s) {
+        h += '<td class="tdiff" title="' + escAttr((m.refLabel || "reference") + ": " + r) + '">' + escapeHTML(s || "—") + " ✖</td>";
+      } else if (l.style === "check") {
+        h += s ? '<td class="tdiff">✖ ' + escapeHTML(s) + "</td>" : "<td>✓</td>";
+      } else {
+        h += "<td>" + escapeHTML(s || "—") + "</td>";
+      }
+    }
+    h += "</tr>";
+  }
+  h += "</tbody></table>";
+  if (to - from < n) h += '<p class="build-note">showing cycles ' + m.cycles[from] + "–" + m.cycles[to - 1] + " of " + n + "</p>";
+  w.table.innerHTML = h;
+  if (w.opts.follow) w.table.scrollTop = w.table.scrollHeight;
+}
+
 // --- Live simulation session -------------------------------------------------
 //
 // One simulator lives on the server for the whole session: Step runs one
@@ -5640,7 +6250,7 @@ function buildWatchTable() {
 // open: values on the wires and ports, the active state / branch on
 // state-machine and activation blocks, the contract's mode and verdict.
 
-const SIM_TRACE_ROWS = 500; // trace rows kept on screen (the newest)
+const SIM_WAVE_ROWS = 10000; // session cycles kept for the waveform (the newest)
 
 /// The watch-table validation kind for a type as the server spells it.
 function kindOfTypeStr(t) {
@@ -5659,18 +6269,31 @@ function setSimNote(kind, msg) {
   el.textContent = msg || "";
 }
 
-/// name → value text for the latest cycle, when the diagram shows the
-/// simulated operator and live values are on; otherwise null.
-function liveValues() {
+/// The cycle the diagram shows: the one picked on the waveform while
+/// reviewing, else the latest — {cycle, values: {name: text}, modes,
+/// violations, review}, or null before the first cycle.
+function simShown() {
   const s = state.sim;
-  if (!s.session || !s.last || !state.diagramData || state.diagramData.node !== s.session.root) return null;
-  const on = document.getElementById("sim-live");
-  return on && !on.checked ? null : s.last.values;
+  const row = s.review != null ? s.rows[s.review] : null;
+  if (!row) return s.last;
+  const values = {};
+  simSignals().forEach((g, i) => values[g.name] = row.values[i]);
+  return { cycle: row.cycle, values, modes: row.modes || [], violations: row.violations || [], review: true };
 }
 
-/// Start (or restart at cycle 0) a session on the build target / root.
-async function simStart() {
-  const node = state.buildTarget || state.inspect?.project?.main;
+/// name → value text for the shown cycle, when the diagram shows the
+/// simulated operator and live values are on; otherwise null.
+function liveValues() {
+  const s = state.sim, shown = simShown();
+  if (!s.session || !shown || !state.diagramData || state.diagramData.node !== s.session.root) return null;
+  const on = document.getElementById("sim-live");
+  return on && !on.checked ? null : shown.values;
+}
+
+/// Start (or restart at cycle 0) a session on `node`, else the build
+/// target / root.
+async function simStart(node) {
+  node = node || state.buildTarget || state.inspect?.project?.main;
   showDock("simulation");
   let r, d;
   try {
@@ -5682,9 +6305,9 @@ async function simStart() {
     setSimStatus("simulation not started");
     return false;
   }
-  Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0 });
+  Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0, rows: [], review: null, marks: [] });
   simBuildWatchTable();
-  simBuildTraceHeader();
+  simWaveUpdate();
   document.getElementById("step-cycle").textContent = "0";
   document.getElementById("sim-monitor").innerHTML = d.monitored
     ? '<span class="build-note">contract monitor on — its mode and verdict appear after the first cycle</span>' : "";
@@ -5717,7 +6340,7 @@ async function simAdvance(count, withBreak) {
   if (r.status === 409) {
     const why = d.stale ? "the model changed, so the simulation restarted at cycle 0"
       : "the session had ended, so it restarted at cycle 0";
-    if (await simStart()) setSimNote("warn", why + " — press Step / Run again");
+    if (await simStart(state.sim.session && state.sim.session.root)) setSimNote("warn", why + " — press Step / Run again");
     return;
   }
   if (!r.ok) { setSimNote("err", d.error || "the step failed"); return; }
@@ -5726,31 +6349,109 @@ async function simAdvance(count, withBreak) {
 
 /// Fold a step / run response into the session view.
 function simTake(d, req) {
-  const sigs = simSignals();
+  const s = state.sim, sigs = simSignals();
   const rows = d.rows || [];
-  rows.slice(-SIM_TRACE_ROWS).forEach(simAppendTraceRow);
-  state.sim.violatedCycles += rows.filter(r => r.violations.length).length;
+  s.rows.push(...rows);
+  if (s.rows.length > SIM_WAVE_ROWS) s.rows.splice(0, s.rows.length - SIM_WAVE_ROWS);
+  s.violatedCycles += rows.filter(r => r.violations.length).length;
   if (rows.length) {
     const last = rows[rows.length - 1];
     const values = {};
-    sigs.forEach((s, i) => values[s.name] = last.values[i]);
-    state.sim.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [] };
+    sigs.forEach((g, i) => values[g.name] = last.values[i]);
+    s.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [] };
   }
-  state.sim.session.cycle = d.cycle;
+  s.session.cycle = d.cycle;
+  s.review = null; // stepping returns the diagram to the latest cycle
   document.getElementById("step-cycle").textContent = d.cycle;
+  const last = s.last;
+  if (d.stopped === "break") {
+    setSimNote("warn", "⏸ stopped after cycle " + last.cycle + ": " + req.break + " holds");
+    s.marks.push({ cycle: last.cycle, label: "⏸ " + req.break, cls: "break" });
+  } else if (d.stopped === "violation") {
+    setSimNote("err", "⏸ stopped after cycle " + last.cycle + ": violated " + last.violations.join(", "));
+    s.marks.push({ cycle: last.cycle, label: "✖ " + last.violations.join(", "), cls: "fail" });
+  } else if (d.stopped === "error") setSimNote("err", d.error || "evaluation error");
+  else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
+  if (s.marks.length > 50) s.marks.shift();
+  setSimStatus("SIMULATING " + s.session.root + " — cycle " + d.cycle);
+  if (s.wave) s.wave.pinned = null;
+  simWaveUpdate();
+  simShowCycle();
+}
+
+/// Redraw everything that shows the simulated cycle: the watch values, the
+/// monitor line, the chips, the diagram, and an open state chart / decision
+/// tree of the simulated operator.
+function simShowCycle() {
   simUpdateWatch();
   simUpdateMonitor();
-  const last = state.sim.last;
-  if (d.stopped === "break") setSimNote("warn", "⏸ stopped after cycle " + last.cycle + ": " + req.break + " holds");
-  else if (d.stopped === "violation") setSimNote("err", "⏸ stopped after cycle " + last.cycle + ": violated " + last.violations.join(", "));
-  else if (d.stopped === "error") setSimNote("err", d.error || "evaluation error");
-  else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
-  setSimStatus("SIMULATING " + state.sim.session.root + " — cycle " + d.cycle);
   renderSimChip();
   if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
-  // An open state chart / decision tree of the simulated operator follows too.
   if (document.getElementById("dlg-fsm").classList.contains("active") && fsmChart) fsmDraw();
   if (document.getElementById("dlg-act").classList.contains("active")) actPreview();
+}
+
+/// The session's cycles as waveform lanes: every signal (generated
+/// internals behind the "internals" toggle), then the contract's mode and
+/// check lanes; run stops are marked.
+function simWaveModel() {
+  const s = state.sim, rows = s.rows;
+  const lanes = simSignals().map((g, i) => ({ name: g.name, type: g.type, kind: g.kind, values: rows.map(r => r.values[i]) }));
+  if (s.session && s.session.monitored) {
+    lanes.push({ id: "#mode", name: "mode", kind: "contract", values: rows.map(r => (r.modes || []).join(", ")) });
+    lanes.push({ id: "#check", name: "contract", kind: "contract", check: true, values: rows.map(r => (r.violations || []).join(", ")) });
+  }
+  const base = rows.length ? rows[0].cycle : 0;
+  const markers = s.marks.filter(mk => mk.cycle >= base).map(mk => ({ at: mk.cycle - base, label: mk.label, cls: mk.cls }));
+  return { cycles: rows.map(r => r.cycle), lanes, markers };
+}
+
+function simWaveUpdate() {
+  const s = state.sim;
+  if (!s.wave) {
+    s.wave = waveMount(document.getElementById("sim-wave"), { follow: true, px: 26, onPick: simPick });
+    s.wave.extra.innerHTML = '<button id="sim-latest" style="display:none" onclick="simPick(-1)" ' +
+      'title="Show the latest cycle on the diagram again">▶ latest</button>';
+  }
+  if (!s.session && !s.rows.length) return;
+  waveSet(s.wave, simWaveModel());
+  document.getElementById("sim-latest").style.display = s.review != null ? "" : "none";
+}
+
+/// A cycle picked on the waveform (click, or ←/→ with the plot focused) is
+/// shown on the diagram, the charts and the watch table; the latest cycle
+/// (or -1) returns to following the run.
+function simPick(i) {
+  const s = state.sim;
+  if (!s.rows.length || !s.session) return;
+  s.review = i < 0 || i >= s.rows.length - 1 ? null : i;
+  if (i < 0 && s.wave) { s.wave.pinned = null; waveCursor(s.wave); }
+  document.getElementById("sim-latest").style.display = s.review != null ? "" : "none";
+  simShowCycle();
+}
+
+/// Replay per-cycle inputs (a test scenario, a counterexample) in a fresh
+/// session on `node`; the last step's inputs stay in the watch table, so
+/// Step / Run carry on from where the replay ends.
+async function simReplay(node, sequence, label) {
+  if (!sequence.length) { setSimNote("err", label + " has no cycles to replay"); return; }
+  if (!(await simStart(node))) return;
+  const ins = simSignals().filter(g => g.kind === "input");
+  const missing = ins.filter(g => sequence[0][g.name] == null).map(g => g.name);
+  if (missing.length) { setSimNote("err", label + " has no values for " + missing.join(", ")); return; }
+  const req = { inputs: {}, sequence, stop_on_violation: false };
+  let r, d;
+  try {
+    r = await fetch("/api/sim/step", { method: "POST", body: JSON.stringify(req) });
+    d = await r.json();
+  } catch (e) { setSimNote("err", "the replay request failed"); return; }
+  if (!r.ok) { setSimNote("err", d.error || "the replay failed"); return; }
+  const lastIn = sequence[sequence.length - 1];
+  ins.forEach(g => state.sim.values[g.name] = String(lastIn[g.name]));
+  simBuildWatchTable();
+  if (!state.diagramData || state.diagramData.node !== node) await loadDiagram(node, true);
+  simTake(d, req);
+  setSimNote("ok", "replayed " + label + " — " + d.rows.length + " cycles; Step / Run continue from here");
 }
 
 /// The watch table for a session: every signal the session reports, inputs
@@ -5795,7 +6496,8 @@ function simBuildWatchTable() {
 }
 
 function simUpdateWatch() {
-  const v = state.sim.last ? state.sim.last.values : {};
+  const shown = simShown();
+  const v = shown ? shown.values : {};
   for (const s of simSignals()) {
     const c = document.getElementById("watch-out-" + s.name);
     if (c) c.textContent = v[s.name] != null ? v[s.name] : "—";
@@ -5804,38 +6506,14 @@ function simUpdateWatch() {
 
 /// The contract monitor's reading of the latest cycle.
 function simUpdateMonitor() {
-  const s = state.sim;
-  if (!s.session.monitored || !s.last) return;
-  const v = s.last.violations;
-  document.getElementById("sim-monitor").innerHTML = "<b>contract</b> — mode: " +
-    escapeHTML(s.last.modes.join(", ") || "none") + " · this cycle: " +
+  const s = state.sim, shown = simShown();
+  if (!s.session || !s.session.monitored || !shown) return;
+  const v = shown.violations;
+  document.getElementById("sim-monitor").innerHTML = "<b>contract</b>" +
+    (shown.review ? " at cycle " + shown.cycle : "") + " — mode: " +
+    escapeHTML(shown.modes.join(", ") || "none") + " · this cycle: " +
     (v.length ? '<span class="err">✖ violated ' + escapeHTML(v.join(", ")) + "</span>" : "✓ holds") +
     ' · <span class="build-note">cycles with a violation so far: ' + s.violatedCycles + "</span>";
-}
-
-function simBuildTraceHeader() {
-  const sigs = simSignals();
-  document.getElementById("step-trace").innerHTML = "<table><thead><tr><th>cycle</th>" +
-    sigs.map(s => "<th>" + escapeHTML(s.name) + "</th>").join("") +
-    (state.sim.session.monitored ? "<th>mode</th><th>violations</th>" : "") +
-    '</tr></thead><tbody id="sim-trace-body"></tbody></table>';
-}
-
-function simAppendTraceRow(row) {
-  const tb = document.getElementById("sim-trace-body");
-  if (!tb) return;
-  const tr = document.createElement("tr");
-  if (row.violations && row.violations.length) tr.className = "viol";
-  let h = "<td>" + row.cycle + "</td>" + row.values.map(v => "<td>" + escapeHTML(v) + "</td>").join("");
-  if (state.sim.session.monitored) {
-    h += "<td>" + escapeHTML(row.modes.join("|") || "—") + "</td><td>" +
-      escapeHTML(row.violations.join("|") || "—") + "</td>";
-  }
-  tr.innerHTML = h;
-  tb.appendChild(tr);
-  while (tb.children.length > SIM_TRACE_ROWS) tb.removeChild(tb.firstChild);
-  const box = document.getElementById("step-trace");
-  box.scrollTop = box.scrollHeight;
 }
 
 /// The chip beside the diagram's operator name while a session runs: the
@@ -5847,7 +6525,12 @@ function renderSimChip() {
   if (!s || !state.diagramData) return;
   const chip = document.createElement("span");
   chip.className = "chip live";
-  if (state.diagramData.node === s.root) {
+  const shown = simShown();
+  if (state.diagramData.node === s.root && shown && shown.review) {
+    chip.textContent = "⏪ cycle " + shown.cycle + " of " + (s.cycle - 1) + " — back to latest";
+    chip.title = "Showing a cycle picked on the waveform; click to follow the run again";
+    chip.onclick = () => simPick(-1);
+  } else if (state.diagramData.node === s.root) {
     chip.textContent = "▶ simulating — cycle " + s.cycle;
     chip.title = "Simulation dock ▸ Step / Run";
     chip.onclick = () => showDock("simulation");
@@ -5923,11 +6606,18 @@ async function testsRun() {
     document.getElementById("tests-summary").textContent = "";
     document.getElementById("tests-results").innerHTML =
       '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>";
+    document.getElementById("tests-coverage").innerHTML = "";
+    testsWaveClose();
     return;
   }
   const results = data.results || [];
+  state.testsData = data;
   let pass = 0, fail = 0;
-  let html = "<table><thead><tr><th>scenario</th><th>backend</th><th>status</th><th>detail</th></tr></thead><tbody>";
+  let html = "<table><thead><tr><th>scenario</th><th>backend</th><th>status</th><th>detail</th><th></th></tr></thead><tbody>";
+  const traceOf = (name, backend) => {
+    const tr = (data.traces || []).find(t => t.name === name);
+    return tr && tr.golden && (backend === "c" ? tr.c : tr.ir) ? tr : null;
+  };
   for (const res of results) {
     const ok = res.status === "pass";
     const skip = res.status === "skipped" || res.status === "no_golden";
@@ -5939,10 +6629,18 @@ async function testsRun() {
         "cycle " + escapeHTML(d.cycle) + ": <code>" + escapeHTML(d.column) +
         "</code> expected " + escapeHTML(d.expected) + " got " + escapeHTML(d.actual);
     }
+    const wave = traceOf(res.name, res.backend)
+      ? '<button class="tests-wave-btn" data-name="' + escAttr(res.name) + '" data-backend="' + res.backend +
+        '" title="Compare this run with the golden trace, cycle by cycle">〰 waveform</button>'
+      : "";
     html += "<tr><td>" + escapeHTML(res.name) + "</td><td>" + res.backend +
-      '</td><td class="' + cls + '">' + escapeHTML(res.status) + "</td><td>" + detail + "</td></tr>";
+      '</td><td class="' + cls + '">' + escapeHTML(res.status) + "</td><td>" + detail + "</td><td>" + wave + "</td></tr>";
   }
   html += "</tbody></table>";
+  document.getElementById("tests-results").innerHTML = html;
+  document.querySelectorAll("#tests-results .tests-wave-btn").forEach(b =>
+    b.onclick = () => testsWave(b.dataset.name, b.dataset.backend));
+  html = "";
   if (data.coverage) {
     const c = data.coverage;
     html += "<h4>Decision coverage</h4><p>" + c.covered + " / " + c.total +
@@ -5973,9 +6671,88 @@ async function testsRun() {
       html += "</tbody></table>";
     }
   }
-  document.getElementById("tests-results").innerHTML = html;
+  document.getElementById("tests-coverage").innerHTML = html;
   document.getElementById("tests-summary").textContent =
     (data.all_green ? "✓ all green — " : "✗ failures — ") + pass + " passed, " + fail + " failed";
+  // Open the first failure's waveform straight away; a green run shows none.
+  const firstFail = results.find(r => r.status === "fail" && traceOf(r.name, r.backend));
+  if (firstFail) testsWave(firstFail.name, firstFail.backend);
+  else testsWaveClose();
+}
+
+/// One trace column by header name (null when the trace has no such column).
+function traceColumn(trace, name) {
+  const i = trace ? trace.header.indexOf(name) : -1;
+  return i < 0 ? null : trace.rows.map(r => r[i] == null ? "" : r[i]);
+}
+
+/// A scenario's run against its golden, as waveform lanes: the backend's
+/// values on top of the golden ones, every differing cycle banded, the first
+/// one marked. Columns the backend doesn't produce (the C driver prints
+/// outputs and monitor columns only) show the golden alone.
+function testsWave(name, backend) {
+  const data = state.testsData;
+  const tr = data && (data.traces || []).find(t => t.name === name);
+  if (!tr || !tr.golden) return;
+  const actual = backend === "c" ? tr.c : tr.ir;
+  const g = tr.golden;
+  const monitorText = (col, v) => v === "<none>" ? "" : col === "active_mode" ? v.split("|").join(", ") : v;
+  const lanes = [];
+  for (const h of g.header) {
+    if (h === "cycle") continue;
+    const gold = traceColumn(g, h).map(v => monitorText(h, v));
+    const mine = traceColumn(actual, h);
+    const lane = { id: h, name: h === "active_mode" ? "mode" : h === "violations" ? "contract" : h, values: mine ? mine.map(v => monitorText(h, v)) : gold };
+    if (mine) lane.ref = gold;
+    if (h === "violations") lane.check = true;
+    lanes.push(lane);
+  }
+  const n = Math.max(g.rows.length, actual ? actual.rows.length : 0);
+  const cycles = [];
+  for (let i = 0; i < n; i++) cycles.push((g.rows[i] || actual.rows[i])[0]);
+  let first = null;
+  for (let i = 0; i < n && first == null; i++) {
+    if (lanes.some(l => l.ref && (l.values[i] ?? "") !== (l.ref[i] ?? ""))) first = i;
+  }
+  const who = backend === "c" ? "compiled C" : "IR simulator";
+  const model = {
+    cycles, lanes, valLabel: who, refLabel: "golden",
+    markers: first == null ? [] : [{ at: first, label: "≠ first divergence", cls: "diverge" }],
+  };
+  const head = document.getElementById("tests-wave-head");
+  let verdict;
+  if (first == null) verdict = '<span class="good">✓ matches the golden, cycle for cycle</span>';
+  else {
+    const bad = lanes.filter(l => l.ref && (l.values[first] ?? "") !== (l.ref[first] ?? "")).map(l => l.name);
+    verdict = '<span class="bad">✖ first divergence at cycle ' + escapeHTML(String(cycles[first])) + "</span> in " +
+      escapeHTML(bad.join(", "));
+  }
+  head.innerHTML = "<b>" + escapeHTML(name) + "</b> · " + who + " vs golden — " + verdict +
+    ' <button id="tests-replay" title="Run this scenario\'s inputs in the live simulator, then keep stepping">▶ Replay in simulator</button>' +
+    ' <button onclick="testsWaveClose()" title="Close the waveform">✕</button>';
+  document.getElementById("tests-replay").onclick = () => {
+    const main = state.inspect?.project?.main;
+    const seq = g.rows.map(r => {
+      const o = {};
+      g.header.forEach((h, i) => { if (h !== "cycle" && h !== "active_mode" && h !== "violations") o[h] = r[i]; });
+      return o;
+    });
+    simReplay(main, seq, "scenario " + name);
+  };
+  const host = document.getElementById("tests-wave");
+  host.style.display = "";
+  if (!state.testsWave) state.testsWave = waveMount(host, { fit: true });
+  const w = state.testsWave;
+  w.fit = true;
+  w.pinned = first;
+  waveSet(w, model);
+  if (first != null) wavePin(w, first);
+  head.scrollIntoView({ block: "nearest" });
+}
+
+function testsWaveClose() {
+  document.getElementById("tests-wave-head").innerHTML = "";
+  document.getElementById("tests-wave").style.display = "none";
 }
 
 async function testsRecord() {
@@ -6090,6 +6867,41 @@ document.getElementById("port-type").addEventListener("change", () => {
   document.getElementById("port-type-custom").style.display =
     document.getElementById("port-type").value === "(custom)" ? "" : "none";
 });
+
+// The bottom dock's height: drag its title bar to resize, ⬒ or a double-click
+// on the bar toggles a tall dock (for waveforms). Remembered per browser.
+function dockSetHeight(h, remember = true) {
+  const max = Math.max(160, window.innerHeight - 170);
+  h = Math.round(Math.max(110, Math.min(max, h)));
+  document.documentElement.style.setProperty("--dock-h", h + "px");
+  if (remember) { try { localStorage.setItem("ols.dockH", String(h)); } catch (_) {} }
+  return h;
+}
+
+function dockHeight() { return document.getElementById("bottomdock").getBoundingClientRect().height; }
+
+let dockRestoreH = null;
+function dockToggleMax() {
+  const tall = window.innerHeight * 0.6;
+  if (dockHeight() < tall - 20) { dockRestoreH = dockHeight(); dockSetHeight(tall); }
+  else dockSetHeight(dockRestoreH && dockRestoreH < tall - 20 ? dockRestoreH : 200);
+}
+
+(function dockResizeInit() {
+  try { const h = Number(localStorage.getItem("ols.dockH")); if (h) dockSetHeight(h, false); } catch (_) {}
+  const bar = document.querySelector("#bottomdock .dock-title");
+  bar.addEventListener("dblclick", ev => { if (!ev.target.closest(".dock-tab, .dock-max")) dockToggleMax(); });
+  bar.addEventListener("pointerdown", ev => {
+    if (ev.button !== 0 || ev.target.closest(".dock-tab, .dock-max")) return;
+    ev.preventDefault();
+    const y0 = ev.clientY, h0 = dockHeight();
+    bar.setPointerCapture(ev.pointerId);
+    const move = e => dockSetHeight(h0 + (y0 - e.clientY));
+    const up = () => { bar.removeEventListener("pointermove", move); bar.removeEventListener("pointerup", up); };
+    bar.addEventListener("pointermove", move);
+    bar.addEventListener("pointerup", up);
+  });
+})();
 
 refresh();
 loadToolbox();
