@@ -252,3 +252,57 @@ fn well_formed_contract_does_not_get_extra_warnings() {
         assert!(!cs.contains(&forbidden), "spurious {forbidden} in {cs:?}");
     }
 }
+
+/// C0080: contract expressions are type-checked for real. An undeclared name
+/// or a non-Boolean clause is an error pinned to the clause; ghost variables
+/// are in scope for every clause (and may use `->` / `pre`).
+#[test]
+fn contract_expressions_are_type_checked() {
+    let iface = |extra: serde_json::Value| {
+        let mut c = serde_json::json!({
+            "name": "C",
+            "inputs": [{"name":"a","ty":{"kind":"Bool"}}, {"name":"b","ty":{"kind":"Bool"}}],
+            "outputs": [{"name":"y","ty":{"kind":"Bool"}}],
+            "ghost_vars": [], "assumptions": [], "guarantees": [], "modes": [], "imports": []
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            c[k] = v.clone();
+        }
+        c
+    };
+    let c0080 = |report: &ol_contract_check::ContractReport| -> Vec<String> {
+        report.diagnostics.iter().filter(|d| d.code == "C0080").map(|d| d.message.clone()).collect()
+    };
+
+    // A typo'd signal in a guarantee.
+    let typo = iface(serde_json::json!({
+        "guarantees": [{ "name": "typo", "expr": Expr::implies(Expr::var("y"), Expr::var("aa")) }]
+    }));
+    let report = ol_contract_check::check_project(&project_with(vec![dummy_node("N", Some("C"))], vec![typo]));
+    let errs = c0080(&report);
+    assert!(
+        errs.iter().any(|m| m.contains("guarantee `typo`") && m.contains("`aa`")),
+        "undeclared name reported on its clause: {errs:?}"
+    );
+    assert!(report.has_errors());
+
+    // A non-Boolean mode ensure.
+    let non_bool = iface(serde_json::json!({
+        "modes": [{ "name": "M", "requires": [Expr::var("a")], "ensures": [Expr::int_lit(3)] }]
+    }));
+    let report = ol_contract_check::check_project(&project_with(vec![dummy_node("N", Some("C"))], vec![non_bool]));
+    assert!(
+        c0080(&report).iter().any(|m| m.contains("mode `M` ensure #0")),
+        "non-Boolean ensure reported: {:?}",
+        c0080(&report)
+    );
+
+    // A ghost variable (with `->` / `pre`) is in scope and type-checks clean.
+    let ghost = iface(serde_json::json!({
+        "ghost_vars": [{ "name": "first", "ty": {"kind":"Bool"},
+                         "definition": Expr::arrow(Expr::bool_lit(true), Expr::bool_lit(false)) }],
+        "modes": [{ "name": "Init", "requires": [Expr::var("first")], "ensures": [Expr::not(Expr::var("y"))] }]
+    }));
+    let report = ol_contract_check::check_project(&project_with(vec![dummy_node("N", Some("C"))], vec![ghost]));
+    assert!(c0080(&report).is_empty(), "ghost in scope: {:?}", c0080(&report));
+}

@@ -19,7 +19,7 @@
 
 use serde::Deserialize;
 
-use ol_contract_ir::{Assumption, ContractDef, Guarantee, Mode};
+use ol_contract_ir::{Assumption, ContractDef, GhostVar, Guarantee, Mode};
 use ol_ir::{
     state_machine::{lower as lower_state_machine, LowerError as SmLowerError},
     Equation, Local, NodeDef, NodeKind, Port, StateDef, StateMachineDef, Transition, TypeDef,
@@ -75,8 +75,20 @@ pub struct RawMode {
     pub ensures: Vec<String>,
 }
 
+/// A contract ghost variable: `{ name, type, body }` — contract-local state
+/// such as `first_cycle = true -> false` or `pre_x = false -> pre x`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawGhost {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawContract {
+    #[serde(default)]
+    pub ghosts: Vec<RawGhost>,
     #[serde(default)]
     pub assumptions: Vec<String>,
     #[serde(default)]
@@ -332,11 +344,22 @@ impl LibBlock {
                 ensures,
             });
         }
+        let ghost_vars = c
+            .ghosts
+            .iter()
+            .map(|g| {
+                Ok(GhostVar {
+                    name: g.name.clone(),
+                    ty: self.parse_ty(&g.ty, "contract.ghosts.type")?,
+                    definition: self.parse_body(&g.body, "contract.ghosts.body")?,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Some(ContractDef {
             name: self.contract_name(),
             inputs: inputs.to_vec(),
             outputs: outputs.to_vec(),
-            ghost_vars: vec![],
+            ghost_vars,
             assumptions,
             guarantees,
             modes,

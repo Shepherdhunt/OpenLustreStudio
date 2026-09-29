@@ -231,6 +231,8 @@ equations:
   - lhs: [edge]
     body: "x and not (false -> pre x)"
 contract:
+  ghosts:
+    - { name: pre_x, type: bool, body: "false -> pre x" }
   modes:
     - { name: Rising, requires: ["x and not pre_x"], ensures: ["edge"] }
 "#;

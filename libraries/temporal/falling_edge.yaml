@@ -9,6 +9,9 @@ equations:
   - lhs: [edge]
     body: "(not x) and (false -> pre x)"
 contract:
+  ghosts:
+    - { name: first_cycle, type: bool, body: "true -> false" }
+    - { name: pre_x,       type: bool, body: "false -> pre x" }
   modes:
     - { name: FirstCycle, requires: ["first_cycle"], ensures: ["not edge"] }
     - { name: Falling,    requires: ["(not x) and pre_x"], ensures: ["edge"] }

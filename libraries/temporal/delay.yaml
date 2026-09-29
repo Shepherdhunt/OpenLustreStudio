@@ -8,6 +8,10 @@ equations:
   - lhs: [y]
     body: "false -> pre x"
 contract:
+  ghosts:
+    - { name: first_cycle, type: bool, body: "true -> false" }
   modes:
     - { name: FirstCycle, requires: ["first_cycle"],     ensures: ["not y"] }
-    - { name: Steady,     requires: ["not first_cycle"], ensures: ["y = pre x"] }
+    # `pre` always carries an initial value in the OpenLustre profile; the
+    # `false ->` arm is never observed here (Steady excludes the first cycle).
+    - { name: Steady,     requires: ["not first_cycle"], ensures: ["y = (false -> pre x)"] }

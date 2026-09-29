@@ -13,5 +13,7 @@ contract:
   modes:
     - { name: Set,    requires: ["set and not reset"], ensures: ["q"] }
     - { name: Reset,  requires: ["reset and not set"], ensures: ["not q"] }
-    - { name: Hold,   requires: ["not set and not reset"], ensures: ["q = pre q"] }
+    # Holds the previous value; before the first cycle that value is false,
+    # exactly as the implementation reads it.
+    - { name: Hold,   requires: ["not set and not reset"], ensures: ["q = (false -> pre q)"] }
     - { name: Tie,    requires: ["set and reset"],     ensures: ["q"] }
