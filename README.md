@@ -40,6 +40,19 @@ its initial state (ringed), guarded transitions, and per-state outputs.
 
 ![An operator-owned state machine in OpenLustre Studio — the nested project-tree shape on the left and the Lights state chart (Red/Green/Yellow with tick and emergency transitions) on the canvas.](docs/screenshots/02-state-machine.png)
 
+**Conditional activation (activate-if).** SCADE's `if` / `elsif` / `else`
+decision tree, owned by an operator like a state machine: the first
+condition that holds selects its branch, and every branch — else included —
+must assign every driven variable, checked before the tree is saved. It is
+drawn as a decision-tree chart, and on the operator's canvas both constructs
+appear as single blocks (reads in, drives out; double-click to edit). When
+stepping, per-branch flags show which branch fired each cycle.
+
+![A conditional activation in OpenLustre Studio — the Conditional Activations dialog with its decision-tree chart (if fault / elsif engage and not hold / elsif hold / else) above the textual branch editor.](docs/screenshots/04-activation.png)
+
+Where the Studio stands against the project's goals, and what comes next, is
+tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
+
 **SCADE-style drafting.** Predefined operators draw as real glyphs — MIL-shape
 AND/OR/XOR gates, the NOT triangle, the if/then/else selector trapezoid with
 its condition pin on the sloped top edge, temporal blocks (`pre`, `FBY`) with

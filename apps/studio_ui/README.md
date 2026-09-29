@@ -52,6 +52,17 @@ arrow), and the arrangement persists into the model file per machine —
 `/api/edit/set_fsm_layout`, journaled like every other edit, kept across
 textual machine updates.
 
+Conditional activations (SCADE activate-if) have their own dialog —
+Insert ▸ Activation, the palette's *Activation (if / elsif / else)* item,
+or the workspace tree — with a one-branch-per-line editor
+(`if c as Name: lhs = e; …`, `elsif …`, `else: …`) and a live
+decision-tree chart. The server (`/api/activation`,
+`/api/edit/{add,update,remove}_activation`) lowers and type-checks the
+tree before saving and rejects only the errors the edit introduces. On
+an owner's canvas, state machines and activations are single blocks —
+`/api/diagram` returns them in `constructs` (reads, drives, states or
+conditions) and keeps the generated internals off the diagram.
+
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram
 ReactFlow canvas), but the back-end contract is what was actually
