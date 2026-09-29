@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Make a staged macOS download self-contained: every program in it may load
 # only macOS's own libraries (/usr/lib, /System) and libraries shipped in it.
 #
@@ -11,9 +11,10 @@
 #
 #   packaging/macos/bundle-libs.sh <Resources dir> <aarch64|x86_64>
 
-set -eu
+set -euo pipefail
 RES="$1"
 ARCH="$2"
+case "$ARCH" in aarch64) CPU=arm64 ;; *) CPU="$ARCH" ;; esac
 ZMQ_VERSION=4.3.5
 KIND2="$RES/tools/bin/kind2"
 LIB="$RES/tools/lib"
@@ -28,18 +29,24 @@ if [ -n "$zmq" ] && [ "$zmq" != "$IN_BUNDLE/libzmq.5.dylib" ]; then
     curl -sSfL -o "$WORK/zmq.tar.gz" \
         "https://github.com/zeromq/libzmq/releases/download/v$ZMQ_VERSION/zeromq-$ZMQ_VERSION.tar.gz"
     tar -C "$WORK" -xzf "$WORK/zmq.tar.gz"
+    # The CPU goes in the compiler commands (libtool drops -arch from
+    # LDFLAGS); only the library is built.
     (
         cd "$WORK/zeromq-$ZMQ_VERSION"
         export MACOSX_DEPLOYMENT_TARGET=12.0
-        ./configure --host="$ARCH-apple-darwin" --prefix="$WORK/prefix" \
-            --disable-static --without-libsodium --disable-curve --without-docs --disable-Werror \
-            CC=clang CXX=clang++ CFLAGS="-arch $ARCH -O2" CXXFLAGS="-arch $ARCH -O2" LDFLAGS="-arch $ARCH" \
+        ./configure --host="$ARCH-apple-darwin" --disable-static \
+            --without-libsodium --disable-curve --without-docs --disable-Werror \
+            CC="clang -arch $CPU" CXX="clang++ -arch $CPU" \
             > "$WORK/configure.log" 2>&1 || { tail -40 "$WORK/configure.log"; exit 1; }
-        make -j"$(sysctl -n hw.ncpu)" > "$WORK/make.log" 2>&1 || { tail -40 "$WORK/make.log"; exit 1; }
-        make install > /dev/null
+        make -j"$(sysctl -n hw.ncpu)" src/libzmq.la > "$WORK/make.log" 2>&1 || { tail -40 "$WORK/make.log"; exit 1; }
     )
+    built="$WORK/zeromq-$ZMQ_VERSION/src/.libs/libzmq.5.dylib"
+    [ "$(lipo -archs "$built")" = "$CPU" ] || { echo "bundle-libs: libzmq was built for $(lipo -archs "$built"), not $CPU" >&2; exit 1; }
+    missing=$(comm -23 <(nm -u "$KIND2" | grep -o '_zmq_[a-z0-9_]*' | sort -u) \
+                       <(nm -gU "$built" | grep -o '_zmq_[a-z0-9_]*' | sort -u))
+    [ -z "$missing" ] || { echo "bundle-libs: libzmq lacks what kind2 calls: $missing" >&2; exit 1; }
     mkdir -p "$LIB"
-    cp "$WORK/prefix/lib/libzmq.5.dylib" "$LIB/"
+    cp "$built" "$LIB/"
     chmod 644 "$LIB/libzmq.5.dylib"
     install_name_tool -id "$IN_BUNDLE/libzmq.5.dylib" "$LIB/libzmq.5.dylib"
     install_name_tool -change "$zmq" "$IN_BUNDLE/libzmq.5.dylib" "$KIND2"
@@ -52,7 +59,8 @@ fi
 # and its own.
 bad=0
 for f in "$RES/openlustre" "$RES"/tools/bin/* "$RES"/tools/lib/*; do
-    [ -f "$f" ] && file -b "$f" | grep -q Mach-O || continue
+    [ -f "$f" ] || continue
+    case "$(file -b "$f")" in *Mach-O*) ;; *) continue ;; esac
     for d in $(deps "$f"); do
         case "$d" in
             /usr/lib/* | /System/*) ;;
