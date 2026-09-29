@@ -388,57 +388,90 @@ impl<'a> Sim<'a> {
             let mut inputs = BTreeMap::new();
             for (i, p) in self.node.inputs.iter().enumerate() {
                 let raw = fields.get(i).copied().unwrap_or("").trim();
-                let v = parse_value(raw, &p.ty).map_err(|_| SimError::ParseError {
-                    value: raw.into(),
-                    col: p.name.clone(),
-                    ty: p.ty.clone(),
-                })?;
-                inputs.insert(p.name.clone(), v);
+                inputs.insert(p.name.clone(), self.parse_input(&p.name, raw)?);
             }
-            let env = self.step_env(&inputs)?;
-            let mut out = BTreeMap::new();
-            for p in &self.node.outputs {
-                out.insert(
-                    p.name.clone(),
-                    env.get(&p.name)
-                        .cloned()
-                        .unwrap_or_else(|| default_value(&p.ty, self.project)),
-                );
-            }
+            let obs = self.step_observed(&inputs)?;
+            let skip = if full { 0 } else { self.node.inputs.len() + self.node.locals.len() };
             let mut out_row: Vec<Value> = vec![Value::Int(cycle as i64)];
-            if full {
-                for p in &self.node.inputs {
-                    out_row.push(env.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
-                }
-                for l in &self.node.locals {
-                    out_row.push(env.get(&l.name).cloned().unwrap_or(Value::Bool(false)));
-                }
-            }
-            for p in &self.node.outputs {
-                out_row.push(out.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
-            }
-            if let Some(step) = self.observe(&inputs, &out)? {
-                let mode_label = if step.active_modes.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    step.active_modes.join("|")
-                };
-                let viol_label = if step.violations.is_empty() {
-                    "<none>".to_string()
-                } else {
-                    step.violations.join("|")
-                };
-                for v in &step.violations {
+            out_row.extend(obs.values.into_iter().skip(skip).map(|(_, v)| v));
+            if obs.monitored {
+                for v in &obs.violations {
                     trace.violations.push((v.clone(), cycle));
                 }
-                trace.active_modes.push(step.active_modes);
-                out_row.push(Value::ModeLabel(mode_label.replace(',', ";")));
-                out_row.push(Value::ModeLabel(viol_label.replace(',', ";")));
+                out_row.push(Value::ModeLabel(label_list(&obs.active_modes)));
+                out_row.push(Value::ModeLabel(label_list(&obs.violations)));
+                trace.active_modes.push(obs.active_modes);
             }
             trace.rows.push(out_row);
         }
 
         Ok(trace)
+    }
+
+    /// Step one cycle and observe everything: every signal's value — inputs,
+    /// locals, outputs, in that (`run_csv_full` column) order — and, when the
+    /// node has a contract, the modes its monitor finds active and the
+    /// clauses it finds violated. The one per-cycle path shared by CSV runs
+    /// and interactive simulation sessions.
+    pub fn step_observed(&mut self, inputs: &BTreeMap<String, Value>) -> Result<Observed, SimError> {
+        let env = self.step_env(inputs)?;
+        let value_of = |name: &str, ty: &Type| {
+            env.get(name).cloned().unwrap_or_else(|| default_value(ty, self.project))
+        };
+        let mut values = Vec::with_capacity(
+            self.node.inputs.len() + self.node.locals.len() + self.node.outputs.len(),
+        );
+        for p in &self.node.inputs {
+            values.push((p.name.clone(), value_of(&p.name, &p.ty)));
+        }
+        for l in &self.node.locals {
+            values.push((l.name.clone(), value_of(&l.name, &l.ty)));
+        }
+        let mut outputs = BTreeMap::new();
+        for p in &self.node.outputs {
+            let v = value_of(&p.name, &p.ty);
+            outputs.insert(p.name.clone(), v.clone());
+            values.push((p.name.clone(), v));
+        }
+        Ok(match self.observe(inputs, &outputs)? {
+            Some(step) => Observed {
+                values,
+                active_modes: step.active_modes,
+                violations: step.violations,
+                monitored: true,
+            },
+            None => Observed { values, active_modes: vec![], violations: vec![], monitored: false },
+        })
+    }
+
+    /// Parse a textual value (CSV / watch-table syntax) for input `name`,
+    /// using that input's declared type.
+    pub fn parse_input(&self, name: &str, raw: &str) -> Result<Value, SimError> {
+        let p = self
+            .node
+            .inputs
+            .iter()
+            .find(|p| p.name == name)
+            .ok_or_else(|| SimError::EvalError(format!("`{name}` is not an input of `{}`", self.node.name)))?;
+        parse_value(raw.trim(), &p.ty).map_err(|_| SimError::ParseError {
+            value: raw.into(),
+            col: p.name.clone(),
+            ty: p.ty.clone(),
+        })
+    }
+
+    /// Evaluate a condition over one cycle's signal values — a breakpoint.
+    /// Stateless: callers reject `pre` / `->` up front, since a condition is
+    /// about the cycle just observed.
+    pub fn eval_condition(&self, expr: &Expr, values: &BTreeMap<String, Value>) -> Result<bool, SimError> {
+        let mut env = self.consts.clone();
+        env.extend(values.iter().map(|(k, v)| (k.clone(), v.clone())));
+        let mut state = State::default();
+        let mut calls = HashMap::new();
+        match eval(expr, &env, &mut state, &mut calls, self.project, None, &mut None)? {
+            Value::Bool(b) => Ok(b),
+            v => Err(SimError::EvalError(format!("the condition is not Boolean (got {})", v.to_csv()))),
+        }
     }
 
     /// Step the contract's observer on this cycle's inputs and outputs and
@@ -567,6 +600,30 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
             Ok(Value::Array(vals))
         }
         _ => Err(()),
+    }
+}
+
+/// One observed cycle (see [`Sim::step_observed`]).
+#[derive(Debug, Clone)]
+pub struct Observed {
+    /// Every signal of the node with its value this cycle: inputs, locals,
+    /// outputs.
+    pub values: Vec<(String, Value)>,
+    /// Modes the contract monitor found active (empty without a contract).
+    pub active_modes: Vec<String>,
+    /// Clauses the contract monitor found violated.
+    pub violations: Vec<String>,
+    /// Whether the node has a contract (and so a monitor) at all.
+    pub monitored: bool,
+}
+
+/// `a|b|c`, or `<none>` — the trace's rendering of a mode / violation list
+/// (commas become `;` so the CSV stays well-formed).
+fn label_list(items: &[String]) -> String {
+    if items.is_empty() {
+        "<none>".to_string()
+    } else {
+        items.join("|").replace(',', ";")
     }
 }
 
