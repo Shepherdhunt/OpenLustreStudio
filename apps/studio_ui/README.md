@@ -72,6 +72,22 @@ an owner's canvas, state machines and activations are single blocks —
 `/api/diagram` returns them in `constructs` (reads, drives, states or
 conditions) and keeps the generated internals off the diagram.
 
+Simulation is a server-side session, so stepping is incremental rather
+than a replay. `POST /api/sim/start {"node": N}` type-checks the
+operator's slice and opens a session (one per server; it lives on its own
+thread with the simulator's state) and returns the signal list
+(`[{name, kind: input|local|output, type}]`). `POST /api/sim/step
+{"inputs": {name: "text"}, "count": 1..10000, "break": "expr",
+"stop_on_violation": bool}` runs up to `count` cycles with the same
+inputs and returns `{cycle, rows: [{cycle, values, modes, violations}],
+stopped: count|break|violation|error}`; the break expression is a
+stateless condition over the operator's signals (temporal operators are
+rejected). A step after a semantic model edit answers `409
+{"stale": true}` and the client restarts the session. `POST
+/api/sim/stop` ends it and `GET /api/sim/state` reports it. Contract
+monitoring uses the same observer node as the generated C, so the modes
+and violations shown per cycle match a compiled run.
+
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram
 ReactFlow canvas), but the back-end contract is what was actually

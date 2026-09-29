@@ -63,6 +63,20 @@ both.
 
 ![The Contracts dialog in OpenLustre Studio — the mode table for an Autopilot contract (Init, Faulted, and an unreachable Contradiction mode flagged by the live check).](docs/screenshots/05-contract.png)
 
+**Live simulation, on the diagram.** Build ▸ Simulate starts a simulation
+session that the server keeps open: each Step runs exactly one more cycle
+(no replay from cycle 0), *Run N* runs a batch, and a run stops early at a
+**breakpoint condition** (`cmd > 80`, any stateless expression over the
+operator's signals) or at the first contract violation. While the session
+runs, the canvas shows every wire's current value, input and output blocks
+carry value badges, the active state machine state and the activation
+branch that fired are highlighted — on the canvas blocks and in their chart
+dialogs — and the contract chip names the active modes with a ✓ or the
+violated clauses. Editing the model marks the session stale; the next Step
+restarts it on the edited model.
+
+![Live simulation in OpenLustre Studio — the Autopilot operator at cycle 4 with values on every wire, the ModeLamp state machine in On, the CmdSelect activation's "if fault" branch highlighted, the contract chip reading "mode Faulted ✓", and the Simulation dock below with the input watch table, run controls and per-cycle trace.](docs/screenshots/06-live-simulation.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 

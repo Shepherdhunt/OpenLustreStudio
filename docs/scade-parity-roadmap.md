@@ -33,7 +33,7 @@ no GUI at all.
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
 | C-Lite generation (selected root + closure) | ✅ | ✅ Generate / C pane / save files |
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
-| Stepping / simulation | ✅ batch + full trace | ⚠️ watch table + trace table; **every Step replays the whole history** (no session) |
+| Stepping / simulation | ✅ batch + full trace; incremental `step_observed` | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram** (was replay-from-zero) |
 | IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage) |
 | Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes | ⚠️ default mode only; counterexample as an ASCII block; **Kind 2 not bundled or in CI** |
 | Evidence report | ❌ | ❌ |
@@ -91,14 +91,18 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
    / `->` compiled to `1`, ghosts broke the C monitor's compile, and the
    simulator skipped assumptions. Monitors now run each contract's
    observer node in both the simulator and the generated C.
-2. **Stateful simulation session + live values on the diagram (M).** A
-   server-side `Sim` session (step / run N / reset) replaces replay-from-zero
-   stepping. With it: current values annotated on every wire, the active
-   state highlighted on state-machine blocks and charts, the selected branch
-   highlighted on activation blocks and trees, conditional breakpoints
-   (`break when <bool expr>`) and run-until. This is the SCADE Simulator's
-   signature experience and the direct answer to "step and simulate models
-   running".
+2. ✅ **Stateful simulation session + live values on the diagram — done.**
+   A server-side session (its own thread holding the simulator's state)
+   replaces replay-from-zero stepping: Step runs one more cycle, Run N a
+   batch, and a run stops at a breakpoint condition (`cmd > 80`; stateless
+   expressions only, `pre` is refused) or at the first contract violation.
+   Every wire shows its current value, the active state and the fired
+   activation branch are highlighted on canvas blocks and in the chart
+   dialogs, and the contract chip shows the active modes and ✓ / violated
+   clauses. Model edits mark the session stale (a hash of the model with
+   layout stripped) and the next Step restarts it. The simulator gained
+   an incremental `step_observed` API that the batch CSV runner now uses
+   too, so the dock, `simulate` and the tests share one code path.
 3. **Waveform viewer (M).** Signals as digital/analog lanes over cycles, used
    for step traces, test-scenario diffs (IR vs C divergence highlighted at the
    first differing cycle), and Kind 2 counterexamples (replacing the ASCII
@@ -150,8 +154,10 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-Item **1** is done. Next is item **2** (a stateful simulation session with
-live values on the diagram), which completes the SCADE design → generate →
-run → simulate loop — and pairs naturally with contracts: the per-cycle
-active mode and violations the monitors now compute correctly can be shown
-live on the canvas.
+Items **1** and **2** are done: contracts are authored in the Studio, and
+the design → generate → run → simulate loop is closed with a live,
+incremental simulator on the diagram. Next is item **3** (a waveform
+viewer): the session already produces per-cycle rows with modes and
+violations, so lanes over those rows are the natural display — and the
+same viewer then replaces the ASCII Kind 2 counterexample block and shows
+IR-vs-C divergence in the Tests dock.
