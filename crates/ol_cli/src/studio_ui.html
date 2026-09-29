@@ -240,6 +240,13 @@
   /* Decorative strokes on operator glyphs: the XOR input arc, the memory
      block's state bar. Stroked like the block outline, never filled. */
   svg .glyph-line { fill: none; stroke: #2b579a; stroke-width: 1.1; pointer-events: none; }
+  /* Owned construct blocks (state machine / activation) on an operator canvas. */
+  svg .box.construct { fill: #fbfcfe; }
+  svg .construct-head { fill: #dde7f3; pointer-events: none; }
+  svg .box.construct.invalid + .construct-head { fill: #f6d4d4; }
+  svg text.construct-tag { font-size: 9px; font-weight: 700; fill: #2b579a; letter-spacing: 0.5px; }
+  svg text.construct-name { font-size: 11px; font-weight: 600; }
+  svg text.construct-line { font-size: 10px; fill: #4a5563; font-family: Consolas, monospace; }
   .problems {
     background: #fdeeee; border: 1px solid #d11a1a; color: #c42b1c;
     padding: 6px 10px; margin: 6px 0; font-size: 12px;
@@ -304,6 +311,7 @@
       <div class="menu-sep"></div>
       <div class="mi" onclick="openDialog('dlg-equation')">Equation…</div>
       <div class="mi" id="mi-insert-fsm" onclick="openFsmEditor(null)">State Machine…</div>
+      <div class="mi" id="mi-insert-act" onclick="openActForCurrent()">Activation (if / else)…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openLogMsgDialog()">Log Message…</div>
     </div>
@@ -701,6 +709,35 @@
     </div>
   </div>
 
+  <div class="dlg" id="dlg-act">
+    <p>A conditional activation is SCADE's <strong>activate-if decision tree</strong>, owned by one operator: conditions are tested top to bottom, the first that holds selects its branch, and <strong>every branch — else included — must assign every driven variable</strong> (SCADE exhaustiveness) or the save is rejected. It lowers into the operator; its per-branch <code class="inline">__act_*</code> flags show which branch fired when stepping. <em>Stage-1 semantics:</em> branches are selected, not clocked — <code class="inline">pre</code> inside a branch reads the previous <em>cycle</em> (like SCADE <code class="inline">last</code>), not the branch's previous activation.</p>
+    <div class="row">view activation <select id="act-select" onchange="actView()"></select></div>
+    <div id="act-host"></div>
+    <div class="edit-form">
+      <div class="row" style="justify-content:space-between">
+        <h4 id="act-form-title">New activation</h4>
+        <button onclick="actTemplate()">Load template</button>
+      </div>
+      <div class="row">
+        <label>name</label><input id="act-name" placeholder="Select">
+        <label>operator</label><select id="act-operator" onchange="actOperatorChanged()"></select>
+      </div>
+      <div class="row">
+        <label>drives</label><input id="act-outputs" style="flex:1" oninput="actPreview()" placeholder="cmd, safe   (outputs / locals of the operator — types come from it)">
+      </div>
+      <div class="row" style="align-items:flex-start">
+        <label>branches</label>
+        <textarea id="act-branches" rows="5" style="flex:1" oninput="actPreview()" placeholder="One branch per line, first match wins:&#10;if fault as Fault:    cmd = 0;     safe = true&#10;elsif arm as Engaged: cmd = x + 1; safe = false&#10;else:                 cmd = x;     safe = true"></textarea>
+      </div>
+      <div id="act-preview" class="fsm-preview"></div>
+      <div class="row">
+        <button class="primary" id="act-save-btn" onclick="actSave()">Create activation</button>
+        <button onclick="actTemplate(true)">New / reset</button>
+        <span class="build-note" id="act-status"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="dlg" id="dlg-csv">
     <p>CSV input — first row is the header (one column per main-operator input). Useful for batch traces.</p>
     <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
@@ -829,6 +866,7 @@ const DLG_TITLES = {
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
   "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
   "dlg-fsm": "State Machines",
+  "dlg-act": "Conditional Activations",
   "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
   "dlg-logmsg": "Insert Log Message",
 };
@@ -1192,7 +1230,8 @@ async function refresh() {
       }
     };
     group("Inputs", (n.inputs || []).map(p => ({ text: p.name + " : " + typeName(p.type), name: p.name })));
-    group("Locals", (n.locals || []).filter(l => !l.name.startsWith("__sm")).map(l => ({ text: l.name + " : " + typeName(l.type), name: l.name })));
+    group("Locals", (n.locals || []).filter(l => !l.name.startsWith("__sm") && !l.name.startsWith("__act_"))
+      .map(l => ({ text: l.name + " : " + typeName(l.type), name: l.name })));
     const sm = machines.find(m => m.owner === n.name);
     if (sm) {
       const smDet = mkDetails("sm:" + sm.name, false);
@@ -1208,6 +1247,27 @@ async function refresh() {
         smDet.appendChild(d);
       }
       det.appendChild(smDet);
+    }
+    // Its activations (if / elsif / else decision trees), branches listed.
+    for (const a of (ins.project.activations || []).filter(a => a.owner === n.name)) {
+      const aDet = mkDetails("act:" + a.name, false);
+      const as = document.createElement("summary");
+      as.innerHTML = '<span class="kind">A</span> Activation: ' + escapeHTML(a.name) +
+        ' <span class="tree-meta">→ ' + escapeHTML(a.outputs.join(", ")) + "</span>";
+      as.onclick = e => { e.stopPropagation(); openActEditor(a.name); };
+      if (editable) as.oncontextmenu = ev => { ev.stopPropagation(); activationTreeMenu(ev, a.name); };
+      aDet.appendChild(as);
+      a.branches.forEach((b, i) => {
+        const d = document.createElement("div");
+        d.className = "node port";
+        d.textContent = (i === 0 ? "if · " : "elsif · ") + b;
+        aDet.appendChild(d);
+      });
+      const el = document.createElement("div");
+      el.className = "node port";
+      el.textContent = "else";
+      aDet.appendChild(el);
+      det.appendChild(aDet);
     }
     // A state machine is added from the right Operations palette (drag/select
     // "State Machine" onto this operator's canvas), not from the tree.
@@ -1742,7 +1802,7 @@ async function loadDiagram(nodeName, push) {
     const known = new Set([
       ...d.inputs.map(p => p.name), ...d.outputs.map(p => p.name),
       ...d.locals.map(l => l.name), ...(d.ghosts || []).map(g => g.name),
-      ...d.equations.map(e => e.id),
+      ...d.equations.map(e => e.id), ...(d.constructs || []).map(c => c.id),
     ]);
     if (!known.has(state.selection)) state.selection = null;
   }
@@ -1901,6 +1961,12 @@ function computePositions(d) {
     pos[e.id] = { x: DIAG.X_EQ, y: ey, w: eqWidth(e), h };
     ey += Math.max(DIAG.ROW, h + 12);
   });
+  // Owned state machines / activations stack below, one block each.
+  (d.constructs || []).forEach(c => {
+    const h = constructHeight(c);
+    pos[c.id] = { x: DIAG.X_EQ, y: ey, w: constructWidth(c), h };
+    ey += h + 16;
+  });
   // Collapsed result locals have no box of their own — they live on their gate.
   const collapsed = collapsedLocals(d);
   const right = d.outputs.map(p => p.name)
@@ -1924,7 +1990,8 @@ function computePositions(d) {
 // sloped top edge (SCADE style), so its wire drops in vertically.
 function eqPinGeom(eqId) {
   const p = state.diagPos[eqId];
-  const e = state.diagramData.equations[+/^eq(\d+)$/.exec(eqId)[1]];
+  const e = isConstructId(eqId) ? constructOf(eqId)
+    : state.diagramData.equations[+/^eq(\d+)$/.exec(eqId)[1]];
   const pins = (e && e.inputs) || [];
   if (!p || !pins.length) return [];
   const h = p.h || DIAG.BOXH;
@@ -1938,6 +2005,37 @@ function eqPinGeom(eqId) {
   const first = p.y + (h - span) / 2;
   left.forEach((port, k) => res[port] = { x: p.x, y: first + k * DIAG.PIN_PITCH, entry: "left" });
   return res;
+}
+
+// --- Owned constructs: state machines / activations as canvas blocks ---------
+
+// `sm:<name>` / `act:<name>` — the ids the server gives owned-construct blocks.
+function isConstructId(id) { return /^(sm|act):/.test(id); }
+
+function constructOf(id) {
+  return (state.diagramData?.constructs || []).find(c => c.id === id) || null;
+}
+
+const CONSTRUCT_MAX_LINES = 6;
+
+function constructWidth(c) {
+  const longest = Math.max(0, ...(c.detail || []).map(s => s.length));
+  return Math.round(Math.max(150, 34 + c.name.length * 7.5, Math.min(280, 18 + longest * 6)));
+}
+
+function constructHeight(c) {
+  const lines = Math.min((c.detail || []).length, CONSTRUCT_MAX_LINES);
+  const pins = (c.inputs || []).length;
+  return Math.max(DIAG.BOXH, 26 + lines * 12 + 6,
+    pins > 1 ? (pins - 1) * DIAG.PIN_PITCH + 2 * DIAG.PIN_MARGIN + 10 : 0);
+}
+
+/// Open the editor for a construct block (double-click, or Properties ▸ Edit).
+function openConstructEditor(id) {
+  const c = constructOf(id);
+  if (!c) return;
+  if (c.kind === "sm") openFsmEditor(c.name);
+  else openActEditor(c.name);
 }
 
 // --- Wire routing: SCADE-style orthogonal runs (or the bezier fallback) ------
@@ -2039,6 +2137,31 @@ function shapeSvg(it, p, cls) {
       return path("M " + x + " " + y + " H " + (x + w) + " V " + (y + h) + " H " + x + " Z") +
         '<line class="glyph-line" x1="' + (x + 6) + '" y1="' + y +
         '" x2="' + (x + 6) + '" y2="' + (y + h) + '"/>';
+    case "sm":
+    case "act": {
+      // Owned construct block: a header band (SM / IF tag + name), then the
+      // machine's states (initial marked ▸) or the tree's if / elsif / else
+      // conditions, clipped to the box.
+      const tag = it.shape === "sm" ? "SM" : "IF";
+      const maxLines = Math.max(0, Math.min(CONSTRUCT_MAX_LINES, Math.floor((h - 26) / 12)));
+      const maxChars = Math.max(4, Math.floor((w - 14) / 6));
+      const lines = (it.detail || []).slice(0, maxLines);
+      if ((it.detail || []).length > maxLines && lines.length) lines[lines.length - 1] = "…";
+      let s = '<rect class="' + cls + '" x="' + x + '" y="' + y + '" width="' + w +
+          '" height="' + h + '" rx="4"/>' +
+        '<path class="construct-head" d="M ' + (x + 0.6) + " " + (y + 18) + " V " + (y + 4) +
+          " Q " + (x + 0.6) + " " + (y + 0.6) + " " + (x + 4) + " " + (y + 0.6) +
+          " H " + (x + w - 4) + " Q " + (x + w - 0.6) + " " + (y + 0.6) + " " + (x + w - 0.6) + " " + (y + 4) +
+          " V " + (y + 18) + ' Z"/>' +
+        '<text class="construct-tag" x="' + (x + 7) + '" y="' + (y + 13) + '">' + tag + "</text>" +
+        '<text class="construct-name" x="' + (x + 27) + '" y="' + (y + 13) + '">' + escapeHTML(it.label) + "</text>";
+      lines.forEach((ln, k) => {
+        const t = ln.length > maxChars ? ln.slice(0, maxChars - 1) + "…" : ln;
+        s += '<text class="construct-line" x="' + (x + 9) + '" y="' + (y + 32 + k * 12) + '">' +
+          escapeHTML(t) + "</text>";
+      });
+      return s;
+    }
     case "const":
       // Literal tag: flat left, pointed right — a value source, not a wire tap.
       return path("M " + x + " " + y + " L " + (x + w - 8) + " " + y +
@@ -2061,7 +2184,8 @@ function shapeSvg(it, p, cls) {
 }
 
 // Gate glyphs whose shape alone names the operator — no label text inside.
-const SHAPES_UNLABELLED = new Set(["and", "or", "xor", "not", "mux"]);
+// Construct blocks draw their own header text inside the glyph.
+const SHAPES_UNLABELLED = new Set(["and", "or", "xor", "not", "mux", "sm", "act"]);
 
 function renderDiagram() {
   const d = state.diagramData;
@@ -2091,6 +2215,14 @@ function renderDiagram() {
     // can render as the result — red until consumed.
     outName: (e.output && e.output.collapsible) ? e.output.name : null,
     h0: eqHeight(e),
+  }));
+  (d.constructs || []).forEach(c => items.push({
+    id: c.id, label: c.name, shape: c.kind, detail: c.detail, construct: c.kind,
+    cls: "box construct" + (c.invalid ? " invalid" : ""),
+    reason: (c.invalid ? c.reason + " — " : "") +
+      (c.kind === "sm" ? "state machine " : "activation ") + c.name +
+      " · drives " + c.drives.join(", ") + " · double-click to edit",
+    inputs: c.inputs || [], h0: constructHeight(c),
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
     cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "out" }));
@@ -2152,7 +2284,7 @@ function renderDiagram() {
     // Wires into a gate terminate at the specific input pin (which knows the
     // side it is entered on); everything else meets the box at its centre.
     let x2 = b.x, y2 = b.y + (b.h || DIAG.BOXH) / 2, entry = "left";
-    if (w.to_port != null && /^eq\d+$/.test(w.to)) {
+    if (w.to_port != null && (/^eq\d+$/.test(w.to) || isConstructId(w.to))) {
       const pin = eqPinGeom(w.to)[w.to_port];
       if (pin) { x2 = pin.x; y2 = pin.y; entry = pin.entry; }
     }
@@ -2163,7 +2295,7 @@ function renderDiagram() {
       // The SCADE wire annotation: the carried variable and its type, seated
       // just past the source pin (so parallel wires keep their labels apart —
       // two wires from one source overprint the same text harmlessly).
-      const v = /^eq\d+$/.test(w.from) ? w.to : w.from;
+      const v = (/^eq\d+$/.test(w.from) || isConstructId(w.from)) ? w.to : w.from;
       const t = typeOf[v] || "?";
       svg += '<text class="wire-label" x="' + (x1 + 8) + '" y="' + (y1 - 5) + '">' +
         escapeHTML(v + ": " + t) + '</text>';
@@ -2175,8 +2307,9 @@ function renderDiagram() {
     const h = p.h || DIAG.BOXH;
     const divable = it.calls && it.calls.length;
     const selected = state.selected.includes(it.id);
-    svg += '<g class="diag-item" data-id="' + it.id + '"' +
+    svg += '<g class="diag-item" data-id="' + escapeAttr(it.id) + '"' +
       (divable ? ' data-call="' + escapeHTML(it.calls[0]) + '"' : '') +
+      (it.construct ? ' data-construct="1"' : '') +
       ' style="cursor:' + (divable ? 'pointer' : 'move') + '">';
     svg += shapeSvg(it, p, it.cls + (selected ? " selected" : ""));
     // Label: a single (truncated) line, or — when text-wrap is on for this box —
@@ -2263,7 +2396,7 @@ function renderDiagram() {
     for (const [id, p] of Object.entries(pos)) {
       mm += '<rect x="' + p.x * k + '" y="' + p.y * k +
         '" width="' + Math.max(2, p.w * k) + '" height="' + Math.max(1.5, (p.h || DIAG.BOXH) * k) +
-        '" fill="' + (/^eq\d+$/.test(id) ? "#9db8d9" : "#cdd9e5") + '"/>';
+        '" fill="' + (/^eq\d+$/.test(id) || isConstructId(id) ? "#9db8d9" : "#cdd9e5") + '"/>';
     }
     mm += '<rect id="mm-view" fill="rgba(43,87,154,0.10)" stroke="#2b579a" stroke-width="1"/></svg></div>';
   }
@@ -2276,6 +2409,11 @@ function renderDiagram() {
   svgEl.addEventListener("pointermove", diagPointerMove);
   svgEl.addEventListener("pointerup", diagPointerUp);
   svgEl.addEventListener("contextmenu", diagContextMenu);
+  // Double-click a state-machine / activation block to open its editor.
+  svgEl.addEventListener("dblclick", ev => {
+    const g = ev.target.closest && ev.target.closest("g.diag-item[data-construct]");
+    if (g) openConstructEditor(g.dataset.id);
+  });
   const mmEl = document.getElementById("minimap");
   if (mmEl) {
     mmEl.addEventListener("pointerdown", minimapJump);
@@ -2463,6 +2601,12 @@ async function diagPointerUp(ev) {
     const inpin = el && el.closest ? el.closest(".inpin") : null;
     const g = el && el.closest ? el.closest("g.diag-item") : null;
     renderDiagram();
+    // A construct block reads its signals by name inside its states/branches
+    // — rewire it in its editor, not on the canvas.
+    if ((g && isConstructId(g.dataset.id)) || isConstructId(wd.from)) {
+      wireStatus("state machines and activations wire by name — double-click the block to edit it");
+      return;
+    }
     if (inpin && inpin.dataset.eq !== wd.from) {
       await bindInputPin(wd.from, inpin.dataset.eq, inpin.dataset.operand);
     } else if (g && g.dataset.id !== wd.from) {
@@ -2685,6 +2829,14 @@ function renderToolbox() {
     smItem.ondragstart = ev => ev.dataTransfer.setData("text/plain", "sm:new");
     smItem.onclick = () => openStateMachineForCurrent();
     smDet.appendChild(smItem);
+    const actItem = document.createElement("div");
+    actItem.className = "op-item";
+    actItem.textContent = "Activation (if / elsif / else)";
+    actItem.title = "Insert a SCADE activate-if decision tree into the current operator (opens its editor)";
+    actItem.draggable = true;
+    actItem.ondragstart = ev => ev.dataTransfer.setData("text/plain", "act:new");
+    actItem.onclick = () => openActForCurrent();
+    smDet.appendChild(actItem);
     host.appendChild(smDet);
 
     // A free-text literal / expression block: drop it and type the logic.
@@ -2989,6 +3141,7 @@ diagramHostEl.addEventListener("drop", async ev => {
   // A state machine isn't a placed block — it opens the textual editor bound
   // to the operator whose canvas this is.
   if (data === "sm:new") { openStateMachineForCurrent(); return; }
+  if (data === "act:new") { openActForCurrent(); return; }
   const svgEl = document.getElementById("diagram-svg");
   const r = (svgEl || diagramHostEl).getBoundingClientRect();
   const z = state.view.zoom;
@@ -3333,11 +3486,18 @@ async function deleteSelected() {
   const d = state.diagramData;
   if (!d || !state.selected.length) return;
   const known = new Set(knownVarNames());
-  const eqIdx = [], vars = [];
+  const eqIdx = [], vars = [], constructs = [];
   for (const id of state.selected) {
     const m = /^eq(\d+)$/.exec(id);
     if (m) eqIdx.push(+m[1]);
     else if (known.has(id)) vars.push(id);
+    else if (constructOf(id)) constructs.push(constructOf(id));
+  }
+  // Owned state machines / activations go first: removing one frees the
+  // variables it drives before any of those are removed.
+  for (const c of constructs) {
+    const url = c.kind === "sm" ? "/api/edit/remove_state_machine" : "/api/edit/remove_activation";
+    if (!(await propsFetch(url, { name: c.name }))) return;
   }
   for (const name of vars) {
     if (!(await propsFetch("/api/edit/remove_port", { node: d.node, name }))) return;
@@ -3348,7 +3508,7 @@ async function deleteSelected() {
   }
   state.selected = [];
   state.selection = null;
-  wireStatus("deleted " + (vars.length + eqIdx.length) + " item(s) — Ctrl+Z to undo");
+  wireStatus("deleted " + (constructs.length + vars.length + eqIdx.length) + " item(s) — Ctrl+Z to undo");
   await propsReload();
 }
 
@@ -3491,9 +3651,27 @@ function renderProps() {
   }
   const eqMatch = /^eq(\d+)$/.exec(id);
   const ghost = (d.ghosts || []).find(g => g.name === id);
+  const construct = constructOf(id);
   let html = "";
   let varItem = null;
   let role = null;
+  if (construct) {
+    // An owned construct is edited in its own editor; the sheet summarises
+    // what it reads and drives.
+    const kind = construct.kind === "sm" ? "state machine" : "activation (if / elsif / else)";
+    host.innerHTML = "<h4 style='margin-top:2px'>" + escapeHTML(kind) + " <span class='badge'>" +
+      escapeHTML(construct.name) + "</span></h4>" +
+      '<div class="row"><label>drives</label><span>' + escapeHTML(construct.drives.join(", ")) + "</span></div>" +
+      '<div class="row"><label>reads</label><span>' +
+      escapeHTML((construct.inputs || []).map(p => p.name).join(", ") || "—") + "</span></div>" +
+      '<div class="row" style="align-items:flex-start"><label>' +
+      (construct.kind === "sm" ? "states" : "branches") + '</label><span class="build-note">' +
+      (construct.detail || []).map(escapeHTML).join("<br>") + "</span></div>" +
+      (construct.invalid ? '<p class="severity-Error">' + escapeHTML(construct.reason || "") + "</p>" : "") +
+      '<button class="primary" onclick="openConstructEditor(' + escapeAttr(JSON.stringify(id)) + ')">Edit…</button>' +
+      '<button onclick="deleteSelected()">Delete</button>';
+    return;
+  }
   if (eqMatch && d.equations[+eqMatch[1]]) {
     const i = +eqMatch[1], eq = d.equations[i];
     const what = eq.symbol ? (eq.symbol.kind === "call" ? "operator call " + eq.symbol.text
@@ -4243,6 +4421,344 @@ function setFsmStatus(ok, msg) {
   const el = document.getElementById("fsm-status");
   el.style.color = ok ? "#107c10" : "#c42b1c";
   el.textContent = msg;
+}
+
+// --- Conditional activations: the activate-if decision-tree editor ------------
+
+// The activation open for editing (its name), or null when creating one.
+let actEditing = null;
+
+function setActStatus(ok, msg) {
+  const el = document.getElementById("act-status");
+  el.style.color = ok ? "#107c10" : "#c42b1c";
+  el.textContent = msg;
+}
+
+/// Split `s` at the first `sep` outside (), [] and {} — so a `:` or `;`
+/// inside an expression never splits a branch line.
+function splitTopLevel(s, sep) {
+  let depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if ("([{".includes(ch)) depth++;
+    else if (")]}".includes(ch)) depth--;
+    else if (ch === sep && depth === 0) return [s.slice(0, i), s.slice(i + 1)];
+  }
+  return [s, null];
+}
+
+function splitAllTopLevel(s, sep) {
+  const out = [];
+  let rest = s;
+  for (;;) {
+    const [a, b] = splitTopLevel(rest, sep);
+    out.push(a);
+    if (b === null) return out;
+    rest = b;
+  }
+}
+
+/// Parse the textual editor into the structured payload plus a list of
+/// problems. Grammar, one branch per line, first match wins:
+///   if <cond> [as Name]: lhs = expr; lhs = expr
+///   elsif <cond> [as Name]: …
+///   else: …
+/// Types of the driven variables come from the owning operator.
+function actParse() {
+  const op = document.getElementById("act-operator").value;
+  const node = findNode(op);
+  const errors = [];
+  const branches = [];
+  let elseEqs = null;
+  document.getElementById("act-branches").value.split("\n").forEach((raw, ln) => {
+    const line = raw.trim();
+    if (!line) return;
+    const where = "line " + (ln + 1) + ": ";
+    const [head, body] = splitTopLevel(line, ":");
+    if (body === null) { errors.push(where + "expected `if <condition>: lhs = expr; …`"); return; }
+    const eqs = [];
+    for (const seg of splitAllTopLevel(body, ";").map(s => s.trim()).filter(Boolean)) {
+      const m = /^([A-Za-z_]\w*)\s*=\s*([\s\S]+)$/.exec(seg);
+      if (!m) { errors.push(where + "each part is `lhs = expr` — got: " + seg); return; }
+      eqs.push({ lhs: m[1], body: m[2].trim() });
+    }
+    const h = head.trim();
+    if (h === "else") {
+      if (elseEqs) errors.push(where + "only one `else` branch");
+      elseEqs = eqs;
+      return;
+    }
+    const hm = /^(if|elsif)\s+([\s\S]+?)(?:\s+as\s+([A-Za-z_]\w*))?$/.exec(h);
+    if (!hm) { errors.push(where + "a branch starts with `if`, `elsif` or `else`"); return; }
+    if ((hm[1] === "if") !== (branches.length === 0)) {
+      errors.push(where + "the first branch is `if`, later ones `elsif`");
+    }
+    if (elseEqs) errors.push(where + "`else` must be the last branch");
+    branches.push({ name: hm[3] || "", condition: hm[2].trim(), equations: eqs });
+  });
+  if (!branches.length) errors.push("needs at least `if <condition>: …`");
+  if (!elseEqs) errors.push("needs an `else:` branch — the tree must be exhaustive");
+  const outputs = [];
+  const names = document.getElementById("act-outputs").value.split(",").map(s => s.trim()).filter(Boolean);
+  for (const n of names) {
+    const p = node && [...(node.outputs || []), ...(node.locals || [])].find(q => q.name === n);
+    if (!p) { errors.push("`" + n + "` is not an output or local of " + (op || "the operator")); continue; }
+    outputs.push({ name: n, type: typeName(p.type) });
+  }
+  if (!names.length) errors.push("list the variables it drives");
+  // Exhaustiveness, as the server will check it (the server also type-checks).
+  for (const o of outputs) {
+    for (const b of branches) {
+      if (!b.equations.some(e => e.lhs === o.name)) {
+        errors.push("`" + o.name + "` is not assigned in " + (b.name || "`if " + b.condition + "`"));
+      }
+    }
+    if (elseEqs && !elseEqs.some(e => e.lhs === o.name)) errors.push("`" + o.name + "` is not assigned in else");
+  }
+  const name = actEditing || document.getElementById("act-name").value.trim();
+  return {
+    payload: { name, operator: op, outputs, branches, else: { equations: elseEqs || [] } },
+    errors,
+  };
+}
+
+/// Draw an activation as a SCADE-style decision tree: a spine of condition
+/// diamonds (first match wins, "no" falls through downward), each "yes"
+/// arrow selecting its branch scope, and the else terminal at the bottom.
+function renderActTree(a) {
+  const host = document.getElementById("act-host");
+  const rows = (a.branches || []).map(b => ({ kind: "if", b }))
+    .concat([{ kind: "else", b: { name: "else", equations: (a.else || {}).equations || [] } }]);
+  const eqLine = e => e.lhs + " = " + e.body;
+  const longest = Math.max(12, ...rows.flatMap(r => r.b.equations.map(e => eqLine(e).length)),
+    ...rows.map(r => (r.b.name || "").length + 4));
+  const DX = 60, DW = 30, DH = 18, BX = 250, BW = Math.min(420, Math.round(longest * 6.3 + 24));
+  let y = 12, svg = "";
+  const layout = rows.map(r => {
+    const bh = 22 + Math.max(1, r.b.equations.length) * 14;
+    const rh = Math.max(58, bh + 18);
+    const cy = y + rh / 2;
+    const out = { r, cy, bh, top: y };
+    y += rh;
+    return out;
+  });
+  const W = BX + BW + 20, H = y + 8;
+  svg += '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">' +
+    '<defs><marker id="act-arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
+    '<path d="M0,0 L7,3 L0,6 z" fill="#4a4a4a"/></marker></defs>';
+  layout.forEach((L, i) => {
+    const { r, cy, bh } = L;
+    const next = layout[i + 1];
+    if (r.kind === "if") {
+      // Condition diamond on the spine, its text above the "yes" arrow.
+      svg += '<path class="box eq" d="M ' + DX + " " + (cy - DH) + " L " + (DX + DW) + " " + cy +
+        " L " + DX + " " + (cy + DH) + " L " + (DX - DW) + " " + cy + ' Z"/>' +
+        '<text class="sym" x="' + DX + '" y="' + (cy + 4) + '" text-anchor="middle">' +
+        (i === 0 ? "if" : "elsif") + "</text>";
+      const cond = r.b.condition.length > 30 ? r.b.condition.slice(0, 29) + "…" : r.b.condition;
+      svg += '<text x="' + (DX + DW + 8) + '" y="' + (cy - 6) + '">' + escapeHTML(cond) + "</text>";
+      svg += '<path class="wire" marker-end="url(#act-arr)" d="M ' + (DX + DW) + " " + cy +
+        " L " + (BX - 2) + " " + cy + '"/>';
+      if (next) {
+        const ny = next.r.kind === "if" ? next.cy - DH : next.cy - 11;
+        svg += '<path class="wire" marker-end="url(#act-arr)" d="M ' + DX + " " + (cy + DH) +
+          " L " + DX + " " + (ny - 2) + '"/>' +
+          '<text class="label" x="' + (DX + 5) + '" y="' + (cy + DH + 12) + '">no</text>';
+      }
+    } else {
+      // The else terminal, then its arrow into the else scope.
+      svg += '<rect class="box" x="' + (DX - 24) + '" y="' + (cy - 11) + '" width="48" height="22" rx="11"/>' +
+        '<text x="' + DX + '" y="' + (cy + 4) + '" text-anchor="middle">else</text>' +
+        '<path class="wire" marker-end="url(#act-arr)" d="M ' + (DX + 24) + " " + cy +
+        " L " + (BX - 2) + " " + cy + '"/>';
+    }
+    // The branch scope: its name, then the equations it applies.
+    const by = cy - bh / 2;
+    const label = r.kind === "else" ? "else" : (r.b.name || "branch " + (i + 1));
+    svg += '<rect class="box eq" x="' + BX + '" y="' + by + '" width="' + BW + '" height="' + bh + '" rx="3"/>' +
+      '<text class="construct-name" x="' + (BX + 8) + '" y="' + (by + 15) + '">' + escapeHTML(label) + "</text>";
+    (r.b.equations.length ? r.b.equations : [{ lhs: "—", body: "(assigns nothing)" }]).forEach((e, k) => {
+      svg += '<text class="construct-line" x="' + (BX + 10) + '" y="' + (by + 30 + k * 14) + '">' +
+        escapeHTML(eqLine(e)) + "</text>";
+    });
+  });
+  host.innerHTML = svg + "</svg>";
+}
+
+/// Live preview: re-parse, redraw the decision tree, list any problems.
+function actPreview() {
+  const { payload, errors } = actParse();
+  if (payload.branches.length) renderActTree(payload);
+  const pv = document.getElementById("act-preview");
+  pv.innerHTML = errors.length
+    ? errors.map(e => '<span class="err">✖ ' + escapeHTML(e) + "</span>").join("<br>")
+    : '<span class="kw">✓</span> ' + payload.branches.length + " branch(es) + else · drives " +
+      escapeHTML(payload.outputs.map(o => o.name + ": " + o.type).join(", "));
+}
+
+async function loadActList() {
+  let data;
+  try { data = await fetchJSON("/api/activation"); } catch (e) { return; }
+  const sel = document.getElementById("act-select");
+  sel.innerHTML = '<option value="">— new —</option>';
+  for (const n of data.activations) {
+    const o = document.createElement("option");
+    o.value = n; o.textContent = n;
+    sel.appendChild(o);
+  }
+}
+
+function populateActOperators() {
+  const sel = document.getElementById("act-operator");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  const names = (state.inspect?.project?.packages || [])
+    .filter(p => p.name !== "stdlib")
+    .flatMap(p => (p.nodes || []).map(n => n.name));
+  for (const nm of names) {
+    const o = document.createElement("option");
+    o.value = nm; o.textContent = nm;
+    sel.appendChild(o);
+  }
+  if (names.includes(prev)) sel.value = prev;
+}
+
+// A new tree drives the operator's outputs by default.
+function actOperatorChanged() {
+  const n = findNode(document.getElementById("act-operator").value);
+  const drives = document.getElementById("act-outputs");
+  if (!actEditing && n && !drives.value.trim()) {
+    drives.value = (n.outputs || []).map(p => p.name).join(", ");
+  }
+  actPreview();
+}
+
+/// Reset to a blank form (`reset`), or fill a starter tree for the chosen
+/// operator: its first bool input selects, its outputs are driven.
+function actTemplate(reset) {
+  const name = document.getElementById("act-name");
+  const sel = document.getElementById("act-operator");
+  if (reset) {
+    actEditing = null;
+    document.getElementById("act-form-title").textContent = "New activation";
+    document.getElementById("act-save-btn").textContent = "Create activation";
+    document.getElementById("act-select").value = "";
+    name.value = ""; name.readOnly = false;
+    sel.disabled = false;
+    document.getElementById("act-outputs").value = "";
+    document.getElementById("act-branches").value = "";
+    document.getElementById("act-host").innerHTML = "";
+    document.getElementById("act-preview").innerHTML = "";
+    setActStatus(true, "");
+    return;
+  }
+  const n = findNode(sel.value);
+  if (!n) { setActStatus(false, "choose the operator first"); return; }
+  const cond = (n.inputs || []).find(p => typeKind(p.type) === "Bool");
+  const num = (n.inputs || []).find(p => typeKind(p.type) !== "Bool");
+  const outs = n.outputs || [];
+  if (!outs.length) { setActStatus(false, n.name + " has no outputs to drive"); return; }
+  const val = (p, on) => typeKind(p.type) === "Bool" ? String(on) : (on && num ? num.name : "0");
+  const assign = on => outs.map(p => p.name + " = " + val(p, on)).join("; ");
+  if (!actEditing && !name.value.trim()) name.value = n.name + "_if";
+  document.getElementById("act-outputs").value = outs.map(p => p.name).join(", ");
+  document.getElementById("act-branches").value =
+    "if " + (cond ? cond.name : "true") + " as Active: " + assign(true) + "\nelse: " + assign(false);
+  actPreview();
+}
+
+// Fill the textual form from a fetched activation (inverse of actParse).
+function actLoadIntoForm(a) {
+  actEditing = a.name;
+  document.getElementById("act-form-title").textContent = "Editing " + a.name;
+  document.getElementById("act-save-btn").textContent = "Save changes";
+  const name = document.getElementById("act-name");
+  name.value = a.name; name.readOnly = true;
+  const sel = document.getElementById("act-operator");
+  sel.value = a.owner; sel.disabled = true;
+  document.getElementById("act-outputs").value = a.outputs.map(o => o.name).join(", ");
+  const eqs = list => list.map(e => e.lhs + " = " + e.body).join("; ");
+  const lines = a.branches.map((b, i) =>
+    (i === 0 ? "if " : "elsif ") + b.condition +
+    (/^B\d+$/.test(b.name) ? "" : " as " + b.name) + ": " + eqs(b.equations));
+  lines.push("else: " + eqs(a.else.equations));
+  document.getElementById("act-branches").value = lines.join("\n");
+  actPreview();
+}
+
+async function actView() {
+  const name = document.getElementById("act-select").value;
+  if (!name) { actTemplate(true); return; }
+  let a;
+  try { a = await fetchJSON("/api/activation?name=" + encodeURIComponent(name)); }
+  catch (e) { setActStatus(false, "" + e); return; }
+  actLoadIntoForm(a);
+  renderActTree(a);
+}
+
+async function openActEditor(name, ownerOp) {
+  openDialog("dlg-act");
+  await loadActList();
+  populateActOperators();
+  actTemplate(true);
+  if (name) {
+    document.getElementById("act-select").value = name;
+    await actView();
+  } else {
+    const op = ownerOp || (state.selectedNode && state.selectedNode.name);
+    const sel = document.getElementById("act-operator");
+    if (op && [...sel.options].some(o => o.value === op)) sel.value = op;
+    actTemplate(false);
+  }
+}
+
+// Insert ▸ Activation / the palette item / a canvas drop: a new tree owned by
+// the operator whose canvas is open.
+function openActForCurrent() {
+  openActEditor(null, state.diagramData?.node);
+}
+
+async function actSave() {
+  const { payload, errors } = actParse();
+  if (!payload.name) { setActStatus(false, "the activation needs a name"); return; }
+  if (!payload.operator) { setActStatus(false, "choose the operator it belongs to"); return; }
+  if (errors.length) { setActStatus(false, errors[0]); return; }
+  const editing = actEditing;
+  const url = editing ? "/api/edit/update_activation" : "/api/edit/add_activation";
+  const r = await fetch(url, { method: "POST", body: JSON.stringify(payload) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    setActStatus(false, msg);
+    return;
+  }
+  setActStatus(true, editing
+    ? "saved ✓ — the tree re-lowers into " + payload.operator
+    : "created ✓ — it now defines " + payload.outputs.map(o => o.name).join(", ") + " in " + payload.operator);
+  await refresh();
+  await loadActList();
+  document.getElementById("act-select").value = payload.name;
+  await actView();
+  if (state.diagramData) loadDiagram(state.diagramData.node, false);
+}
+
+function activationTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const item = (label, fn) => {
+    const d = document.createElement("div");
+    d.className = "ctx-item"; d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    m.appendChild(d);
+  };
+  item("Edit " + name, () => openActEditor(name));
+  item("Delete " + name, () => postEdit("/api/edit/remove_activation", { name }));
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
 }
 
 // --- Editing dialogs ----------------------------------------------------------------
