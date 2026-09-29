@@ -230,4 +230,8 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("function verifyShowCex") && html.contains("id=\"verify-wave\""), "counterexample waveform missing");
     assert!(html.contains("function simReplay") && html.contains("sequence"), "replay in the simulator missing");
     assert!(html.contains("function dockToggleMax"), "resizable dock missing");
+    // C in the loop: the toggle, the attach call, and the compared overlay.
+    assert!(html.contains("id=\"sim-cil\"") && html.contains("/api/sim/c"), "C-in-the-loop toggle missing");
+    assert!(html.contains("function simSetC") && html.contains("function simShownCDiff"), "C-in-the-loop client missing");
+    assert!(html.contains("stop_on_divergence"), "stop on divergence missing");
 }

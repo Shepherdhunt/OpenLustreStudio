@@ -256,6 +256,11 @@
   #sim-monitor { margin: 0 0 3px; }
   #sim-monitor .err { color: #c42b1c; font-weight: 600; }
   .watch-internal td { color: #8a8a8a; font-size: 11px; }
+  /* C in the loop: the compiled program's value beside the model's. */
+  .watch-c { display: none; font-family: Consolas, monospace; }
+  #sim-watch.cil .watch-c { display: table-cell; }
+  .watch-c.bad { color: #c42b1c; font-weight: 700; background: #fdeeee; }
+  svg text.live-val.bad { fill: #c42b1c; }
   #sim-wave { flex: 1; min-height: 90px; }
   /* --- Waveform viewer ---------------------------------------------------- */
   .wave { display: flex; flex-direction: column; min-height: 0; border: 1px solid #d5d5d5; background: #fff; }
@@ -584,12 +589,13 @@
         <button onclick="simRestart()" title="Back to cycle 0 (inputs are kept)">Reset</button>
         <button onclick="simStop()">Stop</button>
         <label><input type="checkbox" id="sim-live" checked onchange="renderDiagram()"> live values on the diagram</label>
+        <label title="Compile the generated C of the simulated operator and step it in lockstep with the model: its outputs are compared every cycle, and a Run stops where they first differ"><input type="checkbox" id="sim-cil" onchange="simSetC(this.checked)"> C in the loop</label>
       </div>
       <div id="sim-note" class="build-note">Build an operator, then Simulate (Build dock ▸ 2, or Simulation ▸ Run). Inputs hold their values until you change them.</div>
       <div class="sim-cols">
         <div class="sim-watch-wrap">
           <table id="sim-watch" class="watch-table">
-            <thead><tr><th>name : type</th><th>value</th></tr></thead>
+            <thead><tr><th>name : type</th><th>value</th><th class="watch-c" title="The compiled C's value this cycle">C</th></tr></thead>
             <tbody id="sim-watch-body"></tbody>
           </table>
         </div>
@@ -985,8 +991,9 @@ const state = {
   // rows: every cycle of the session (the newest SIM_WAVE_ROWS) for the
   // waveform; review: the index of the row shown on the diagram instead of
   // the latest; marks: where runs stopped (breakpoint / violation).
+  // c: the compiled C in the loop — {columns, divergedAt} — or null.
   sim: { built: false, running: false, values: {}, session: null, last: null, violatedCycles: 0,
-         rows: [], review: null, marks: [] },
+         rows: [], review: null, marks: [], c: null },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
   pipeline: { built: false, generated: false, lustre: "", sig: "" },
@@ -1592,7 +1599,7 @@ async function refresh() {
   setMenuEnabled("mi-undo", (ins.history?.undo ?? 0) > 0);
   setMenuEnabled("mi-redo", (ins.history?.redo ?? 0) > 0);
   const e = entryNode();
-  document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
+  if (!state.sim.session) document.getElementById("step-entry-name").textContent = e ? e.name : "(no main)";
   document.getElementById("build-entry").textContent = ins.project.main || "(no main)";
 }
 
@@ -1739,6 +1746,8 @@ async function simStop() {
   state.sim.session = null;
   state.sim.last = null;
   state.sim.review = null; // the waveform keeps the stopped run for inspection
+  state.sim.c = null;       // the server's session (and its C) is gone
+  document.getElementById("sim-watch").classList.remove("cil");
   const latest = document.getElementById("sim-latest");
   if (latest) latest.style.display = "none";
   document.getElementById("step-cycle").textContent = "0";
@@ -2423,6 +2432,7 @@ function renderDiagram() {
   const collapsed = collapsedLocals(d);
   // The latest simulated cycle, when this is the simulated operator.
   const live = liveValues();
+  const cDiff = live ? simShownCDiff() : null;
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
     cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "in", liveVar: p.name }));
@@ -2579,10 +2589,18 @@ function renderDiagram() {
     // (clear of the pennant point / pins): green true, grey false.
     if (live && it.liveVar && live[it.liveVar] != null) {
       const val = live[it.liveVar];
-      const tone = val === "true" ? "t" : val === "false" ? "f" : "n";
+      const cval = cDiff && cDiff[it.liveVar];
+      const tone = cval != null ? "bad" : val === "true" ? "t" : val === "false" ? "f" : "n";
       const inset = it.shape === "in" ? 16 : 12;
+      const cut = (t, k) => t.length > k ? t.slice(0, k - 1) + "…" : t;
+      const tip = cval != null ? "<title>model " + escapeHTML(val) + ", compiled C " + escapeHTML(cval) + "</title>" : "";
       svg += '<text class="live-val ' + tone + '" x="' + (p.x + p.w - inset) + '" y="' + (p.y + h / 2 + 4) +
-        '" text-anchor="end">' + escapeHTML(val.length > 14 ? val.slice(0, 13) + "…" : val) + "</text>";
+        '" text-anchor="end">' + tip + escapeHTML(cut(val, 14)) + "</text>";
+      // C in the loop: where the compiled C disagrees, its value under the block.
+      if (cval != null) {
+        svg += '<text class="live-val bad" x="' + (p.x + p.w - inset) + '" y="' + (p.y + h + 12) +
+          '" text-anchor="end">' + tip + "≠ C " + escapeHTML(cut(cval, 14)) + "</text>";
+      }
     }
     // Bottom-right resize grip (skipped on transient ghost boxes).
     if (it.cls.indexOf("ghost") < 0) {
@@ -5820,6 +5838,15 @@ function waveNum(v) {
   return m ? Number(m[1]) / Number(m[2]) : Number(v);
 }
 
+/// Whether lane `l` disagrees with its reference at cycle `i`: the lane's own
+/// verdict when it carries one (`diff`, e.g. the server's tolerance-aware
+/// float comparison), else the texts differ. No reference, no comparison.
+function waveDiffers(l, i) {
+  if (!l.ref || l.ref[i] == null) return false;
+  if (l.diff) return !!l.diff[i];
+  return (l.values[i] == null ? "" : l.values[i]) !== l.ref[i];
+}
+
 /// How a lane draws: from its type, else guessed from its values.
 function waveStyleOf(lane) {
   if (lane.check) return "check";
@@ -6057,9 +6084,12 @@ function waveDraw(w) {
     g += '<line class="ws" x1="0" x2="' + X(n) + '" y1="' + (l.y + l.h - 0.5) + '" y2="' + (l.y + l.h - 0.5) + '"/>';
     const v = i => l.values[i] == null ? "" : l.values[i];
     if (l.ref) {
+      // A cycle without a reference value (e.g. before the C joined the
+      // loop) is not compared.
       const r = i => l.ref[i] == null ? "" : l.ref[i];
-      for (const [a, b] of waveRuns(c0, c1, i => v(i) !== r(i))) {
-        if (v(a) === r(a)) continue;
+      const differs = i => waveDiffers(l, i);
+      for (const [a, b] of waveRuns(c0, c1, differs)) {
+        if (!differs(a)) continue;
         g += '<rect class="wdiff" x="' + X(a) + '" y="' + l.y + '" width="' + X(b - a) + '" height="' + (l.h - 1) + '"/>';
         // The expected value, where a cycle is wide enough to say it.
         if (l.style === "analog") {
@@ -6138,7 +6168,10 @@ function waveDraw(w) {
     if (mk.at < c0 || mk.at >= c1) continue;
     const x = X(mk.at) + px / 2;
     g += '<line class="wm wm-' + mk.cls + '" x1="' + x + '" x2="' + x + '" y1="0" y2="' + H + '"/>';
-    axis += '<text class="wmf wm-' + mk.cls + '" x="' + (x + 3) + '" y="12">' + escapeHTML(mk.label) + "</text>";
+    // Near the end of the trace the flag reads leftwards, so it stays in view.
+    const left = x + 3 + mk.label.length * 6.5 > X(n) + 8;
+    axis += '<text class="wmf wm-' + mk.cls + '" x="' + (left ? x - 3 : x + 3) + '" y="12"' +
+      (left ? ' text-anchor="end"' : "") + ">" + escapeHTML(mk.label) + "</text>";
   }
   g += '<rect class="wpin" y="0" height="' + H + '" width="' + px + '" style="display:none"/>' +
     '<line class="whover" y1="0" y2="' + H + '" style="display:none"/>';
@@ -6175,11 +6208,11 @@ function waveCursor(w) {
     const el = w.valEls[k];
     if (!el) return;
     const s = i >= 0 && l.values[i] != null ? l.values[i] : "";
-    const r = l.ref ? (l.ref[i] == null ? "" : l.ref[i]) : null;
+    const r = l.ref && l.ref[i] != null ? l.ref[i] : null;
     let text = l.style === "check" ? (s ? "✖ " + s : n ? "✓" : "") : s === "" ? "—" : s;
     el.className = "wn-val" + (l.style === "check" && s ? " bad" : "");
-    el.title = "";
-    if (r != null && r !== s) {
+    el.title = r != null && r !== s ? (m.refLabel || "reference") + ": " + r : "";
+    if (i >= 0 && waveDiffers(l, i)) {
       el.className = "wn-val bad";
       text = "✖ " + (s === "" ? "—" : s);
       el.title = (m.refLabel || "reference") + ": " + (r === "" ? "—" : r);
@@ -6224,8 +6257,8 @@ function waveTable(w) {
       escapeHTML(String(m.cycles[i])) + (marks.has(i) ? " ◂" : "") + "</td>";
     for (const l of w.lanes) {
       const s = l.values[i] == null ? "" : l.values[i];
-      const r = l.ref ? (l.ref[i] == null ? "" : l.ref[i]) : null;
-      if (r != null && r !== s) {
+      const r = l.ref && l.ref[i] != null ? l.ref[i] : null;
+      if (waveDiffers(l, i)) {
         h += '<td class="tdiff" title="' + escAttr((m.refLabel || "reference") + ": " + r) + '">' + escapeHTML(s || "—") + " ✖</td>";
       } else if (l.style === "check") {
         h += s ? '<td class="tdiff">✖ ' + escapeHTML(s) + "</td>" : "<td>✓</td>";
@@ -6278,7 +6311,18 @@ function simShown() {
   if (!row) return s.last;
   const values = {};
   simSignals().forEach((g, i) => values[g.name] = row.values[i]);
-  return { cycle: row.cycle, values, modes: row.modes || [], violations: row.violations || [], review: true };
+  return { cycle: row.cycle, values, modes: row.modes || [], violations: row.violations || [], review: true,
+           c: row.c, cDiff: row.c_diff };
+}
+
+/// name → the compiled C's value, for the columns where it differs from the
+/// model on the shown cycle (C in the loop); null when they agree.
+function simShownCDiff() {
+  const s = state.sim, shown = simShown();
+  if (!s.c || !shown || !shown.c || !shown.cDiff || !shown.cDiff.length) return null;
+  const out = {};
+  shown.cDiff.forEach(n => { const i = s.c.columns.indexOf(n); if (i >= 0) out[n] = shown.c[i]; });
+  return out;
 }
 
 /// name → value text for the shown cycle, when the diagram shows the
@@ -6305,7 +6349,7 @@ async function simStart(node) {
     setSimStatus("simulation not started");
     return false;
   }
-  Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0, rows: [], review: null, marks: [] });
+  Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0, rows: [], review: null, marks: [], c: null });
   simBuildWatchTable();
   simWaveUpdate();
   document.getElementById("step-cycle").textContent = "0";
@@ -6317,7 +6361,75 @@ async function simStart(node) {
   setSimNote("ok", "session on " + d.root + " at cycle 0 — set the inputs, then Step or Run");
   renderSimChip();
   if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
+  if (document.getElementById("sim-cil").checked) await simSetC(true);
   return true;
+}
+
+/// Put the compiled C of the simulated operator in the loop, or take it out.
+/// Attaching compiles (or reuses the build of an unchanged model) and replays
+/// the session so far through it; from then on every cycle is compared.
+async function simSetC(on) {
+  const s = state.sim, box = document.getElementById("sim-cil");
+  box.checked = on;
+  if (!s.session) {
+    if (on) setSimNote("", "the compiled C joins the loop when the simulation starts");
+    return true;
+  }
+  if (!on) {
+    try { await fetch("/api/sim/c", { method: "POST", body: JSON.stringify({ on: false }) }); } catch (_) {}
+    s.c = null;
+    setSimNote("", "the compiled C is out of the loop");
+    simAfterC();
+    return true;
+  }
+  setSimNote("", "compiling " + s.session.root + " to C…");
+  let r, d;
+  try {
+    r = await fetch("/api/sim/c", { method: "POST", body: JSON.stringify({ on: true }) });
+    d = await r.json();
+  } catch (e) { r = { ok: false, status: 0 }; d = { error: "the request failed" }; }
+  if (r.status === 409 && d.stale) { await simStart(s.session.root); return false; }
+  if (!r.ok) {
+    box.checked = false;
+    s.c = null;
+    setSimNote("err", "C in the loop: " + (d.error || "failed"));
+    simAfterC();
+    return false;
+  }
+  // Fold the replayed history into the rows the waveform already has.
+  const base = s.rows.length ? s.rows[0].cycle : 0;
+  for (const h of d.rows) {
+    const row = s.rows[h.cycle - base];
+    if (row) { row.c = h.c; row.c_diff = h.c_diff; }
+  }
+  s.c = { columns: d.columns, divergedAt: null };
+  if (d.diverged_at != null) simMarkDivergence(d.diverged_at, s.rows[d.diverged_at - base]);
+  const lastRow = s.rows[s.rows.length - 1];
+  if (s.last && lastRow) { s.last.c = lastRow.c; s.last.cDiff = lastRow.c_diff; }
+  const replay = d.rows.length
+    ? ", replayed " + d.rows.length + (d.rows.length === 1 ? " cycle" : " cycles") + ": " +
+      (d.diverged_at == null ? "identical" : "differs from cycle " + d.diverged_at)
+    : "";
+  setSimNote(d.diverged_at == null ? "ok" : "err", "C in the loop — " + (d.reused_build ? "reused the build" : "compiled") +
+    replay + "; every cycle is compared from here");
+  simAfterC();
+  return true;
+}
+
+function simAfterC() {
+  document.getElementById("sim-watch").classList.toggle("cil", !!state.sim.c);
+  simWaveUpdate();
+  simShowCycle();
+}
+
+/// The first cycle where the C and the model disagree: marked on the
+/// waveform (later ones show as banded cells).
+function simMarkDivergence(cycle, row) {
+  const s = state.sim;
+  if (!s.c || s.c.divergedAt != null) return;
+  s.c.divergedAt = cycle;
+  const cols = row && row.c_diff ? row.c_diff : [];
+  s.marks.push({ cycle, label: "≠ C" + (cols.length ? ": " + cols.join(", ") : ""), cls: "diverge" });
 }
 
 /// Run `count` cycles with the held inputs (the breakpoint applies to Run).
@@ -6329,7 +6441,11 @@ async function simAdvance(count, withBreak) {
     if (!v.ok) { setSimNote("err", "input " + s.name + ": " + v.msg); return; }
     inputs[s.name] = v.norm;
   }
-  const req = { inputs, count, stop_on_violation: document.getElementById("sim-stop-viol").checked };
+  // A Run stops where the C first departs from the model; once they have
+  // diverged, runs carry on (the waveform bands every differing cycle).
+  const c = state.sim.c;
+  const req = { inputs, count, stop_on_violation: document.getElementById("sim-stop-viol").checked,
+                stop_on_divergence: !!c && c.divergedAt == null && count > 1 };
   const brk = document.getElementById("sim-break").value.trim();
   if (withBreak && brk) req.break = brk;
   let r, d;
@@ -6358,8 +6474,11 @@ function simTake(d, req) {
     const last = rows[rows.length - 1];
     const values = {};
     sigs.forEach((g, i) => values[g.name] = last.values[i]);
-    s.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [] };
+    s.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [],
+               c: last.c, cDiff: last.c_diff };
   }
+  const firstDiff = rows.find(r => r.c_diff && r.c_diff.length);
+  if (firstDiff) simMarkDivergence(firstDiff.cycle, firstDiff);
   s.session.cycle = d.cycle;
   s.review = null; // stepping returns the diagram to the latest cycle
   document.getElementById("step-cycle").textContent = d.cycle;
@@ -6370,8 +6489,18 @@ function simTake(d, req) {
   } else if (d.stopped === "violation") {
     setSimNote("err", "⏸ stopped after cycle " + last.cycle + ": violated " + last.violations.join(", "));
     s.marks.push({ cycle: last.cycle, label: "✖ " + last.violations.join(", "), cls: "fail" });
+  } else if (d.stopped === "divergence") {
+    setSimNote("err", "⏸ stopped after cycle " + last.cycle + ": the compiled C differs from the model in " + (last.cDiff || []).join(", "));
   } else if (d.stopped === "error") setSimNote("err", d.error || "evaluation error");
-  else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
+  else if (last && last.cDiff && last.cDiff.length) {
+    setSimNote("err", "cycle " + last.cycle + ": the compiled C differs from the model in " + last.cDiff.join(", "));
+  } else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
+  if (d.c_error) {
+    s.c = null;
+    document.getElementById("sim-cil").checked = false;
+    document.getElementById("sim-watch").classList.remove("cil");
+    setSimNote("err", d.c_error);
+  }
   if (s.marks.length > 50) s.marks.shift();
   setSimStatus("SIMULATING " + s.session.root + " — cycle " + d.cycle);
   if (s.wave) s.wave.pinned = null;
@@ -6401,9 +6530,22 @@ function simWaveModel() {
     lanes.push({ id: "#mode", name: "mode", kind: "contract", values: rows.map(r => (r.modes || []).join(", ")) });
     lanes.push({ id: "#check", name: "contract", kind: "contract", check: true, values: rows.map(r => (r.violations || []).join(", ")) });
   }
+  // C in the loop: the compiled program's values as each compared lane's
+  // reference (cycles before it joined have none, and aren't compared).
+  if (s.c) {
+    const labels = v => v == null ? v : v === "<none>" ? "" : v.split("|").join(", ");
+    const colOf = { "#mode": "active_mode", "#check": "violations" };
+    for (const l of lanes) {
+      const i = s.c.columns.indexOf(colOf[l.id] || l.name);
+      if (i < 0 || (l.kind === "input" || l.kind === "local")) continue;
+      l.ref = rows.map(r => r.c ? (colOf[l.id] ? labels(r.c[i]) : r.c[i]) : undefined);
+      const col = s.c.columns[i];
+      l.diff = rows.map(r => !!(r.c_diff && r.c_diff.includes(col)));
+    }
+  }
   const base = rows.length ? rows[0].cycle : 0;
   const markers = s.marks.filter(mk => mk.cycle >= base).map(mk => ({ at: mk.cycle - base, label: mk.label, cls: mk.cls }));
-  return { cycles: rows.map(r => r.cycle), lanes, markers };
+  return { cycles: rows.map(r => r.cycle), lanes, markers, valLabel: "model", refLabel: "compiled C" };
 }
 
 function simWaveUpdate() {
@@ -6491,16 +6633,28 @@ function simBuildWatchTable() {
       c2.textContent = "—";
     }
     tr.appendChild(c2);
+    const c3 = document.createElement("td");
+    c3.className = "watch-c";
+    c3.id = "watch-c-" + s.name;
+    tr.appendChild(c3);
     body.appendChild(tr);
   }
 }
 
 function simUpdateWatch() {
-  const shown = simShown();
+  const shown = simShown(), sc = state.sim.c;
   const v = shown ? shown.values : {};
   for (const s of simSignals()) {
     const c = document.getElementById("watch-out-" + s.name);
     if (c) c.textContent = v[s.name] != null ? v[s.name] : "—";
+    const cc = document.getElementById("watch-c-" + s.name);
+    if (!cc) continue;
+    const i = sc ? sc.columns.indexOf(s.name) : -1;
+    const cv = i >= 0 && shown && shown.c ? shown.c[i] : null;
+    cc.textContent = i < 0 ? "" : cv != null ? cv : "—";
+    const bad = cv != null && shown.cDiff && shown.cDiff.includes(s.name);
+    cc.className = "watch-c" + (bad ? " bad" : "");
+    cc.title = bad ? "the compiled C computes " + cv + ", the model " + v[s.name] : "";
   }
 }
 
@@ -6534,6 +6688,12 @@ function renderSimChip() {
     chip.textContent = "▶ simulating — cycle " + s.cycle;
     chip.title = "Simulation dock ▸ Step / Run";
     chip.onclick = () => showDock("simulation");
+    const c = state.sim.c;
+    if (c) {
+      chip.textContent += c.divergedAt == null ? " · C ✓ in lockstep" : " · C ≠ from cycle " + c.divergedAt;
+      if (c.divergedAt != null) chip.className = "chip bad";
+      chip.title = "The compiled C runs in the loop, compared every cycle";
+    }
   } else {
     chip.textContent = "▶ simulating " + s.root + " — open it to see live values";
     chip.onclick = () => loadDiagram(s.root, true);
