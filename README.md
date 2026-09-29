@@ -77,6 +77,23 @@ restarts it on the edited model.
 
 ![Live simulation in OpenLustre Studio — the Autopilot operator at cycle 4 with values on every wire, the ModeLamp state machine in On, the CmdSelect activation's "if fault" branch highlighted, the contract chip reading "mode Faulted ✓", and the Simulation dock below with the input watch table, run controls and per-cycle trace.](docs/screenshots/06-live-simulation.png)
 
+**Waveforms.** Every signal of the session is drawn as a lane over cycles:
+Booleans as digital traces, numbers as stepped analog traces, enums and
+contract modes as bus segments, and the contract check as a red/clear status
+lane, with breakpoint and violation stops marked on the time axis. The name
+column is a readout of every value at the hovered cycle. Click a cycle (or
+walk with ←/→) to **review** it: the diagram, state charts, activation
+trees and contract chip all show that cycle until you step again. The same
+viewer opens a test scenario against its golden trace (the golden dashed
+underneath, every differing cell banded red with the expected value, the
+first divergence marked) and a Kind 2 counterexample (the falsifying cycle
+marked). Both can be **replayed in the simulator**, which then keeps
+stepping from where they end.
+
+![The waveform viewer in OpenLustre Studio — the Autopilot session's lanes (engage, fault, alt_err, hold, err2, cmd, safe, mode_lit, mode, contract) with cycle 6 picked for review: the diagram above shows that cycle's values, the Faulted mode and the "if fault" branch.](docs/screenshots/07-waveform-review.png)
+
+![A test scenario against its golden trace — the IR simulator's cmd differs at cycle 7 (10 where the golden has 14): the cell is banded red with "≠14" and the first divergence is marked on the axis.](docs/screenshots/08-waveform-divergence.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 

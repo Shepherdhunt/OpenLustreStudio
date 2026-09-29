@@ -88,6 +88,21 @@ rejected). A step after a semantic model edit answers `409
 monitoring uses the same observer node as the generated C, so the modes
 and violations shown per cycle match a compiled run.
 
+A step can also carry `"sequence": [{name: "text"}, …]` — one input set
+per cycle, with `inputs` filling any gaps — which is how a test scenario
+or a Kind 2 counterexample is replayed in the session. Every step of the
+sequence is parsed before any runs, so a bad value runs nothing (the
+error names the step).
+
+The waveform viewer draws three sources. The session's rows, kept by the
+client (the newest 10000 cycles). `POST /api/tests/run`'s `traces`: per
+scenario, the `golden`, `ir` and `c` traces as `{header, rows,
+truncated}` (at most 5000 rows each; the C trace has the golden's cycle,
+output and monitor columns). And `POST /api/prove`'s per-property
+`trace`: the counterexample as `{cycles, streams: [{scope, name, type,
+class, values}]}` alongside the text `waveform`, plus the `main`
+operator it belongs to.
+
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram
 ReactFlow canvas), but the back-end contract is what was actually

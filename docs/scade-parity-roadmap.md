@@ -33,9 +33,9 @@ no GUI at all.
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
 | C-Lite generation (selected root + closure) | ✅ | ✅ Generate / C pane / save files |
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
-| Stepping / simulation | ✅ batch + full trace; incremental `step_observed` | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram** (was replay-from-zero) |
-| IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage) |
-| Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes | ⚠️ default mode only; counterexample as an ASCII block; **Kind 2 not bundled or in CI** |
+| Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review** (was replay-from-zero) |
+| IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator** |
+| Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples | ⚠️ default mode only; **counterexample as a waveform, replayable in the simulator** (was an ASCII block); **Kind 2 not bundled or in CI** |
 | Evidence report | ❌ | ❌ |
 | Imported C operators | ✅ manifests, wrappers, validation | ❌ no way to register or place one |
 
@@ -103,10 +103,18 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
    layout stripped) and the next Step restarts it. The simulator gained
    an incremental `step_observed` API that the batch CSV runner now uses
    too, so the dock, `simulate` and the tests share one code path.
-3. **Waveform viewer (M).** Signals as digital/analog lanes over cycles, used
-   for step traces, test-scenario diffs (IR vs C divergence highlighted at the
-   first differing cycle), and Kind 2 counterexamples (replacing the ASCII
-   block).
+3. ✅ **Waveform viewer — done.** One component, three uses. The
+   simulation session's cycles as live lanes (digital, stepped analog, bus,
+   and a contract-check status lane; stops marked), where picking a cycle
+   reviews it on the diagram and charts. Each test scenario's IR or C run
+   against its golden, the golden dashed underneath, differing cells
+   banded with the expected value and the first divergence marked. Kind 2
+   counterexamples, with the falsifying cycle marked and the text table
+   kept one click away. Scenarios and counterexamples replay in the live
+   simulator (`/api/sim/step` takes a per-cycle `sequence`), so a failure
+   can be stepped through on the diagram. Only the visible window is drawn,
+   so a 10000-cycle session redraws in milliseconds; a Table view shows
+   the same data for readers who don't want the chart.
 
 ### P1 — SCADE semantics and code-generation quality
 
@@ -154,10 +162,15 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-Items **1** and **2** are done: contracts are authored in the Studio, and
-the design → generate → run → simulate loop is closed with a live,
-incremental simulator on the diagram. Next is item **3** (a waveform
-viewer): the session already produces per-cycle rows with modes and
-violations, so lanes over those rows are the natural display — and the
-same viewer then replaces the ASCII Kind 2 counterexample block and shows
-IR-vs-C divergence in the Tests dock.
+The P0 items are done: contracts are authored in the Studio, the design →
+generate → run → simulate loop is closed with a live, incremental simulator
+on the diagram, and every trace the tool produces (sessions, test runs,
+counterexamples) is a waveform that can be replayed and reviewed cycle by
+cycle.
+
+Next is item **6** (C-in-the-loop stepping): step the compiled executable in
+lockstep with the IR simulator and show it on the same waveform, using the
+reference-lane overlay the Tests dock already uses to flag divergence the
+cycle it happens. That makes the "compile and run, then step" half of the
+working direction interactive rather than batch. After it, item **4**
+(clocked activation) closes the one known semantic gap with SCADE.
