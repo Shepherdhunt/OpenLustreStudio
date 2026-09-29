@@ -11,7 +11,7 @@
 set -eu
 OL="${1:-target/debug/openlustre}"
 OUT="${2:-evidence}"
-TIMEOUT="${PROVE_TIMEOUT:-120}"
+TIMEOUT="${PROVE_TIMEOUT:-600}"
 mkdir -p "$OUT"
 
 status=0

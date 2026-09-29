@@ -46,7 +46,11 @@ jobs:
       - name: The SMS project's own verification, with this build
         run: OPENLUSTRE=$PWD/target/debug/openlustre examples/sms/scripts/verify.sh --quick
 
+      # The SMS (171 properties) takes Kind 2 a few minutes on a hosted
+      # runner; the timeout only caps a proof that cannot settle.
       - name: Prove the examples and build their evidence
+        env:
+          PROVE_TIMEOUT: "600"
         run: tools/prove-examples.sh ./target/debug/openlustre evidence
 
       - name: Keep the evidence reports
