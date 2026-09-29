@@ -173,8 +173,8 @@ name = "kind2_projection"
 path = "kind2_projection.rs"
 
 [[test]]
-name = "sms_example"
-path = "sms_example.rs"
+name = "pms_example"
+path = "pms_example.rs"
 
 [[test]]
 name = "runtime_errors"

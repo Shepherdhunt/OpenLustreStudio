@@ -198,9 +198,9 @@ has no Windows build: use WSL or Docker through `tools/kind2-wsl.cmd` or
 
 ![The Verify dock in OpenLustre Studio — Kind 2 v2.2.0 with Z3 proves an Autopilot contract whose outputs come from a clocked activation: 7 of 8 properties hold, grouped as contract properties (guarantees, mode ensures) and mode coverage (both modes reachable), while "some mode is always active" is falsifiable, its two-cycle counterexample ready to replay in the simulator.](docs/screenshots/12-kind2.png)
 
-**A complete example: the SMS.** [`examples/sms`](examples/sms) is a Stores
-Management System for a drone, built in the Studio from an
-[implementation plan](examples/sms/PLAN.md). It identifies the store on each
+**A complete example: the PMS.** [`examples/pms`](examples/pms) is a
+Payload Management System for a drone, built in the Studio from an
+[implementation plan](examples/pms/PLAN.md). It identifies the store on each
 of four hooks, plans releases that keep the vehicle balanced (single hooks or
 lateral pairs, refusing what would unbalance it), and drops stores on
 command behind arming, airborne and altitude interlocks. It has a release
@@ -210,12 +210,13 @@ by Kind 2 — among them 60 runtime-error checks, so no moment, sum or counter
 can overflow `int32` however long it flies — 8 scenarios passing on the model
 and the generated C with MC/DC 151/151, and every generated equation traced.
 Its generated C runs in a 100 Hz cyclic task against a scripted 50 s mission
-(`examples/sms/integration`). The SMS is set up as a project of its own — it
-pins the OpenLustre Studio version it is built with, installs and verifies
-itself, and has its own CI — so `tools/export-sms.sh <new-repo-url>` makes it
-a separate repository, history included.
+(`examples/pms/integration`). The PMS is a project of its own, developed in
+its own repository: it pins the OpenLustre Studio version it is built with,
+installs and verifies itself, and has its own CI. `examples/pms` is a
+snapshot of it (`tools/sync-pms.sh` refreshes it), shipped as the sample in
+every download and used here as a regression test.
 
-![The SMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](examples/sms/docs/screenshots/13-sms-diagram.png)
+![The PMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](examples/pms/docs/screenshots/13-pms-diagram.png)
 
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
@@ -328,9 +329,9 @@ crates/
                      observer/bits/avionics/state-machine categories)
   ol_cli             the `openlustre` binary: every command + Studio server
 libraries/           the standard block library (YAML, contract-carrying)
-examples/            ReleaseLogic MVP; SMS, a complete drone stores
+examples/            ReleaseLogic MVP; PMS, a complete drone payload
                      management system (plan, model, scenarios, proofs)
-tools/               prove-examples.sh (CI), Kind 2 WSL / Docker wrappers, export-sms.sh
+tools/               prove-examples.sh (CI), Kind 2 WSL / Docker wrappers, sync-pms.sh
 apps/studio_ui/      GUI architecture notes (browser SPA ships in the binary)
 ```
 

@@ -1,7 +1,7 @@
 # Continuous integration. `test` runs the whole suite on Linux, Windows and
 # macOS; `prove` installs the
 # pinned Kind 2 + Z3, proves every example for real (the Kind 2 conformance
-# and runtime-error tests refuse to skip there), runs the SMS project's own
+# and runtime-error tests refuse to skip there), runs the PMS project's own
 # verification script with this build, and keeps the evidence reports.
 
 name: ci
@@ -43,17 +43,17 @@ jobs:
       - name: Check the prover
         run: ./target/debug/openlustre kind2 doctor
 
-      - name: Kind 2 conformance and the SMS proof (no skipping)
+      - name: Kind 2 conformance and the PMS proof (no skipping)
         env:
           OPENLUSTRE_KIND2: ${{ env.OPENLUSTRE_TOOLS }}/bin/kind2
           OPENLUSTRE_Z3: ${{ env.OPENLUSTRE_TOOLS }}/bin/z3
           OPENLUSTRE_REQUIRE_KIND2: "1"
-        run: cargo test -p openlustre_integration_tests --test kind2_projection --test runtime_errors --test sms_example
+        run: cargo test -p openlustre_integration_tests --test kind2_projection --test runtime_errors --test pms_example
 
-      - name: The SMS project's own verification, with this build
-        run: OPENLUSTRE=$PWD/target/debug/openlustre examples/sms/scripts/verify.sh --quick
+      - name: The PMS project's own verification, with this build
+        run: OPENLUSTRE=$PWD/target/debug/openlustre examples/pms/scripts/verify.sh --quick
 
-      # The SMS (171 properties) takes Kind 2 a few minutes on a hosted
+      # The PMS (171 properties) takes Kind 2 a few minutes on a hosted
       # runner; the timeout only caps a proof that cannot settle.
       - name: Prove the examples and build their evidence
         env:

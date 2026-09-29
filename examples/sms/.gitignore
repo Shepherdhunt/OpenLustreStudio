@@ -1,4 +1,0 @@
-# Build outputs: generated code, evidence, the demo binary.
-/out/
-# The project-local OpenLustre Studio and Kind 2 (scripts/install-openlustre.sh).
-/.openlustre/

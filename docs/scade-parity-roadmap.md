@@ -206,7 +206,7 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
     conversion) are proved with the contract, in the context of the root —
     SCADE Design Verifier's "runtime errors" analysis. Checks in callees are
     passed up per call instance, so each is proved for the inputs its caller
-    can give it. On the SMS they found an unbounded phase counter (an int32
+    can give it. On the PMS (then named SMS) they found an unbounded phase counter (an int32
     overflow after 2³¹ cycles), now saturating; the other 59 hold.
 13. ✅ **Evidence report — done.** One document per operator — the plan's
     "evidence layer": identification (interface, contract, model files'
@@ -229,7 +229,7 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Reference project
 
-[`examples/sms`](../examples/sms) — a drone Stores Management System built
+[`examples/pms`](../examples/pms) — a drone Payload Management System built
 end to end in the Studio from an implementation plan — exercises the whole
 chain on a realistic design: Import Lustre, an owned state machine, an
 activation decision tree, contracts on every operator, scenarios with full
