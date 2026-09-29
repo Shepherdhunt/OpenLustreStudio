@@ -272,6 +272,40 @@ pub struct RunOutcome {
     pub results: Vec<ScenarioResult>,
     pub coverage: Option<CoverageSummary>,
     pub mcdc: Option<McdcSummary>,
+    /// Every scenario's traces — golden and actual per backend — for the
+    /// Studio's waveform viewer.
+    pub traces: Vec<ScenarioTraces>,
+}
+
+/// A CSV trace as the Studio's waveform viewer takes it: the header and at
+/// most [`MAX_TRACE_ROWS`] rows.
+#[derive(Debug, Clone, Serialize)]
+pub struct Trace {
+    pub header: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+    /// Rows past [`MAX_TRACE_ROWS`] were dropped.
+    pub truncated: bool,
+}
+
+const MAX_TRACE_ROWS: usize = 5000;
+
+impl Trace {
+    fn from_csv(text: &str) -> Trace {
+        let mut csv = parse_csv(text);
+        let truncated = csv.rows.len() > MAX_TRACE_ROWS;
+        csv.rows.truncate(MAX_TRACE_ROWS);
+        Trace { header: csv.header, rows: csv.rows, truncated }
+    }
+}
+
+/// One scenario's traces: the recorded golden and what each backend produced
+/// (`None` where it did not run or failed before producing a trace).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ScenarioTraces {
+    pub name: String,
+    pub golden: Option<Trace>,
+    pub ir: Option<Trace>,
+    pub c: Option<Trace>,
 }
 
 /// Capture golden traces for every scenario in `dir`. Returns the recorded
@@ -327,7 +361,9 @@ pub fn run_scenarios(
         None
     };
 
+    let mut traces = Vec::new();
     for s in &scenarios {
+        let mut tr = ScenarioTraces { name: s.name.clone(), ..Default::default() };
         let input = match std::fs::read_to_string(&s.input_path) {
             Ok(i) => i,
             Err(e) => {
@@ -348,6 +384,7 @@ pub fn run_scenarios(
         } else {
             None
         };
+        tr.golden = golden.as_deref().map(Trace::from_csv);
 
         for &backend in backends {
             let Some(golden) = &golden else {
@@ -371,7 +408,10 @@ pub fn run_scenarios(
                     if want_coverage { Some(&mut cov_acc) } else { None },
                     if want_coverage { Some(&mut mcdc_acc) } else { None },
                 ) {
-                    Ok(actual) => compare_csv(golden, &actual, &s.name, backend, false),
+                    Ok(actual) => {
+                        tr.ir = Some(Trace::from_csv(&actual));
+                        compare_csv(golden, &actual, &s.name, backend, false)
+                    }
                     Err(e) => ScenarioResult {
                         name: s.name.clone(),
                         backend,
@@ -396,7 +436,10 @@ pub fn run_scenarios(
                         message: format!("C build failed: {e}"),
                     },
                     Some(Ok(compiled)) => match compiled.run(&input) {
-                        Ok(actual) => compare_csv(golden, &actual, &s.name, backend, true),
+                        Ok(actual) => {
+                            tr.c = Some(Trace::from_csv(&actual));
+                            compare_csv(golden, &actual, &s.name, backend, true)
+                        }
                         Err(e) => ScenarioResult {
                             name: s.name.clone(),
                             backend,
@@ -409,8 +452,10 @@ pub fn run_scenarios(
             };
             results.push(result);
         }
+        traces.push(tr);
     }
     RunOutcome {
+        traces,
         results,
         coverage: if want_coverage && !cov_acc.is_empty() {
             Some(summarize_coverage(&cov_acc))

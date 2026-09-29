@@ -778,6 +778,25 @@ fn simulation_session_steps_runs_breaks_and_goes_stale() {
     assert_eq!(s, 200);
     let r = step(r#"{"inputs":{"inc":"true"}}"#);
     assert_eq!(r["rows"][0]["values"][n_col], "2", "the edited model runs from cycle 0");
+
+    // A replayed sequence (scenario / counterexample): one input set per
+    // cycle, with `inputs` filling the gaps; a bad value anywhere in it runs
+    // nothing at all.
+    let r = step(r#"{"inputs":{"inc":"false"},"sequence":[{"inc":"true"},{},{"inc":"true"}]}"#);
+    let ns: Vec<&str> = r["rows"].as_array().unwrap().iter().map(|row| row["values"][n_col].as_str().unwrap()).collect();
+    assert_eq!(ns, ["4", "4", "6"], "{r}");
+    assert_eq!(r["cycle"], 4);
+    for bad in [r#"{"sequence":[{"inc":"true"},{"inc":"maybe"}]}"#, r#"{"sequence":[{}]}"#, r#"{"sequence":{"inc":"true"}}"#] {
+        let (s, b) = request(port, "POST", "/api/sim/step", bad).expect("bad sequence");
+        assert_eq!(s, 400, "{bad} rejected: {b}");
+    }
+    let (_, b) = request(port, "POST", "/api/sim/step", r#"{"sequence":[{"inc":"true"},{"inc":"maybe"}]}"#).unwrap();
+    assert!(b.contains("step 1"), "the error names the sequence step: {b}");
+    assert_eq!(get_json(port, "/api/sim/state")["cycle"], 4, "rejected sequences ran nothing");
+    // Stop-on-violation applies inside a sequence too.
+    let r = step(r#"{"sequence":[{"inc":"false"},{"inc":"true"},{"inc":"true"}],"stop_on_violation":true}"#);
+    assert_eq!(r["stopped"], "violation", "n > 3 already: {r}");
+    assert_eq!(r["rows"].as_array().unwrap().len(), 1);
     post_ok(port, "/api/sim/stop", "{}");
     let (s, _) = request(port, "POST", "/api/sim/step", r#"{"inputs":{"inc":"true"}}"#).expect("stopped");
     assert_eq!(s, 409, "no session after stop");

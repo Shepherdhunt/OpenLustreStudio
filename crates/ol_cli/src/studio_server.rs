@@ -860,23 +860,35 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
     json_response((|| {
         let req: serde_json::Value =
             serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
-        let mut inputs = std::collections::BTreeMap::new();
-        if let Some(obj) = req.get("inputs").and_then(|v| v.as_object()) {
-            for (k, v) in obj {
-                let text = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                inputs.insert(k.clone(), text);
-            }
-        }
+        let text_map = |v: &serde_json::Value| -> std::collections::BTreeMap<String, String> {
+            v.as_object()
+                .map(|obj| {
+                    obj.iter()
+                        .map(|(k, v)| {
+                            let text = match v {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            (k.clone(), text)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let inputs = req.get("inputs").map(text_map).unwrap_or_default();
+        let sequence: Vec<_> = match req.get("sequence") {
+            None | Some(serde_json::Value::Null) => Vec::new(),
+            Some(serde_json::Value::Array(a)) if a.len() <= 10_000 => a.iter().map(text_map).collect(),
+            Some(serde_json::Value::Array(_)) => return Err("a sequence runs at most 10000 cycles".into()),
+            Some(_) => return Err("`sequence` must be an array of per-cycle input objects".into()),
+        };
         let count = req.get("count").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 10_000) as usize;
         let brk = match req.get("break").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
             None => None,
             Some(text) => Some(parse_breakpoint(&project, session, text)?),
         };
         let stop_on_violation = req.get("stop_on_violation").and_then(|v| v.as_bool()).unwrap_or(false);
-        session.run(sim_session::RunReq { inputs, count, brk, stop_on_violation })
+        session.run(sim_session::RunReq { inputs, sequence, count, brk, stop_on_violation })
     })())
 }
 
@@ -1708,6 +1720,7 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
         "results": outcome.results,
         "coverage": outcome.coverage,
         "mcdc": outcome.mcdc,
+        "traces": outcome.traces,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
@@ -1770,10 +1783,15 @@ fn prove_run(
                 .counterexample
                 .as_ref()
                 .and_then(ol_kind2::render_counterexample_waveform);
+            // The same counterexample as signals over cycles, for the
+            // waveform viewer and for replay in the simulator.
+            let trace = p.counterexample.as_ref().and_then(ol_kind2::counterexample_streams);
             serde_json::json!({
                 "name": p.name,
                 "status": p.status,
+                "scope": p.scope,
                 "waveform": waveform,
+                "trace": trace,
             })
         })
         .collect();
@@ -1790,6 +1808,7 @@ fn prove_run(
     let value = serde_json::json!({
         "schema_version": 1,
         "kind2_found": kind2_found,
+        "main": project.main,
         "invocation": result.invocation,
         "exit_code": result.exit_code,
         "properties": properties,

@@ -209,61 +209,82 @@ fn json_to_property(v: &serde_json::Value) -> Option<PropertyResult> {
     })
 }
 
-/// Render a Kind 2 counterexample as a fixed-width per-cycle waveform table.
+/// One signal of a counterexample, one value per cycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CexStream {
+    /// The node or contract the stream belongs to.
+    pub scope: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// Kind 2's classification (`input`, `output`, `local`, …); empty when
+    /// the JSON carries none.
+    pub class: String,
+    /// Values by cycle; empty where Kind 2 reported no value for a cycle.
+    pub values: Vec<String>,
+}
+
+/// A counterexample as signals over a common cycle axis — what the Studio's
+/// waveform viewer draws and what it replays in the simulator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Counterexample {
+    pub cycles: usize,
+    pub streams: Vec<CexStream>,
+}
+
+/// Parse a Kind 2 counterexample into streams over cycles.
 ///
 /// The expected shape (Kind 2 v1+ `-json` output) is an array of scopes, each
 /// with a `streams` list; each stream has a `name`, a `type`, and an
-/// `instantValues` list of `[step, value]` pairs. Returns `None` if the JSON
-/// does not match this shape (unparseable counterexamples are surfaced as
-/// raw JSON by the caller).
-pub fn render_counterexample_waveform(cex: &serde_json::Value) -> Option<String> {
+/// `instantValues` list of `[step, value]` pairs. Every stream of every
+/// top-level scope is kept, padded to the longest. Returns `None` if the
+/// JSON does not match this shape.
+pub fn counterexample_streams(cex: &serde_json::Value) -> Option<Counterexample> {
     let scopes = cex.as_array()?;
-    if scopes.is_empty() {
-        return None;
-    }
-
-    // Collect (name, values_indexed_by_cycle) across every stream of every
-    // scope so a multi-scope counterexample renders as one wide table.
-    let mut columns: Vec<(String, Vec<String>)> = Vec::new();
+    let mut streams: Vec<CexStream> = Vec::new();
     let mut max_cycle: usize = 0;
     for scope in scopes {
-        let streams = match scope.get("streams").and_then(|s| s.as_array()) {
-            Some(s) => s,
-            None => continue,
+        let Some(list) = scope.get("streams").and_then(|s| s.as_array()) else {
+            continue;
         };
-        for s in streams {
-            let name = s
-                .get("name")
-                .and_then(|n| n.as_str())
-                .unwrap_or("?")
-                .to_string();
-            let mut vals: Vec<String> = Vec::new();
+        let scope_name = scope.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+        for s in list {
+            let text = |key: &str| s.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let mut values: Vec<String> = Vec::new();
             if let Some(iv) = s.get("instantValues").and_then(|v| v.as_array()) {
-                for entry in iv {
-                    if let Some(pair) = entry.as_array() {
-                        if pair.len() >= 2 {
-                            let step = pair[0].as_u64().unwrap_or(0) as usize;
-                            let v = pair[1]
-                                .as_str()
-                                .map(|s| s.to_string())
-                                .unwrap_or_else(|| pair[1].to_string());
-                            while vals.len() <= step {
-                                vals.push(String::new());
-                            }
-                            vals[step] = v;
-                            if step > max_cycle {
-                                max_cycle = step;
-                            }
-                        }
+                for pair in iv.iter().filter_map(|e| e.as_array()).filter(|p| p.len() >= 2) {
+                    let step = pair[0].as_u64().unwrap_or(0) as usize;
+                    let v = pair[1]
+                        .as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| pair[1].to_string());
+                    if values.len() <= step {
+                        values.resize(step + 1, String::new());
                     }
+                    values[step] = v;
+                    max_cycle = max_cycle.max(step);
                 }
             }
-            columns.push((name, vals));
+            let name = s.get("name").and_then(|n| n.as_str()).unwrap_or("?").to_string();
+            streams.push(CexStream { scope: scope_name.clone(), name, ty: text("type"), class: text("class"), values });
         }
     }
-    if columns.is_empty() {
+    if streams.is_empty() {
         return None;
     }
+    for s in &mut streams {
+        s.values.resize(max_cycle + 1, String::new());
+    }
+    Some(Counterexample { cycles: max_cycle + 1, streams })
+}
+
+/// Render a Kind 2 counterexample as a fixed-width per-cycle waveform table
+/// (the text form of [`counterexample_streams`]; `None` when that is).
+pub fn render_counterexample_waveform(cex: &serde_json::Value) -> Option<String> {
+    let parsed = counterexample_streams(cex)?;
+    let max_cycle = parsed.cycles - 1;
+    let columns: Vec<(String, Vec<String>)> =
+        parsed.streams.into_iter().map(|s| (s.name, s.values)).collect();
 
     // Compute column widths so the table aligns.
     let widths: Vec<usize> = columns

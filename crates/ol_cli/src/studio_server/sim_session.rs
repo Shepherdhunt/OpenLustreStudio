@@ -17,7 +17,11 @@ pub struct RunReq {
     /// Input values as text (watch-table / CSV syntax), held for every cycle
     /// of this run.
     pub inputs: BTreeMap<String, String>,
-    /// Cycles to run at most.
+    /// Per-cycle inputs (a replayed scenario or counterexample): when not
+    /// empty, cycle `k` of the run uses `inputs` overridden by entry `k`, and
+    /// the run is as long as the sequence.
+    pub sequence: Vec<BTreeMap<String, String>>,
+    /// Cycles to run at most (ignored when `sequence` is given).
     pub count: usize,
     /// Stop after the first cycle on which this condition holds.
     pub brk: Option<ol_ir::Expr>,
@@ -111,20 +115,39 @@ impl SimSession {
     }
 }
 
-/// The session thread's side of a run: step with the held inputs, record
-/// every cycle, stop early on a breakpoint or (if asked) a violation.
+/// The session thread's side of a run: step with the held (or sequenced)
+/// inputs, record every cycle, stop early on a breakpoint or (if asked) a
+/// violation. Every cycle's inputs are parsed before the first one runs, so a
+/// bad value anywhere in a sequence runs nothing.
 fn run(sim: &mut Sim, cycle: &mut usize, req: RunReq) -> Result<RunOut, String> {
-    let mut inputs = BTreeMap::new();
-    for p in &sim.node.inputs {
-        let raw = req
-            .inputs
-            .get(&p.name)
-            .ok_or_else(|| format!("no value given for input `{}`", p.name))?;
-        inputs.insert(p.name.clone(), sim.parse_input(&p.name, raw).map_err(|e| e.to_string())?);
+    let empty = BTreeMap::new();
+    let plan: Vec<&BTreeMap<String, String>> = if req.sequence.is_empty() {
+        vec![&empty; req.count]
+    } else {
+        req.sequence.iter().collect()
+    };
+    let mut cycles_inputs = Vec::with_capacity(plan.len());
+    for (k, over) in plan.iter().enumerate() {
+        let at = if req.sequence.is_empty() { String::new() } else { format!("step {k}: ") };
+        let mut inputs = BTreeMap::new();
+        for p in &sim.node.inputs {
+            let raw = over
+                .get(&p.name)
+                .or_else(|| req.inputs.get(&p.name))
+                .ok_or_else(|| format!("{at}no value given for input `{}`", p.name))?;
+            let v = sim.parse_input(&p.name, raw).map_err(|e| format!("{at}{e}"))?;
+            inputs.insert(p.name.clone(), v);
+        }
+        // Held inputs are the same every cycle: parse them once.
+        cycles_inputs.push(inputs);
+        if req.sequence.is_empty() {
+            break;
+        }
     }
     let mut rows = Vec::new();
-    for _ in 0..req.count {
-        let obs = match sim.step_observed(&inputs) {
+    for k in 0..plan.len() {
+        let inputs = &cycles_inputs[k.min(cycles_inputs.len() - 1)];
+        let obs = match sim.step_observed(inputs) {
             Ok(o) => o,
             Err(e) => {
                 return Ok(RunOut { rows, stopped: "error", error: Some(format!("cycle {}: {e}", *cycle)) })

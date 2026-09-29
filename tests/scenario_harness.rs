@@ -272,4 +272,22 @@ fn studio_tests_endpoints_list_record_and_run() {
         .iter()
         .any(|r| r["backend"] == "c"
             && (r["status"] == "pass" || r["status"] == "skipped")));
+
+    // 4. The run carries each scenario's traces for the waveform viewer:
+    //    the golden and the IR trace are the same table; the C trace (when
+    //    cc is present) has the golden's cycle and output columns.
+    let tr = &v["traces"][0];
+    assert_eq!(tr["name"], "nominal", "{body}");
+    assert_eq!(tr["golden"]["header"], tr["ir"]["header"]);
+    assert_eq!(tr["golden"]["rows"], tr["ir"]["rows"]);
+    assert!(!tr["golden"]["rows"].as_array().unwrap().is_empty());
+    assert_eq!(tr["golden"]["truncated"], false);
+    if results.iter().any(|r| r["backend"] == "c" && r["status"] == "pass") {
+        let golden_cols: Vec<&str> =
+            tr["golden"]["header"].as_array().unwrap().iter().map(|h| h.as_str().unwrap()).collect();
+        for h in tr["c"]["header"].as_array().unwrap() {
+            assert!(golden_cols.contains(&h.as_str().unwrap()), "C column {h} is in the golden");
+        }
+        assert_eq!(tr["c"]["rows"].as_array().unwrap().len(), tr["golden"]["rows"].as_array().unwrap().len());
+    }
 }

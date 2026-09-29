@@ -67,6 +67,36 @@ fn waveform_renders_a_kind2_counterexample() {
 }
 
 #[test]
+fn counterexample_streams_keep_scope_type_class_and_pad_cycles() {
+    // Kind 2 reports Booleans and integers as JSON literals, not strings;
+    // one stream here also skips a cycle.
+    let cex: serde_json::Value = serde_json::from_str(
+        r#"[{
+            "blockType": "node", "name": "Main",
+            "streams": [
+                { "name": "x", "type": "bool", "class": "input",
+                  "instantValues": [[0, true], [1, false], [2, true]] },
+                { "name": "y", "type": "int", "class": "output",
+                  "instantValues": [[0, 0], [2, 7]] }
+            ]
+        }]"#,
+    )
+    .unwrap();
+    let c = ol_kind2::counterexample_streams(&cex).expect("parses");
+    assert_eq!(c.cycles, 3);
+    assert_eq!(c.streams.len(), 2);
+    assert_eq!(c.streams[0].scope, "Main");
+    assert_eq!(c.streams[0].class, "input");
+    assert_eq!(c.streams[0].ty, "bool");
+    assert_eq!(c.streams[0].values, ["true", "false", "true"]);
+    assert_eq!(c.streams[1].values, ["0", "", "7"]);
+    assert!(ol_kind2::counterexample_streams(&serde_json::json!({"no": "array"})).is_none());
+    // The serialized form names the type `type`, as the Studio reads it.
+    let v = serde_json::to_value(&c.streams[1]).unwrap();
+    assert_eq!(v["type"], "int");
+}
+
+#[test]
 fn waveform_returns_none_for_a_non_array_counterexample() {
     let cex: serde_json::Value = serde_json::json!({"oops": "shape"});
     assert!(render_counterexample_waveform(&cex).is_none());
