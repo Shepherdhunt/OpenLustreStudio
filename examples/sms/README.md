@@ -28,6 +28,13 @@ scripts/verify.sh               # check, test, flight code, proof, evidence
 An `openlustre` already on `PATH` (or `$OPENLUSTRE`) works as well; then
 `openlustre studio launch .` opens the project.
 
+**One toolchain.** For now the SMS is built entirely with OpenLustre
+Studio: the model, its simulation and tests, the proofs, the generated flight
+code and the evidence all come from the one version pinned in
+`OPENLUSTRE_VERSION`, and no other modelling tool is needed or used. Working
+with other environments — exchanging the model with Ansys SCADE or
+MATLAB/Simulink — is planned for later and is not part of this project yet.
+
 ## The model
 
 | operator | kind | what it does |

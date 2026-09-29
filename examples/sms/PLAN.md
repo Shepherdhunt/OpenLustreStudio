@@ -247,6 +247,10 @@ annotated steps. The workspace files are the source of truth from then on.
 
 ## 6. Assumptions and limits
 
+- Toolchain: the SMS is built entirely with OpenLustre Studio (the version
+  in `OPENLUSTRE_VERSION`) — model, simulation, tests, proof, code
+  generation and evidence. Interchange with Ansys SCADE and
+  MATLAB/Simulink is future work, outside this project for now.
 - Sensors are trusted as reported each cycle; a mismatched station is
   reported rather than guessed. Tags are read when the store is hung on.
 - Masses are catalogue values; moments use integer grams and millimetres
