@@ -94,6 +94,7 @@ fn activation_role(o: &ConstructOrigin, lhs: &str) -> String {
     match rest.chars().next() {
         Some('b') => format!(", selects branch {}", branch(&rest[1..])),
         Some('g') => format!(", guard of branch {}", branch(&rest[1..])),
+        Some('n') => format!(", no branch up to {} taken", branch(&rest[1..])),
         Some('s') => {
             let (tag, v) = split(&rest[1..]);
             format!(", branch {} reads {}", branch(&tag), v.trim_start_matches('_'))

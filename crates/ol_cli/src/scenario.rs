@@ -819,14 +819,11 @@ pub(crate) fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result
 
     let bundle = ol_clite_emit::emit_project(project);
     let has_contract = node.contract.is_some();
-    let driver = if has_contract {
-        ol_clite_emit::harness::emit_csv_driver_with_monitor(
-            node,
-            node.contract.as_deref(),
-        )
-    } else {
-        ol_clite_emit::harness::emit_csv_driver(node)
-    };
+    let driver = ol_clite_emit::harness::emit_csv_driver_for(
+        project,
+        node,
+        if has_contract { node.contract.as_deref() } else { None },
+    );
 
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

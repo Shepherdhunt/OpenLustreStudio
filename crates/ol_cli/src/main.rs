@@ -809,7 +809,7 @@ fn cmd_emit_clite(
         let entry = project
             .find_node(&entry_name)
             .with_context(|| format!("no node named `{entry_name}`"))?;
-        let driver_src = ol_clite_emit::harness::emit_csv_driver(entry);
+        let driver_src = ol_clite_emit::harness::emit_csv_driver_for(&project, entry, None);
         std::fs::write(clite_dir.join("driver.c"), &driver_src)?;
         generated.push(("clite/driver.c".into(), driver_src));
         // A Makefile so the generated tree builds with one command. This is

@@ -7,7 +7,45 @@
 
 use std::fmt::Write as _;
 
-use ol_ir::{NodeDef, NodeKind, Type};
+use std::collections::BTreeMap;
+
+use ol_ir::{NodeDef, NodeKind, Project, Type, TypeBody};
+
+/// Variant names of the enum types a driver reads or prints, keyed by the
+/// type name on the port (an alias maps to its enum's variants).
+pub type EnumNames = BTreeMap<String, Vec<String>>;
+
+/// The enum types on `node`'s ports (array elements included), resolved
+/// through aliases.
+pub fn enum_names(project: &Project, node: &NodeDef) -> EnumNames {
+    let find = |name: &str| project.packages.iter().find_map(|p| p.find_type(name));
+    let mut out = EnumNames::new();
+    for p in node.inputs.iter().chain(&node.outputs) {
+        let mut ty = &p.ty;
+        while let Type::Array { elem, .. } = ty {
+            ty = elem;
+        }
+        let Type::Named { name } = ty else { continue };
+        let mut cur = name.clone();
+        for _ in 0..16 {
+            match find(&cur).map(|t| &t.body) {
+                Some(TypeBody::Enum(e)) => {
+                    out.insert(name.clone(), e.variants.clone());
+                    break;
+                }
+                Some(TypeBody::Alias { target: Type::Named { name: next }, .. }) => cur = next.clone(),
+                _ => break,
+            }
+        }
+    }
+    out
+}
+
+/// A CSV driver that reads and prints enum values by variant name, exactly
+/// as the simulator's traces do (it also reads a variant's number).
+pub fn emit_csv_driver_for(project: &Project, node: &NodeDef, monitor_contract_name: Option<&str>) -> String {
+    emit_driver(node, monitor_contract_name, &enum_names(project, node))
+}
 
 pub fn emit_csv_driver(node: &NodeDef) -> String {
     emit_csv_driver_with_monitor(node, None)
@@ -16,11 +54,52 @@ pub fn emit_csv_driver(node: &NodeDef) -> String {
 /// Generate a CSV driver. If `monitor_contract_name` is `Some(name)`, the
 /// driver also wires in the matching contract monitor and emits
 /// `active_mode` and `violations` columns after the outputs — the same shape
-/// the IR simulator writes when the node has a contract.
+/// the IR simulator writes when the node has a contract. Enums are read and
+/// printed as numbers; [`emit_csv_driver_for`] uses their names.
 pub fn emit_csv_driver_with_monitor(
     node: &NodeDef,
     monitor_contract_name: Option<&str>,
 ) -> String {
+    emit_driver(node, monitor_contract_name, &EnumNames::new())
+}
+
+/// The enum type an element of `ty` names, when `enums` knows it.
+fn enum_of<'a>(ty: &'a Type, enums: &EnumNames) -> Option<&'a str> {
+    match ty {
+        Type::Named { name } if enums.contains_key(name) => Some(name),
+        Type::Array { elem, .. } => enum_of(elem, enums),
+        _ => None,
+    }
+}
+
+/// `ol_enum_<T>(text)` and `ol_enum_name_<T>(value)` for the enum types the
+/// driver reads (`parse`) or prints (`print`) — only those, as unused static
+/// functions would trip `-Werror`.
+fn emit_enum_helpers(s: &mut String, node: &NodeDef, enums: &EnumNames) {
+    let used = |ports: &[ol_ir::Port]| -> std::collections::BTreeSet<String> {
+        ports.iter().filter_map(|p| enum_of(&p.ty, enums)).map(str::to_string).collect()
+    };
+    for t in used(&node.inputs) {
+        let _ = writeln!(s, "static int ol_enum_{}(const char* s) {{", crate::c_ident(&t));
+        for v in &enums[&t] {
+            let _ = writeln!(s, "  if (strcmp(s, \"{v}\") == 0) return {v};");
+        }
+        let _ = writeln!(s, "  return (int) strtol(s, NULL, 10);");
+        let _ = writeln!(s, "}}\n");
+    }
+    for t in used(&node.outputs) {
+        let _ = writeln!(s, "static const char* ol_enum_name_{}(int v) {{", crate::c_ident(&t));
+        let _ = writeln!(s, "  switch (v) {{");
+        for v in &enums[&t] {
+            let _ = writeln!(s, "    case {v}: return \"{v}\";");
+        }
+        let _ = writeln!(s, "  }}");
+        let _ = writeln!(s, "  return \"?\";");
+        let _ = writeln!(s, "}}\n");
+    }
+}
+
+fn emit_driver(node: &NodeDef, monitor_contract_name: Option<&str>, enums: &EnumNames) -> String {
     let mut s = String::new();
     let prefix = &node.name;
 
@@ -37,6 +116,7 @@ pub fn emit_csv_driver_with_monitor(
         s.push_str(PRINT_REAL);
         s.push('\n');
     }
+    emit_enum_helpers(&mut s, node, enums);
     let _ = writeln!(s, "int main(void) {{");
     if node.kind != NodeKind::Function {
         let _ = writeln!(s, "  {prefix}_State state;");
@@ -74,13 +154,13 @@ pub fn emit_csv_driver_with_monitor(
     for p in &node.inputs {
         let _ = writeln!(s, "    if (!tok) return 1;");
         match &p.ty {
-            Type::Array { elem, len } => emit_array_parse(&mut s, &crate::c_ident(&p.name), elem, *len),
+            Type::Array { elem, len } => emit_array_parse(&mut s, &crate::c_ident(&p.name), elem, *len, enums),
             _ => {
                 let _ = writeln!(
                     s,
                     "    in.{} = {};",
                     crate::c_ident(&p.name),
-                    parse_expr(&p.ty, "tok")
+                    parse_expr(&p.ty, "tok", enums)
                 );
             }
         }
@@ -101,12 +181,12 @@ pub fn emit_csv_driver_with_monitor(
     for p in &node.outputs {
         let _ = writeln!(s, "    printf(\",\");");
         match &p.ty {
-            Type::Array { elem, len } => emit_array_print(&mut s, &crate::c_ident(&p.name), elem, *len),
+            Type::Array { elem, len } => emit_array_print(&mut s, &crate::c_ident(&p.name), elem, *len, enums),
             _ => {
                 let _ = writeln!(
                     s,
                     "    {}",
-                    print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)))
+                    print_stmt(&p.ty, &format!("out.{}", crate::c_ident(&p.name)), enums)
                 );
             }
         }
@@ -164,7 +244,21 @@ static void ol_print_real(double x, int single) {
 /// Parse a bracketed `[e0;e1;…]` token into `in.<name>[k]`. `strtoll`/`strtod`
 /// advance a cursor past each element; we skip the `[` and `;` separators by
 /// hand (strtok is already in use on the outer comma split, so no nesting).
-fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32) {
+fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32, enums: &EnumNames) {
+    // Booleans and enum names are words: copy each element out, then read it.
+    if *elem == Type::Bool || enum_of(elem, enums).is_some() {
+        let _ = writeln!(s, "    {{");
+        let _ = writeln!(s, "      char* __p = tok;");
+        let _ = writeln!(s, "      for (int __k = 0; __k < {len}; __k++) {{");
+        let _ = writeln!(s, "        char __w[64]; int __n = 0;");
+        let _ = writeln!(s, "        while (*__p=='[' || *__p==';' || *__p==' ') __p++;");
+        let _ = writeln!(s, "        while (*__p && *__p!=';' && *__p!=']' && __n < 63) __w[__n++] = *__p++;");
+        let _ = writeln!(s, "        __w[__n] = 0;");
+        let _ = writeln!(s, "        in.{name}[__k] = {};", parse_expr(elem, "__w", enums));
+        let _ = writeln!(s, "      }}");
+        let _ = writeln!(s, "    }}");
+        return;
+    }
     // float32 elements parse straight to single precision, as the simulator
     // reads them (decimal → double → float could round twice).
     let read = match elem {
@@ -183,11 +277,11 @@ fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32) {
 }
 
 /// Print `out.<name>` as `[e0;e1;…]`, matching `Value::to_csv` for arrays.
-fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32) {
+fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32, enums: &EnumNames) {
     let item = if elem.is_float() {
         format!("ol_print_real((double) out.{name}[__k], {});", (*elem == Type::Float32) as u8)
     } else {
-        format!("printf(\"%lld\", (long long) out.{name}[__k]);")
+        print_stmt(elem, &format!("out.{name}[__k]"), enums)
     };
     let _ = writeln!(s, "    printf(\"[\");");
     let _ = writeln!(s, "    for (int __k = 0; __k < {len}; __k++) {{");
@@ -298,7 +392,10 @@ fn dbg_field(ty: &Type, access: &str, name: &str) -> String {
     }
 }
 
-fn parse_expr(ty: &Type, tok: &str) -> String {
+fn parse_expr(ty: &Type, tok: &str, enums: &EnumNames) -> String {
+    if let Some(t) = enum_of(ty, enums) {
+        return format!("({}) ol_enum_{}({tok})", ty.c_name(), crate::c_ident(t));
+    }
     match ty {
         Type::Bool => format!(
             "((strcmp({tok}, \"true\")==0 || strcmp({tok}, \"1\")==0 || strcmp({tok}, \"t\")==0) ? true : false)"
@@ -309,7 +406,10 @@ fn parse_expr(ty: &Type, tok: &str) -> String {
     }
 }
 
-fn print_stmt(ty: &Type, expr: &str) -> String {
+fn print_stmt(ty: &Type, expr: &str, enums: &EnumNames) -> String {
+    if let Some(t) = enum_of(ty, enums) {
+        return format!("printf(\"%s\", ol_enum_name_{}((int) {expr}));", crate::c_ident(t));
+    }
     match ty {
         Type::Bool => format!("printf({expr} ? \"true\" : \"false\");"),
         Type::Float32 => format!("ol_print_real((double){expr}, 1);"),

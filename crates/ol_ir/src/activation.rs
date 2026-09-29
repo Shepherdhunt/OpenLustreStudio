@@ -26,7 +26,9 @@
 //!
 //! ```text
 //! __act_A_b1 = c1;                      -- "branch selected this cycle",
-//! __act_A_b2 = not c1 and c2; …         -- base clock (shown in the UI)
+//! __act_A_n1 = not c1;                  -- base clock (b shown in the UI)
+//! __act_A_b2 = __act_A_n1 and c2;
+//! __act_A_n2 = __act_A_n1 and not c2; …
 //! __act_A_g2 = __act_A_b2 when not __act_A_b1;            -- nested guards
 //! __act_A_g3 = __act_A_b3 when not __act_A_b1 when not __act_A_g2; …
 //! -- branch k runs on  base when not b1 … when not g(k-1) when gk,
@@ -213,8 +215,10 @@ pub fn lower(
         define(&mut locals, holder, ty, Expr::arrow(init, Expr::pre(Expr::var(v.clone()))));
     }
 
-    // Branch-selected flags on the base clock, prioritized:
-    // b_i = not c_1 and … and not c_(i-1) and c_i.
+    // Branch-selected flags on the base clock, prioritized, as a chain:
+    // n_i = n_(i-1) and not c_i ("no branch up to i taken"), and
+    // b_i = n_(i-1) and c_i. Two conditions per decision — the decision
+    // tree's own shape, so each branch condition's coverage reads directly.
     let mut none_before: Option<Expr> = None;
     for (i, c) in conditions.iter().enumerate() {
         let selected = match &none_before {
@@ -222,11 +226,16 @@ pub fn lower(
             Some(prior) => Expr::and(prior.clone(), c.clone()),
         };
         define(&mut locals, branch_flag(a, i), Type::Bool, selected);
-        let not_this = Expr::not(c.clone());
-        none_before = Some(match none_before {
-            None => not_this,
-            Some(prior) => Expr::and(prior, not_this),
-        });
+        if i + 1 < conditions.len() {
+            let not_this = Expr::not(c.clone());
+            let none = format!("__act_{a}_n{}", i + 1);
+            let rhs = match none_before {
+                None => not_this,
+                Some(prior) => Expr::and(prior, not_this),
+            };
+            define(&mut locals, none.clone(), Type::Bool, rhs);
+            none_before = Some(Expr::var(none));
+        }
     }
 
     // The clock variable of branch k (0-based): its flag for the first, a

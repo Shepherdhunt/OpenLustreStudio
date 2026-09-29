@@ -53,6 +53,8 @@ fn a_clean_operator_passes_with_gaps_when_proof_is_not_run() {
     assert_eq!(status(&ev, "contract"), "pass");
     assert_eq!(status(&ev, "proof"), "not_run", "not requested");
     assert_eq!(status(&ev, "tests"), "pass");
+    // No `if` decisions, and every MC/DC condition shown: complete.
+    assert_eq!(status(&ev, "coverage"), "pass", "{text}");
     assert_eq!(status(&ev, "traceability"), "pass");
     if has_cc() {
         assert_eq!(status(&ev, "equivalence"), "pass");

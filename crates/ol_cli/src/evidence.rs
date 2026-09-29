@@ -323,11 +323,16 @@ pub fn collect(req: &Request) -> Result<Evidence, String> {
     sections.push(Section {
         id: "coverage",
         title: "Structural coverage (decision, MC/DC)",
-        status: match (&outcome, &coverage, &mcdc) {
-            (None, ..) => Status::NotRun,
-            (_, Some(c), Some(m)) if c.covered == c.total && m.covered_conditions == m.total_conditions => Status::Pass,
-            (_, None, None) => Status::Pass,
-            _ => Status::Gaps,
+        // Each measure is complete when the model has nothing it measures
+        // (no `if`, say) or everything is covered.
+        status: if outcome.is_none() {
+            Status::NotRun
+        } else if coverage.as_ref().map_or(true, |c| c.covered == c.total)
+            && mcdc.as_ref().map_or(true, |m| m.covered_conditions == m.total_conditions)
+        {
+            Status::Pass
+        } else {
+            Status::Gaps
         },
         summary: match (&outcome, &coverage, &mcdc) {
             (None, ..) => "needs scenarios".into(),
@@ -382,7 +387,7 @@ pub fn collect(req: &Request) -> Result<Evidence, String> {
 
     // 7. Traceability.
     let bundle = ol_clite_emit::emit_project(&slice);
-    let driver = ol_clite_emit::harness::emit_csv_driver(&node);
+    let driver = ol_clite_emit::harness::emit_csv_driver_for(&slice, &node, None);
     let files = [
         ("openlustre_generated.h", bundle.header.as_str()),
         ("openlustre_generated.c", bundle.source.as_str()),

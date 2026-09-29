@@ -22,17 +22,17 @@
 //!     if __sm_state = S1 then <transitions of S1, default __sm_state>
 //!     else if __sm_state = S2 then <transitions of S2, default __sm_state>
 //!     ...
-//!     else __sm_state;
+//!     else <transitions of Sn, default __sm_state>;
 //!   out_k =
 //!     if __sm_state = S1 then <rhs of out_k in S1>
 //!     else if __sm_state = S2 then <rhs of out_k in S2>
 //!     ...
-//!     else <type default>;
+//!     else <rhs of out_k in Sn>;
 //! tel
 //! ```
 //!
 //! Every output is required to be assigned in every state — matching SCADE's
-//! strictness — so the chain never falls through to a default at runtime.
+//! strictness — so the last state needs no test of its own.
 
 use serde::{Deserialize, Serialize};
 
@@ -418,10 +418,16 @@ impl<'a> Lower<'a> {
     }
 
     /// The value of output `o` selected across this region's state tree:
-    /// `if state = S1 then <value in S1> else if state = S2 then … else default`.
+    /// `if state = S1 then <value in S1> else if state = S2 then … else <value
+    /// in Sn>`. Every state assigns every output, so the last state needs no
+    /// test — and the chain is well-typed for any output type (an enum or a
+    /// record has no literal "zero" to fall back on).
     fn value_of(&self, o: &str, region: &RegionInfo, ty: &Type) -> Expr {
-        let mut chain = default_expr_for_type(ty);
-        for node in region.states.iter().rev() {
+        let Some((last, rest)) = region.states.split_last() else {
+            return default_expr_for_type(ty);
+        };
+        let mut chain = self.value_in_state(o, last, ty);
+        for node in rest.iter().rev() {
             let val = self.value_in_state(o, node, ty);
             chain = Expr::if_then_else(
                 Expr::bin(BinOp::Eq, Expr::var(&region.state_var), Expr::var(&node.def.name)),
@@ -450,18 +456,24 @@ impl<'a> Lower<'a> {
     }
 }
 
-/// The next-state chain for one region's states, keyed off `state_var`.
+/// The next-state chain for one region's states, keyed off `state_var`. The
+/// state variable always holds one of `states`, so the last state needs no
+/// test of its own (a trailing "else stay" would be unreachable).
 fn build_next_state_chain(states: &[StateDef], state_var: &str) -> Expr {
     let stay = Expr::var(state_var);
-    let mut chain = stay.clone();
-    for s in states.iter().rev() {
+    let transitions = |s: &StateDef| {
         let mut inner = stay.clone();
         for t in s.transitions.iter().rev() {
             inner = Expr::if_then_else(t.guard.clone(), Expr::var(&t.target), inner);
         }
+        inner
+    };
+    let Some((last, rest)) = states.split_last() else { return stay };
+    let mut chain = transitions(last);
+    for s in rest.iter().rev() {
         chain = Expr::if_then_else(
             Expr::bin(BinOp::Eq, Expr::var(state_var), Expr::var(&s.name)),
-            inner,
+            transitions(s),
             chain,
         );
     }

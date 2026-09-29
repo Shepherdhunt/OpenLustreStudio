@@ -825,7 +825,7 @@ fn build_driver(ctx: &ServerCtx) -> Result<String, String> {
     let entry = project
         .find_node(&entry_name)
         .ok_or_else(|| format!("main operator `{entry_name}` not found"))?;
-    Ok(ol_clite_emit::harness::emit_csv_driver(entry))
+    Ok(ol_clite_emit::harness::emit_csv_driver_for(&project, entry, None))
 }
 
 fn build_makefile(ctx: &ServerCtx) -> Result<String, String> {
@@ -1625,7 +1625,13 @@ fn apply_edit_response_to(
         Ok(p) => p,
         Err(e) => return (500, "application/json", json_error(&e).into_bytes()),
     };
-    if let Err(e) = f(&mut project, &req) {
+    // Validate against what the file sees through its includes (the
+    // workspace's types.json): a state machine, activation or contract using
+    // a Types-dialog enum or constant must check clean.
+    attach_included(path, &mut project);
+    let result = f(&mut project, &req);
+    project.packages.retain(|p| p.name != INCLUDED_PKG);
+    if let Err(e) = result {
         return (400, "application/json", json_error(&e).into_bytes());
     }
     if let Err(e) = save_raw_path(path, &project) {
@@ -1635,6 +1641,28 @@ fn apply_edit_response_to(
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// The package that carries a file's included declarations during an edit;
+/// never saved.
+const INCLUDED_PKG: &str = "__included";
+
+/// Append the types and constants of `project`'s includes (resolved next to
+/// `path`) as a trailing [`INCLUDED_PKG`] package, for validation only.
+fn attach_included(path: &std::path::Path, project: &mut ol_ir::Project) {
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut pkg = ol_ir::Package { name: INCLUDED_PKG.into(), ..Default::default() };
+    for inc in &project.includes {
+        if let Ok(p) = ol_ir::load_project(&dir.join(inc)) {
+            for q in p.packages {
+                pkg.types.extend(q.types);
+                pkg.constants.extend(q.constants);
+            }
+        }
+    }
+    if !pkg.types.is_empty() || !pkg.constants.is_empty() {
+        project.packages.push(pkg);
     }
 }
 
@@ -3022,7 +3050,8 @@ fn contract_check_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
     let result = (|| -> Result<serde_json::Value, String> {
         let req: serde_json::Value =
             serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
-        let project = load_raw(ctx)?;
+        let mut project = load_raw(ctx)?;
+        attach_included(&ctx.model(), &mut project);
         let (contract, operator) = parse_contract_req(&project, &req)?;
         let name = contract.name.clone();
         let cocospec = contract_cocospec(&contract);
@@ -5043,9 +5072,9 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     let bundle = ol_clite_emit::emit_project(&project);
     let has_contract = entry.contract.is_some();
     let driver = if has_contract {
-        ol_clite_emit::harness::emit_csv_driver_with_monitor(&entry, entry.contract.as_deref())
+        ol_clite_emit::harness::emit_csv_driver_for(&project, &entry, entry.contract.as_deref())
     } else {
-        ol_clite_emit::harness::emit_csv_driver(&entry)
+        ol_clite_emit::harness::emit_csv_driver_for(&project, &entry, None)
     };
     let mut wrote = vec![
         ("openlustre_generated.h", bundle.header),

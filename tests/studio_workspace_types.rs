@@ -1262,3 +1262,51 @@ fn dropping_a_block_creates_a_placed_call_with_red_pins_then_binds() {
         r#"{"node":"Press","callee":"NoSuchBlock","x":0,"y":0}"#).unwrap();
     assert_eq!(s, 400);
 }
+
+/// Types and constants live in the workspace's types.json; a state machine,
+/// activation or contract that uses them validates against them (the edit
+/// sees the model file's includes), and a state machine may drive an enum
+/// output (its selection chain ends on the last state, not a numeric zero).
+#[test]
+fn constructs_validate_against_workspace_types_and_constants() {
+    let g = start_server_on_workspace("ws_incl");
+    let port = g.port;
+    post_ok(port, "/api/edit/add_type", r#"{"kind":"enum","name":"Lamp","variants":["Dark","Lit"]}"#);
+    post_ok(port, "/api/edit/add_constant", r#"{"name":"bright","type":"int32","value":"7"}"#);
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Light","kind":"operator"}"#);
+    for p in [
+        r#"{"node":"Light","side":"input","name":"flip","type":"bool"}"#,
+        r#"{"node":"Light","side":"output","name":"lamp","type":"Lamp"}"#,
+        r#"{"node":"Light","side":"output","name":"level","type":"int32"}"#,
+    ] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    post_ok(port, "/api/edit/add_state_machine", r#"{"name":"LampFsm","operator":"Light","initial_state":"Off",
+        "inputs":[{"name":"flip","type":"bool"}],
+        "outputs":[{"name":"lamp","type":"Lamp"}],
+        "states":[
+          {"name":"Off","equations":[{"lhs":"lamp","body":"Dark"}],"transitions":[{"guard":"flip","target":"On"}]},
+          {"name":"On","equations":[{"lhs":"lamp","body":"Lit"}],"transitions":[{"guard":"flip","target":"Off"}]}]}"#);
+    post_ok(port, "/api/edit/add_activation", r#"{"name":"Level","operator":"Light",
+        "outputs":[{"name":"level","type":"int32"}],
+        "branches":[{"name":"Bright","condition":"lamp = Lit","equations":[{"lhs":"level","body":"BRIGHT"}]}],
+        "else":{"equations":[{"lhs":"level","body":"0"}]}}"#);
+    post_ok(port, "/api/edit/add_contract", r#"{"name":"Light_contract","operator":"Light",
+        "assumptions":[{"name":"sane","expr":"BRIGHT > 0"}],
+        "guarantees":[{"name":"lit_is_bright","expr":"lamp = Lit => level = BRIGHT"}]}"#);
+    // The contract editor's live check sees them too.
+    let (s, body) = request(port, "POST", "/api/contract/check", r#"{"name":"Light_contract","operator":"Light",
+        "guarantees":[{"name":"lit_is_bright","expr":"lamp = Lit => level = BRIGHT"}]}"#).expect("check");
+    assert_eq!(s, 200);
+    let c: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(c["ok"], true, "{c}");
+    let (s, body) = request(port, "POST", "/api/build", r#"{"node":"Light"}"#).expect("build");
+    assert_eq!(s, 200);
+    let d: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(d["ok"], true, "{d}");
+    assert_eq!(d["warnings"], 0, "a constant in an assumption is not a stray name: {d}");
+    // The included declarations were used, not copied into the model file.
+    let ins = get_json(port, "/api/inspect");
+    let model_pkgs = ins["project"]["packages"].as_array().unwrap();
+    assert!(model_pkgs.iter().all(|p| p["name"] != "__included"), "{ins}");
+}

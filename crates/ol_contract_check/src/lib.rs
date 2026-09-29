@@ -27,6 +27,17 @@ impl ContractReport {
 pub fn check_project(project: &Project) -> ContractReport {
     let mut diags = Vec::new();
     let mut all_contracts = Vec::new();
+    // Names every contract may use besides its interface: project constants
+    // and enum values.
+    let mut globals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for pkg in &project.packages {
+        globals.extend(pkg.constants.iter().map(|c| c.name.clone()));
+        for t in &pkg.types {
+            if let ol_ir::TypeBody::Enum(e) = &t.body {
+                globals.extend(e.variants.iter().cloned());
+            }
+        }
+    }
 
     for pkg in &project.packages {
         let (contracts, parse_errors) = parse_contracts(&pkg.contracts);
@@ -38,7 +49,7 @@ pub fn check_project(project: &Project) -> ContractReport {
             contracts.iter().map(|c| (c.name.clone(), c)).collect();
 
         for c in &contracts {
-            check_contract(c, &by_name, &mut diags);
+            check_contract(c, &by_name, &globals, &mut diags);
         }
 
         for node in &pkg.nodes {
@@ -127,6 +138,7 @@ fn check_expression_types(project: &Project, diags: &mut Vec<Diagnostic>) {
 fn check_contract(
     contract: &ContractDef,
     by_name: &HashMap<String, &ContractDef>,
+    globals: &std::collections::HashSet<String>,
     diags: &mut Vec<Diagnostic>,
 ) {
     let ctx = format!("contract {}", contract.name);
@@ -147,7 +159,7 @@ fn check_contract(
         contract.outputs.iter().map(|p| p.name.as_str()).collect();
 
     for (i, a) in contract.assumptions.iter().enumerate() {
-        check_assumption(a, i, &input_names, &output_names, &ctx, diags);
+        check_assumption(a, i, &input_names, &output_names, globals, &ctx, diags);
     }
     for (i, g) in contract.guarantees.iter().enumerate() {
         check_guarantee(g, i, &ctx, diags);
@@ -180,6 +192,7 @@ fn check_assumption(
     idx: usize,
     input_names: &std::collections::HashSet<&str>,
     output_names: &std::collections::HashSet<&str>,
+    globals: &std::collections::HashSet<String>,
     ctx: &str,
     diags: &mut Vec<Diagnostic>,
 ) {
@@ -196,7 +209,7 @@ fn check_assumption(
                 .with_context(ctx.to_string()),
             );
         }
-        if !input_names.contains(v.as_str()) && !output_names.contains(v.as_str()) {
+        if !input_names.contains(v.as_str()) && !output_names.contains(v.as_str()) && !globals.contains(&v) {
             diags.push(
                 Diagnostic::warning(
                     "C0021",
