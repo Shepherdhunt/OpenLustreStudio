@@ -155,3 +155,7 @@ path = "composite_constants.rs"
 [[test]]
 name = "activations"
 path = "activations.rs"
+
+[[test]]
+name = "float_fidelity"
+path = "float_fidelity.rs"

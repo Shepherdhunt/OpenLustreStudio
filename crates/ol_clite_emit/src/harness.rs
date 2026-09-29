@@ -33,6 +33,10 @@ pub fn emit_csv_driver_with_monitor(
     let _ = writeln!(s, "#include <stdlib.h>");
     let _ = writeln!(s, "#include <string.h>");
     s.push('\n');
+    if node.outputs.iter().any(|p| is_real(&p.ty)) {
+        s.push_str(PRINT_REAL);
+        s.push('\n');
+    }
     let _ = writeln!(s, "int main(void) {{");
     if node.kind != NodeKind::Function {
         let _ = writeln!(s, "  {prefix}_State state;");
@@ -119,12 +123,55 @@ pub fn emit_csv_driver_with_monitor(
     s
 }
 
+fn is_real(ty: &Type) -> bool {
+    match ty {
+        Type::Array { elem, .. } => is_real(elem),
+        t => t.is_float(),
+    }
+}
+
+/// Prints a real exactly as the simulator writes it (`ol_sim::fmt_real`): the
+/// fewest correctly rounded significant digits that read back as the same
+/// `float` / `double`, written positionally — so model and code traces are
+/// byte-identical for reals too.
+const PRINT_REAL: &str = r#"#include <math.h>
+static void ol_print_real(double x, int single) {
+  char sci[48], digits[48];
+  int p, nd = 0, exp = 0, k;
+  const char* c;
+  if (isnan(x)) { fputs("NaN", stdout); return; }
+  if (isinf(x)) { fputs(x < 0 ? "-inf" : "inf", stdout); return; }
+  for (p = 1; p <= (single ? 9 : 17); p++) {
+    snprintf(sci, sizeof sci, "%.*e", p - 1, x);
+    if (single ? (strtof(sci, NULL) == (float) x) : (strtod(sci, NULL) == x)) break;
+  }
+  c = sci;
+  if (*c == '-') { putchar('-'); c++; }
+  for (; *c && *c != 'e' && *c != 'E'; c++) if (*c != '.') digits[nd++] = *c;
+  digits[nd] = 0;
+  if (*c) exp = atoi(c + 1);
+  if (exp >= 0) {
+    if (nd > exp + 1) { fwrite(digits, 1, (size_t) (exp + 1), stdout); putchar('.'); fputs(digits + exp + 1, stdout); }
+    else { fputs(digits, stdout); for (k = nd; k < exp + 1; k++) putchar('0'); }
+  } else {
+    fputs("0.", stdout);
+    for (k = 0; k < -exp - 1; k++) putchar('0');
+    fputs(digits, stdout);
+  }
+}
+"#;
+
 /// Parse a bracketed `[e0;e1;…]` token into `in.<name>[k]`. `strtoll`/`strtod`
 /// advance a cursor past each element; we skip the `[` and `;` separators by
 /// hand (strtok is already in use on the outer comma split, so no nesting).
 fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32) {
-    let is_float = elem.is_float();
-    let read = if is_float { "strtod(__p, &__e)" } else { "strtoll(__p, &__e, 10)" };
+    // float32 elements parse straight to single precision, as the simulator
+    // reads them (decimal → double → float could round twice).
+    let read = match elem {
+        Type::Float32 => "strtof(__p, &__e)",
+        Type::Float64 => "strtod(__p, &__e)",
+        _ => "strtoll(__p, &__e, 10)",
+    };
     let _ = writeln!(s, "    {{");
     let _ = writeln!(s, "      char* __p = tok; char* __e;");
     let _ = writeln!(s, "      for (int __k = 0; __k < {len}; __k++) {{");
@@ -138,7 +185,7 @@ fn emit_array_parse(s: &mut String, name: &str, elem: &Type, len: u32) {
 /// Print `out.<name>` as `[e0;e1;…]`, matching `Value::to_csv` for arrays.
 fn emit_array_print(s: &mut String, name: &str, elem: &Type, len: u32) {
     let item = if elem.is_float() {
-        format!("printf(\"%g\", (double) out.{name}[__k]);")
+        format!("ol_print_real((double) out.{name}[__k], {});", (*elem == Type::Float32) as u8)
     } else {
         format!("printf(\"%lld\", (long long) out.{name}[__k]);")
     };
@@ -256,7 +303,8 @@ fn parse_expr(ty: &Type, tok: &str) -> String {
         Type::Bool => format!(
             "((strcmp({tok}, \"true\")==0 || strcmp({tok}, \"1\")==0 || strcmp({tok}, \"t\")==0) ? true : false)"
         ),
-        Type::Float32 | Type::Float64 => format!("strtod({tok}, NULL)"),
+        Type::Float32 => format!("strtof({tok}, NULL)"),
+        Type::Float64 => format!("strtod({tok}, NULL)"),
         _ => format!("({}) strtoll({tok}, NULL, 10)", ty.c_name()),
     }
 }
@@ -264,7 +312,8 @@ fn parse_expr(ty: &Type, tok: &str) -> String {
 fn print_stmt(ty: &Type, expr: &str) -> String {
     match ty {
         Type::Bool => format!("printf({expr} ? \"true\" : \"false\");"),
-        Type::Float32 | Type::Float64 => format!("printf(\"%g\", (double){expr});"),
+        Type::Float32 => format!("ol_print_real((double){expr}, 1);"),
+        Type::Float64 => format!("ol_print_real({expr}, 0);"),
         _ => format!("printf(\"%lld\", (long long){expr});"),
     }
 }

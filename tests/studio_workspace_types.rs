@@ -852,14 +852,14 @@ fn c_in_the_loop_attaches_replays_and_steps_in_lockstep() {
     assert_eq!(a["columns"], serde_json::json!(["out_g", "y", "n"]));
     assert_eq!(a["rows"].as_array().unwrap().len(), 2, "history replayed: {a}");
     assert_eq!(a["diverged_at"], serde_json::Value::Null, "{a}");
-    // The enum comes back by name; 0.30000000000000004 (IR) and 0.3 (C %g)
-    // agree; the uint8 accumulator wraps identically (200 + 100 → 44).
-    assert_eq!(a["rows"][1]["c"], serde_json::json!(["Drive", "0.3", "200"]), "{a}");
+    // The enum comes back by name; the C prints the double exactly as the
+    // model does; the uint8 accumulator wraps identically (200 + 100 → 44).
+    assert_eq!(a["rows"][1]["c"], serde_json::json!(["Drive", "0.30000000000000004", "200"]), "{a}");
     let r = step(r#"{"inputs":{"g":"Rev","x":"0.1"},"count":3,"stop_on_divergence":true}"#);
     assert_eq!(r["stopped"], "count", "{r}");
     // Cycle 2: 200 + 100 wraps to 44 in both.
     let first = &r["rows"][0];
-    assert_eq!(first["c"], serde_json::json!(["Rev", "0.3", "44"]), "{r}");
+    assert_eq!(first["c"], serde_json::json!(["Rev", "0.30000000000000004", "44"]), "{r}");
     assert_eq!(first["values"][4], "44", "the simulator wraps too: {r}");
     for row in r["rows"].as_array().unwrap() {
         assert_eq!(row["c_diff"], serde_json::json!([]), "{r}");

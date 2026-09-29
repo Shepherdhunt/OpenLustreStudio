@@ -394,7 +394,9 @@ fn enum_variants(project: &Project, ty: &Type) -> Option<Vec<String>> {
 /// How one C column is read back and compared with the simulator's cell.
 enum Cmp {
     Text,
-    /// `%g` output: equal within its six significant digits.
+    /// A real: the driver prints it as the simulator does (shortest
+    /// round-trip digits), so equal means the same number — compared as
+    /// numbers only so a notation difference can't hide or fake a mismatch.
     Float,
     /// Printed as the variant's index; shown and compared by name.
     Enum(Vec<String>),
@@ -417,7 +419,7 @@ impl Cmp {
             Cmp::Text => (c.to_string(), c == ir),
             Cmp::Float => {
                 let same = match (c.parse::<f64>(), ir.parse::<f64>()) {
-                    (Ok(a), Ok(b)) => a == b || (a - b).abs() <= 1e-5 * a.abs().max(b.abs()) || (a.is_nan() && b.is_nan()),
+                    (Ok(a), Ok(b)) => a == b || (a.is_nan() && b.is_nan()),
                     _ => c == ir,
                 };
                 (c.to_string(), same)
@@ -548,16 +550,18 @@ mod tests {
 
     #[test]
     fn cells_compare_as_the_c_prints_them() {
-        // `%g` keeps six significant digits.
-        assert!(Cmp::Float.read("0.3", "0.30000000000000004").1);
-        assert!(Cmp::Float.read("1e+06", "1000000").1);
-        assert!(!Cmp::Float.read("0.3", "0.31").1);
+        // Reals compare as numbers, exactly: notation can differ, value can't.
+        assert!(Cmp::Float.read("0.30000000000000004", "0.30000000000000004").1);
+        assert!(!Cmp::Float.read("0.3", "0.30000000000000004").1);
+        assert!(Cmp::Float.read("1e6", "1000000").1);
+        assert!(Cmp::Float.read("NaN", "NaN").1);
         // Enums travel as their index and come back by name.
         let gear = Cmp::Enum(vec!["Park".into(), "Drive".into()]);
         assert_eq!(gear.read("1", "Drive"), ("Drive".to_string(), true));
         assert_eq!(gear.read("0", "Drive"), ("Park".to_string(), false));
         let arr = Cmp::Array(Box::new(Cmp::Float));
-        assert!(arr.read("[0.3;1]", "[0.30000000000000004;1]").1);
+        assert!(arr.read("[0.5;1]", "[0.5;1]").1);
+        assert!(!arr.read("[0.3;1]", "[0.30000000000000004;1]").1);
         assert!(!arr.read("[0.3]", "[0.3;1]").1, "length mismatch");
         assert!(!Cmp::Text.read("44", "300").1);
     }

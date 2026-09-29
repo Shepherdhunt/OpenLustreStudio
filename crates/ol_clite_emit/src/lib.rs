@@ -114,6 +114,14 @@ fn emit_const(c: &ol_ir::ConstDef, out: &mut String) {
     }
 }
 
+/// A real literal as a C `double` literal — always with a `.` or an exponent
+/// (`2.0`, `0.01`, `1e-7`), never as an int literal (`2`), which would turn a
+/// `float` operand's arithmetic into `float` instead of `double`. The
+/// simulator computes real literals in double for the same reason.
+fn real_literal(value: f64) -> String {
+    format!("({value:?})")
+}
+
 /// Render a constant's Expr in C syntax. Handles the subset of Expr that can
 /// appear in a well-formed const value: literals, var references (to other
 /// consts / enum variants), unary, binary, and if/then/else.
@@ -122,7 +130,7 @@ fn format_const_expr(expr: &Expr) -> String {
         Expr::Const { lit } => match lit {
             Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
             Literal::Int { value } => format!("({value})"),
-            Literal::Float { value } => format!("({value})"),
+            Literal::Float { value } => real_literal(*value),
             // A char is an int byte in C.
             Literal::Char { value } => format!("({value})"),
         },
@@ -1018,7 +1026,7 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             let s = match lit {
                 Literal::Bool { value } => if *value { "true" } else { "false" }.into(),
                 Literal::Int { value } => format!("({value})"),
-                Literal::Float { value } => format!("({value})"),
+                Literal::Float { value } => real_literal(*value),
                 Literal::Char { value } => format!("({value})"),
             };
             (vec![], s)

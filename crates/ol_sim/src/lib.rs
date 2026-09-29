@@ -20,7 +20,13 @@ use ol_ir::{BinOp, Expr, IterKind, Literal, NodeDef, NodeKind, Project, Type, Ty
 pub enum Value {
     Bool(bool),
     Int(i64),
+    /// A `float64` — or any real computed in C's `double`: a real literal is
+    /// emitted as a C double literal, so it and anything it meets are double.
     Float(f64),
+    /// A `float32`, computed in single precision exactly as the generated C's
+    /// `float` arithmetic is (`float op float` stays `float`; meeting a
+    /// double promotes it, as C's usual arithmetic conversions do).
+    Float32(f32),
     Tuple(Vec<Value>),
     /// Record value, keyed by field name. Field order follows the declared
     /// schema in the producing record type.
@@ -50,17 +56,18 @@ impl Value {
         }
     }
     pub fn as_float(&self) -> Option<f64> {
-        if let Value::Float(f) = self {
-            Some(*f)
-        } else {
-            None
+        match self {
+            Value::Float(f) => Some(*f),
+            Value::Float32(f) => Some(*f as f64),
+            _ => None,
         }
     }
     pub fn to_csv(&self) -> String {
         match self {
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
-            Value::Float(f) => f.to_string(),
+            Value::Float(f) => fmt_real(*f, false),
+            Value::Float32(f) => fmt_real(*f as f64, true),
             Value::Tuple(items) => items
                 .iter()
                 .map(|v| v.to_csv())
@@ -193,7 +200,7 @@ impl<'a> Sim<'a> {
                     &mut None,
                 )
                 .map_err(|e| SimError::EvalError(format!("constant `{}`: {e}", c.name)))?;
-                consts.insert(c.name.clone(), v);
+                consts.insert(c.name.clone(), fit_to(&c.ty, v, project));
             }
         }
 
@@ -314,7 +321,7 @@ impl<'a> Sim<'a> {
                 Some(&self.clock_info.site_clocks),
                 &mut self.coverage,
             )?;
-            bind_lhs(&mut env, eq, value, self.node)?;
+            bind_lhs(&mut env, eq, value, self.node, self.project)?;
         }
 
         // Count this cycle for every chain that was active, so clocked
@@ -499,7 +506,8 @@ impl<'a> Sim<'a> {
 fn default_value(ty: &Type, project: &Project) -> Value {
     match ty {
         Type::Bool => Value::Bool(false),
-        Type::Float32 | Type::Float64 => Value::Float(0.0),
+        Type::Float32 => Value::Float32(0.0),
+        Type::Float64 => Value::Float(0.0),
         Type::Int8
         | Type::Int16
         | Type::Int32
@@ -564,6 +572,7 @@ fn parse_value(raw: &str, ty: &Type, project: &Project) -> Result<Value, ()> {
             "false" | "0" | "f" => Ok(Value::Bool(false)),
             _ => Err(()),
         },
+        Type::Float32 => raw.parse::<f32>().map(Value::Float32).map_err(|_| ()),
         t if t.is_float() => raw.parse::<f64>().map(Value::Float).map_err(|_| ()),
         t if t.is_integer() => raw.parse::<i64>().map(Value::Int).map_err(|_| ()),
         // Arrays at the CSV boundary use `[e0;e1;…]` — the same bracketed,
@@ -637,17 +646,74 @@ struct MonitorStep {
     violations: Vec<String>,
 }
 
+/// A real as traces write it — and as the generated C driver prints it, with
+/// the same algorithm, so model and code traces match byte for byte: the
+/// fewest significant digits (correctly rounded) that read back as the same
+/// `float` (`single`) or `double`, written positionally (`0.30000000000000004`,
+/// `12.3758`, `0.0000001`, `100`); `NaN`, `inf`, `-inf`.
+pub fn fmt_real(x: f64, single: bool) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x.is_infinite() {
+        return if x < 0.0 { "-inf".into() } else { "inf".into() };
+    }
+    let mut sci = String::new();
+    for p in 1..=if single { 9 } else { 17 } {
+        sci = if single { format!("{:.*e}", p - 1, x as f32) } else { format!("{:.*e}", p - 1, x) };
+        let back = if single {
+            sci.parse::<f32>().map(|y| y == x as f32).unwrap_or(false)
+        } else {
+            sci.parse::<f64>().map(|y| y == x).unwrap_or(false)
+        };
+        if back {
+            break;
+        }
+    }
+    // `-d.ddde±x` → positional.
+    let (neg, rest) = match sci.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, sci.as_str()),
+    };
+    let (mant, exp) = rest.split_once('e').unwrap_or((rest, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    if exp >= 0 {
+        let whole = exp as usize + 1;
+        if digits.len() > whole {
+            out.push_str(&digits[..whole]);
+            out.push('.');
+            out.push_str(&digits[whole..]);
+        } else {
+            out.push_str(&digits);
+            out.push_str(&"0".repeat(whole - digits.len()));
+        }
+    } else {
+        out.push_str("0.");
+        out.push_str(&"0".repeat((-exp - 1) as usize));
+        out.push_str(&digits);
+    }
+    out
+}
+
 /// C cast semantics for in-range values: integer narrowing wraps two's
 /// complement, float→int truncates toward zero, and float32 targets round
 /// through `f32` so the trace matches what the generated C computes.
 fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
     let out = match (to, v) {
-        (Type::Float32, Value::Int(i)) => Value::Float((i as f32) as f64),
-        (Type::Float32, Value::Float(f)) => Value::Float((f as f32) as f64),
+        (Type::Float32, Value::Int(i)) => Value::Float32(i as f32),
+        (Type::Float32, Value::Float(f)) => Value::Float32(f as f32),
+        (Type::Float32, Value::Float32(f)) => Value::Float32(f),
         (Type::Float64, Value::Int(i)) => Value::Float(i as f64),
         (Type::Float64, Value::Float(f)) => Value::Float(f),
+        (Type::Float64, Value::Float32(f)) => Value::Float(f as f64),
         (t, Value::Int(i)) if t.is_integer() => Value::Int(narrow_int(t, i)),
         (t, Value::Float(f)) if t.is_integer() => Value::Int(narrow_int(t, f as i64)),
+        (t, Value::Float32(f)) if t.is_integer() => Value::Int(narrow_int(t, f as i64)),
         (t, v) => {
             return Err(SimError::EvalError(format!(
                 "cannot cast {v:?} to {t:?}"
@@ -662,11 +728,87 @@ fn cast_value(to: &Type, v: Value) -> Result<Value, SimError> {
 /// that width exactly as the generated C's typed field does (`uint8`
 /// 200 + 100 stores 44, not 300) — found by stepping the compiled C in
 /// lockstep with this simulator.
-fn fit_to(ty: &Type, v: Value) -> Value {
+fn fit_to(ty: &Type, v: Value, project: &Project) -> Value {
     match (ty, v) {
         (t, Value::Int(i)) if t.is_integer() => Value::Int(narrow_int(t, i)),
-        (Type::Array { elem, .. }, Value::Array(xs)) => Value::Array(xs.into_iter().map(|x| fit_to(elem, x)).collect()),
+        // A real stored into a `float32` rounds to single precision, into a
+        // `float64` widens — C's conversion on assignment.
+        (Type::Float32, Value::Float(f)) => Value::Float32(f as f32),
+        (Type::Float32, Value::Int(i)) => Value::Float32(i as f32),
+        (Type::Float64, Value::Float32(f)) => Value::Float(f as f64),
+        (Type::Float64, Value::Int(i)) => Value::Float(i as f64),
+        (Type::Array { elem, .. }, Value::Array(xs)) => {
+            Value::Array(xs.into_iter().map(|x| fit_to(elem, x, project)).collect())
+        }
+        (Type::Named { name }, v) => {
+            let def = project.packages.iter().flat_map(|p| &p.types).find(|t| t.name() == name);
+            match (def.map(|d| &d.body), v) {
+                (Some(TypeBody::Record { fields, .. }), Value::Record(mut m)) => {
+                    for f in fields {
+                        if let Some(x) = m.remove(&f.name) {
+                            m.insert(f.name.clone(), fit_to(&f.ty, x, project));
+                        }
+                    }
+                    Value::Record(m)
+                }
+                (Some(TypeBody::Alias { target, .. }), v) => fit_to(target, v, project),
+                (_, v) => v,
+            }
+        }
         (_, v) => v,
+    }
+}
+
+/// Whether a real computes in C's `float` or `double` in the generated code.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Real {
+    Single,
+    Double,
+}
+
+/// The C real type `expr` has in the generated code: `float` for float32
+/// operands, `double` once a float64 operand or a real literal (emitted as a
+/// C double literal) joins in; a conditional takes its branches' common type
+/// like C's `?:`. None when not real, or not known statically.
+fn real_kind(expr: &Expr, env: &BTreeMap<String, Value>, project: &Project) -> Option<Real> {
+    let join = |a: Option<Real>, b: Option<Real>| match (a, b) {
+        (Some(Real::Double), _) | (_, Some(Real::Double)) => Some(Real::Double),
+        (Some(Real::Single), _) | (_, Some(Real::Single)) => Some(Real::Single),
+        _ => None,
+    };
+    let of_type = |t: &Type| match t {
+        Type::Float32 => Some(Real::Single),
+        Type::Float64 => Some(Real::Double),
+        _ => None,
+    };
+    match expr {
+        Expr::Const { lit: Literal::Float { .. } } => Some(Real::Double),
+        Expr::Var { name } => match env.get(name) {
+            Some(Value::Float32(_)) => Some(Real::Single),
+            Some(Value::Float(_)) => Some(Real::Double),
+            _ => None,
+        },
+        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::When { arg, .. } => real_kind(arg, env, project),
+        Expr::Binary { op, lhs, rhs }
+            if matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div) =>
+        {
+            join(real_kind(lhs, env, project), real_kind(rhs, env, project))
+        }
+        Expr::IfThenElse { then_branch: a, else_branch: b, .. }
+        | Expr::Arrow { init: a, body: b }
+        | Expr::Merge { on_true: a, on_false: b, .. } => join(real_kind(a, env, project), real_kind(b, env, project)),
+        Expr::Cast { to, .. } => of_type(to),
+        Expr::Call { node, .. } => project.find_node(node).and_then(|n| n.outputs.first()).and_then(|p| of_type(&p.ty)),
+        _ => None,
+    }
+}
+
+/// The value of a conditional's taken branch at the conditional's C type: a
+/// float32 branch whose sibling is double is widened, as `c ? f : d` is.
+fn common_real(v: Value, other: &Expr, env: &BTreeMap<String, Value>, project: &Project) -> Value {
+    match v {
+        Value::Float32(x) if real_kind(other, env, project) == Some(Real::Double) => Value::Float(x as f64),
+        v => v,
     }
 }
 
@@ -837,6 +979,7 @@ fn eval(
                 (UnaryOp::Not, Value::Bool(b)) => Value::Bool(!b),
                 (UnaryOp::Neg, Value::Int(i)) => Value::Int(-i),
                 (UnaryOp::Neg, Value::Float(f)) => Value::Float(-f),
+                (UnaryOp::Neg, Value::Float32(f)) => Value::Float32(-f),
                 (op, v) => {
                     return Err(SimError::EvalError(format!(
                         "unary {op:?} not supported on {v:?}"
@@ -877,11 +1020,9 @@ fn eval(
                     }
                 }
             };
-            if cval {
-                eval(then_branch, env, state, call_states, project, site_clocks, cov)
-            } else {
-                eval(else_branch, env, state, call_states, project, site_clocks, cov)
-            }
+            let (taken, other) = if cval { (then_branch, else_branch) } else { (else_branch, then_branch) };
+            let v = eval(taken, env, state, call_states, project, site_clocks, cov)?;
+            Ok(common_real(v, other, env, project))
         }
         Expr::Pre { arg } => {
             if first_tick(expr, state, site_clocks) {
@@ -901,11 +1042,9 @@ fn eval(
             }
         }
         Expr::Arrow { init, body } => {
-            if first_tick(expr, state, site_clocks) {
-                eval(init, env, state, call_states, project, site_clocks, cov)
-            } else {
-                eval(body, env, state, call_states, project, site_clocks, cov)
-            }
+            let (taken, other) = if first_tick(expr, state, site_clocks) { (init, body) } else { (body, init) };
+            let v = eval(taken, env, state, call_states, project, site_clocks, cov)?;
+            Ok(common_real(v, other, env, project))
         }
         // The clock checker guarantees a `when` is only reached on cycles
         // where its condition already holds (its equation or merge branch is
@@ -915,10 +1054,12 @@ fn eval(
         // (clocked arrows, stateful calls) must not advance on its off cycles.
         Expr::Merge { clock, on_true, on_false } => match env.get(clock) {
             Some(Value::Bool(true)) => {
-                eval(on_true, env, state, call_states, project, site_clocks, cov)
+                let v = eval(on_true, env, state, call_states, project, site_clocks, cov)?;
+                Ok(common_real(v, on_false, env, project))
             }
             Some(Value::Bool(false)) => {
-                eval(on_false, env, state, call_states, project, site_clocks, cov)
+                let v = eval(on_false, env, state, call_states, project, site_clocks, cov)?;
+                Ok(common_real(v, on_true, env, project))
             }
             Some(other) => Err(SimError::EvalError(format!(
                 "merge clock `{clock}` must be bool, got {other:?}"
@@ -1067,12 +1208,13 @@ fn call_function_values(
             let mut ts = State::default();
             let mut tc: HashMap<usize, State> = HashMap::new();
             if let Ok(v) = eval(&c.value, &callee_env, &mut ts, &mut tc, project, None, &mut None) {
-                callee_env.insert(c.name.clone(), v);
+                callee_env.insert(c.name.clone(), fit_to(&c.ty, v, project));
             }
         }
     }
     for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
-        callee_env.insert(p.name.clone(), v);
+        // Passing an argument converts it like an assignment to the input.
+        callee_env.insert(p.name.clone(), fit_to(&p.ty, v, project));
     }
     for p in &callee.outputs {
         callee_env.insert(p.name.clone(), default_value(&p.ty, project));
@@ -1089,7 +1231,7 @@ fn call_function_values(
     for &i in &order {
         let eq = &callee.equations[i];
         let v = eval_eq_rhs(&eq.rhs, &callee_env, &mut throwaway, &mut sub_calls, project, None, cov)?;
-        bind_lhs(&mut callee_env, eq, v, callee)?;
+        bind_lhs(&mut callee_env, eq, v, callee, project)?;
     }
     extract_output(callee, &mut callee_env)
 }
@@ -1167,7 +1309,8 @@ fn step_instance(
         }
     }
     for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
-        callee_env.insert(p.name.clone(), v);
+        // Passing an argument converts it like an assignment to the input.
+        callee_env.insert(p.name.clone(), fit_to(&p.ty, v, project));
     }
     for p in &callee.outputs {
         callee_env.insert(p.name.clone(), default_value(&p.ty, project));
@@ -1205,7 +1348,7 @@ fn step_instance(
                     Some(&callee_clocks.site_clocks),
                     cov,
                 )?;
-                bind_lhs(&mut callee_env, eq, v, callee)?;
+                bind_lhs(&mut callee_env, eq, v, callee, project)?;
             }
             extract_output(callee, &mut callee_env)
         }
@@ -1236,7 +1379,7 @@ fn step_instance(
                     Some(&callee_clocks.site_clocks),
                     cov,
                 )?;
-                bind_lhs(&mut callee_env, eq, v, callee)?;
+                bind_lhs(&mut callee_env, eq, v, callee, project)?;
             }
             for ck in &callee_clocks.chains {
                 if clock_active(ck, &callee_env)? {
@@ -1262,10 +1405,11 @@ fn bind_lhs(
     eq: &ol_ir::Equation,
     value: Value,
     node: &NodeDef,
+    project: &Project,
 ) -> Result<(), SimError> {
     let store = |env: &mut BTreeMap<String, Value>, n: &String, v: Value| {
         let v = match declared_type(node, n) {
-            Some(t) => fit_to(t, v),
+            Some(t) => fit_to(t, v, project),
             None => v,
         };
         env.insert(n.clone(), v);
@@ -1299,6 +1443,17 @@ fn extract_output(callee: &NodeDef, env: &mut BTreeMap<String, Value>) -> Result
     }
 }
 
+/// Two real operands as doubles, and whether the operation is `float`.
+fn real_pair(l: &Value, r: &Value) -> Option<(f64, f64, bool)> {
+    match (l, r) {
+        (Value::Float32(a), Value::Float32(b)) => Some((*a as f64, *b as f64, true)),
+        (Value::Float32(a), Value::Float(b)) => Some((*a as f64, *b, false)),
+        (Value::Float(a), Value::Float32(b)) => Some((*a, *b as f64, false)),
+        (Value::Float(a), Value::Float(b)) => Some((*a, *b, false)),
+        _ => None,
+    }
+}
+
 fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
     use Value::*;
     Ok(match (op, l, r) {
@@ -1306,16 +1461,43 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         (BinOp::Or, Bool(a), Bool(b)) => Bool(a || b),
         (BinOp::Xor, Bool(a), Bool(b)) => Bool(a ^ b),
         (BinOp::Implies, Bool(a), Bool(b)) => Bool(!a || b),
+        // Reals: float op float in single precision; a double on either side
+        // promotes the other (C's usual arithmetic conversions). Comparing
+        // widened values is exact.
+        (op, l, r) if real_pair(&l, &r).is_some() => {
+            let (a, b, single) = real_pair(&l, &r).unwrap();
+            match op {
+                BinOp::Eq => Bool(a == b),
+                BinOp::Neq => Bool(a != b),
+                BinOp::Lt => Bool(a < b),
+                BinOp::Le => Bool(a <= b),
+                BinOp::Gt => Bool(a > b),
+                BinOp::Ge => Bool(a >= b),
+                BinOp::Div if b == 0.0 => {
+                    return Err(SimError::EvalError(format!("binary {op:?} not supported on {l:?} and {r:?}")))
+                }
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div if single => {
+                    let (a, b) = (a as f32, b as f32);
+                    Float32(match op {
+                        BinOp::Add => a + b,
+                        BinOp::Sub => a - b,
+                        BinOp::Mul => a * b,
+                        _ => a / b,
+                    })
+                }
+                BinOp::Add => Float(a + b),
+                BinOp::Sub => Float(a - b),
+                BinOp::Mul => Float(a * b),
+                BinOp::Div => Float(a / b),
+                _ => return Err(SimError::EvalError(format!("binary {op:?} not supported on {l:?} and {r:?}"))),
+            }
+        }
         (BinOp::Eq, a, b) => Bool(a == b),
         (BinOp::Neq, a, b) => Bool(a != b),
         (BinOp::Lt, Int(a), Int(b)) => Bool(a < b),
         (BinOp::Le, Int(a), Int(b)) => Bool(a <= b),
         (BinOp::Gt, Int(a), Int(b)) => Bool(a > b),
         (BinOp::Ge, Int(a), Int(b)) => Bool(a >= b),
-        (BinOp::Lt, Float(a), Float(b)) => Bool(a < b),
-        (BinOp::Le, Float(a), Float(b)) => Bool(a <= b),
-        (BinOp::Gt, Float(a), Float(b)) => Bool(a > b),
-        (BinOp::Ge, Float(a), Float(b)) => Bool(a >= b),
         (BinOp::Add, Int(a), Int(b)) => Int(a + b),
         (BinOp::Sub, Int(a), Int(b)) => Int(a - b),
         (BinOp::Mul, Int(a), Int(b)) => Int(a * b),
@@ -1326,10 +1508,6 @@ fn eval_binary(op: BinOp, l: Value, r: Value) -> Result<Value, SimError> {
         (BinOp::BitXor, Int(a), Int(b)) => Int(a ^ b),
         (BinOp::Shl, Int(a), Int(b)) if (0..64).contains(&b) => Int(a.wrapping_shl(b as u32)),
         (BinOp::Shr, Int(a), Int(b)) if (0..64).contains(&b) => Int(a.wrapping_shr(b as u32)),
-        (BinOp::Add, Float(a), Float(b)) => Float(a + b),
-        (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
-        (BinOp::Mul, Float(a), Float(b)) => Float(a * b),
-        (BinOp::Div, Float(a), Float(b)) if b != 0.0 => Float(a / b),
         (op, l, r) => {
             return Err(SimError::EvalError(format!(
                 "binary {op:?} not supported on {l:?} and {r:?}"
@@ -1597,5 +1775,53 @@ impl<'a> Sim<'a> {
                 })
                 .collect()
         })
+    }
+}
+
+#[cfg(test)]
+mod real_format_tests {
+    use super::fmt_real;
+
+    #[test]
+    fn reals_print_shortest_round_trip_positional() {
+        assert_eq!(fmt_real(0.1 + 0.2, false), "0.30000000000000004");
+        assert_eq!(fmt_real(0.1f32 as f64, true), "0.1");
+        assert_eq!(fmt_real(12.3758f32 as f64, true), "12.3758");
+        assert_eq!(fmt_real(1e-7, false), "0.0000001");
+        assert_eq!(fmt_real(100.0, false), "100");
+        assert_eq!(fmt_real(1e21, false), "1000000000000000000000");
+        assert_eq!(fmt_real(-0.0, false), "-0");
+        assert_eq!(fmt_real(0.0, true), "0");
+        assert_eq!(fmt_real(-2.5, true), "-2.5");
+        assert_eq!(fmt_real(f64::NAN, false), "NaN");
+        assert_eq!(fmt_real(f64::NEG_INFINITY, true), "-inf");
+    }
+
+    /// On a broad sweep of doubles and floats the output reads back as the
+    /// same value and is as short as Rust's own shortest formatting. (The
+    /// digits can differ on an exact tie — 312985.125f32 prints `312985.12`,
+    /// correctly rounded half-to-even as C's printf does, where Display says
+    /// `312985.13` — which is why the C driver mirrors this function rather
+    /// than Display.)
+    #[test]
+    fn shortest_and_round_trips_on_a_sweep() {
+        let mut x: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..20000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let d = f64::from_bits(x);
+            if d.is_finite() && d.abs() > 1e-30 && d.abs() < 1e30 {
+                let t = fmt_real(d, false);
+                assert_eq!(t.parse::<f64>().unwrap(), d, "double {d:e} → {t}");
+                assert_eq!(t.len(), d.to_string().len(), "double {d:e} → {t}");
+            }
+            let f = f32::from_bits(x as u32);
+            if f.is_finite() && f.abs() > 1e-30 && f.abs() < 1e30 {
+                let t = fmt_real(f as f64, true);
+                assert_eq!(t.parse::<f32>().unwrap(), f, "float {f:e} → {t}");
+                assert_eq!(t.len(), f.to_string().len(), "float {f:e} → {t}");
+            }
+        }
     }
 }
