@@ -1,4 +1,5 @@
-# Continuous integration. `test` runs the whole suite; `prove` installs the
+# Continuous integration. `test` runs the whole suite on Linux, Windows and
+# macOS; `prove` installs the
 # pinned Kind 2 + Z3, proves every example for real (the Kind 2 conformance
 # and runtime-error tests refuse to skip there), runs the SMS project's own
 # verification script with this build, and keeps the evidence reports.
@@ -10,8 +11,14 @@ on:
   pull_request:
 
 jobs:
+  # The whole suite on each OS the Studio ships for. (Kind 2 has no Windows
+  # build: its tests skip there; the `prove` job runs them on Linux.)
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
