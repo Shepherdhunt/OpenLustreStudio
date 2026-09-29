@@ -98,10 +98,28 @@ pub fn emit_node(node: &NodeDef, out: &mut String) {
     }
 
     if !node.locals.is_empty() {
+        // A clocked local is declared on its clock (`x: int when c;`), as
+        // Lustre requires — the clock's variable carries its own parent
+        // clock, so the innermost condition is enough.
+        let mut clock_of: std::collections::HashMap<&str, (String, bool)> = Default::default();
+        if ol_ir::node_uses_clocks(node) {
+            let info = ol_ir::infer_clocks(node);
+            for (eq, ck) in node.equations.iter().zip(&info.equation_clocks) {
+                if let Some((c, on)) = ck.conditions().last().cloned() {
+                    for l in &eq.lhs {
+                        clock_of.insert(l.as_str(), (c.clone(), on));
+                    }
+                }
+            }
+        }
         let locals = node
             .locals
             .iter()
-            .map(|l| format!("{}: {}", l.name, l.ty.lustre_name()))
+            .map(|l| match clock_of.get(l.name.as_str()) {
+                Some((c, true)) => format!("{}: {} when {c}", l.name, l.ty.lustre_name()),
+                Some((c, false)) => format!("{}: {} when not {c}", l.name, l.ty.lustre_name()),
+                None => format!("{}: {}", l.name, l.ty.lustre_name()),
+            })
             .collect::<Vec<_>>()
             .join("; ");
         let _ = writeln!(out, "var {locals};");

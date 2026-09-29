@@ -366,6 +366,66 @@ impl Expr {
         walk(self, &mut f);
     }
 
+    /// Rewrite in place, top-down: `f` sees each subexpression before its
+    /// children (so a replaced node's new children are walked too).
+    pub fn walk_mut<F: FnMut(&mut Expr)>(&mut self, f: &mut F) {
+        f(self);
+        self.for_each_child_mut(&mut |c| c.walk_mut(f));
+    }
+
+    /// Rewrite in place, bottom-up: `f` sees each subexpression after its
+    /// children, so what `f` puts in place is not walked again.
+    pub fn walk_mut_post<F: FnMut(&mut Expr)>(&mut self, f: &mut F) {
+        self.for_each_child_mut(&mut |c| c.walk_mut_post(f));
+        f(self);
+    }
+
+    fn for_each_child_mut(&mut self, g: &mut dyn FnMut(&mut Expr)) {
+        match self {
+            Expr::Const { .. } | Expr::Var { .. } => {}
+            Expr::Unary { arg, .. }
+            | Expr::Pre { arg }
+            | Expr::Cast { arg, .. }
+            | Expr::When { arg, .. }
+            | Expr::Field { base: arg, .. } => g(arg),
+            Expr::Binary { lhs, rhs, .. } | Expr::Arrow { init: lhs, body: rhs } => {
+                g(lhs);
+                g(rhs);
+            }
+            Expr::Index { base, index } => {
+                g(base);
+                g(index);
+            }
+            Expr::IfThenElse { cond, then_branch, else_branch } => {
+                g(cond);
+                g(then_branch);
+                g(else_branch);
+            }
+            Expr::Merge { on_true, on_false, .. } => {
+                g(on_true);
+                g(on_false);
+            }
+            Expr::Call { args: items, .. } | Expr::Tuple { items } | Expr::Array { items } => {
+                for i in items {
+                    g(i);
+                }
+            }
+            Expr::Struct { fields, .. } => {
+                for fi in fields {
+                    g(&mut fi.value);
+                }
+            }
+            Expr::Iterate { init, arrays, .. } => {
+                if let Some(i) = init {
+                    g(i);
+                }
+                for a in arrays {
+                    g(a);
+                }
+            }
+        }
+    }
+
     /// True if the expression syntactically contains any temporal operator.
     pub fn contains_temporal(&self) -> bool {
         let mut found = false;

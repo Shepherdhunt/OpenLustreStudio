@@ -207,30 +207,34 @@ impl Project {
     /// over the same operator body.
     pub fn lower_activations(&mut self) -> Result<(), Vec<crate::ActLowerError>> {
         let mut errors = Vec::new();
+        // Each enum's first variant: where a `last(v)` of that type starts.
+        let first_variant: std::collections::HashMap<String, String> = self
+            .packages
+            .iter()
+            .flat_map(|p| &p.types)
+            .filter_map(|t| match &t.body {
+                TypeBody::Enum(e) => e.variants.first().map(|v| (e.name.clone(), v.clone())),
+                _ => None,
+            })
+            .collect();
         for pkg in &mut self.packages {
             let activations = std::mem::take(&mut pkg.activations);
             for act in &activations {
-                let low = match crate::activation::lower(act) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        errors.push(e);
-                        continue;
-                    }
+                let Some(idx) = pkg.nodes.iter().position(|n| n.name == act.owner) else {
+                    errors.push(crate::ActLowerError::UnknownOwner(act.name.clone(), act.owner.clone()));
+                    continue;
                 };
-                match pkg.nodes.iter_mut().find(|n| n.name == act.owner) {
-                    None => errors.push(crate::ActLowerError::UnknownOwner(
-                        act.name.clone(),
-                        act.owner.clone(),
-                    )),
-                    // The activation defines variables the owner declares. If
-                    // one has since been removed (or turned into an input),
-                    // lowering still merges and the type checker reports it on
-                    // the equation (E0020 / E0022) — visible on the canvas,
-                    // never a load failure.
-                    Some(node) => {
+                // The activation defines variables the owner declares. If one
+                // has since been removed (or turned into an input), lowering
+                // still merges and the type checker reports it on the equation
+                // (E0020 / E0022) — visible on the canvas, never a load failure.
+                match crate::activation::lower(act, &pkg.nodes[idx], &first_variant) {
+                    Ok(low) => {
+                        let node = &mut pkg.nodes[idx];
                         node.locals.extend(low.locals);
                         node.equations.extend(low.equations);
                     }
+                    Err(e) => errors.push(e),
                 }
             }
         }
