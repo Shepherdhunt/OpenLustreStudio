@@ -1,0 +1,101 @@
+# The downloads: each OS builds its own, installs it the way a user would,
+# checks the installed copy works, and keeps it as that OS's artifact.
+#
+#   Windows  OpenLustreStudio-<v>-windows-x86_64-Setup.exe (installer), .zip (portable)
+#   Linux    openlustre-studio_<v>_amd64.deb (apt), .tar.gz (install.sh)
+#   macOS    openlustre-studio-<v>-macos-{arm64,x86_64}.pkg (installer), .tar.gz (install.sh)
+#
+# Runs on pushes that touch what ships, by hand (Actions > package > Run
+# workflow), and from release.yml, which attaches the files to a GitHub
+# release on a version tag. Untagged builds are versioned <cargo version>-dev.<sha>.
+
+name: package
+
+on:
+  push:
+    paths:
+      - "crates/**"
+      - "packaging/**"
+      - "examples/**"
+      - "tools/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/package.yml"
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: |
+          base=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="$base-dev.${GITHUB_SHA::7}"; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version: $v"
+
+  linux:
+    needs: version
+    # The oldest supported Ubuntu: the binary runs on this glibc and newer.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .deb and the .tar.gz
+        run: packaging/linux/build.sh "${{ needs.version.outputs.version }}"
+      - name: Install them and check they work
+        run: packaging/linux/smoke.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openlustre-studio-${{ needs.version.outputs.version }}-linux-x86_64
+          path: dist/*
+          if-no-files-found: error
+
+  macos:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .pkg and the .tar.gz (Apple Silicon)
+        run: packaging/macos/build.sh "${{ needs.version.outputs.version }}" aarch64
+      - name: Build the .pkg and the .tar.gz (Intel)
+        run: packaging/macos/build.sh "${{ needs.version.outputs.version }}" x86_64
+      - name: Install them and check they work
+        run: packaging/macos/smoke.sh dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openlustre-studio-${{ needs.version.outputs.version }}-macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+      - name: Build the installer and the portable zip
+        shell: pwsh
+        run: ./packaging/windows/build-installer.ps1 -Version "${{ needs.version.outputs.version }}"
+      - name: Install them and check they work
+        shell: pwsh
+        run: ./packaging/windows/smoke.ps1 -Dist dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openlustre-studio-${{ needs.version.outputs.version }}-windows-x86_64
+          path: dist/*
+          if-no-files-found: error

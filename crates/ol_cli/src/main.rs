@@ -204,6 +204,11 @@ enum Kind2Cmd {
         /// Install here instead (`OPENLUSTRE_TOOLS` then points at it).
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Fetch the binaries for another platform (`linux-x86_64`,
+        /// `linux-aarch64`, `macos-x86_64`, `macos-aarch64`) without running
+        /// them — for packaging a download for that platform.
+        #[arg(long, value_name = "OS-ARCH")]
+        platform: Option<String>,
     },
 }
 
@@ -296,6 +301,11 @@ enum StudioCmd {
         /// Print the URL without opening a browser (CI / headless use).
         #[arg(long)]
         no_open: bool,
+        /// Open a sample shipped with OpenLustre Studio (`pms`,
+        /// `release_logic`): copied on first use to ~/OpenLustre/samples,
+        /// where it can be edited, and opened from there.
+        #[arg(long, value_name = "NAME", conflicts_with = "model")]
+        sample: Option<String>,
     },
 }
 
@@ -386,7 +396,7 @@ fn main() -> Result<()> {
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
         Cmd::Kind2 { cmd } => match cmd {
             Kind2Cmd::Doctor { kind2 } => cmd_kind2_doctor(kind2.as_deref()),
-            Kind2Cmd::Install { dir } => cmd_kind2_install(dir),
+            Kind2Cmd::Install { dir, platform } => cmd_kind2_install(dir, platform.as_deref()),
         },
         Cmd::Studio { cmd } => match cmd {
             StudioCmd::Inspect {
@@ -407,7 +417,14 @@ fn main() -> Result<()> {
                 with_stdlib,
                 no_stdlib,
                 no_open,
-            } => cmd_studio_launch(model, port, with_stdlib, no_stdlib, no_open),
+                sample,
+            } => {
+                let model = match sample {
+                    Some(name) => Some(sample_workspace(&name)?),
+                    None => model,
+                };
+                cmd_studio_launch(model, port, with_stdlib, no_stdlib, no_open)
+            }
         },
         Cmd::New { dir, empty } => {
             std::fs::create_dir_all(&dir)
@@ -946,8 +963,16 @@ fn cmd_kind2_doctor(kind2: Option<&str>) -> Result<()> {
     anyhow::bail!("Kind 2 is not ready: {}", tc.summary())
 }
 
-fn cmd_kind2_install(dir: Option<PathBuf>) -> Result<()> {
+fn cmd_kind2_install(dir: Option<PathBuf>, platform: Option<&str>) -> Result<()> {
     let dir = dir.unwrap_or_else(prover::tools_dir);
+    if let Some(p) = platform {
+        let (os, arch) = p.split_once('-').context("--platform is OS-ARCH, e.g. macos-x86_64")?;
+        let arch = if arch == "arm64" { "aarch64" } else { arch };
+        if (os, arch) != (std::env::consts::OS, std::env::consts::ARCH) {
+            prover::install_for(&dir, os, arch, &mut |line| println!("install: {line}")).map_err(|e| anyhow::anyhow!(e))?;
+            return Ok(());
+        }
+    }
     let tc = prover::install(&dir, &mut |line| println!("install: {line}")).map_err(|e| anyhow::anyhow!(e))?;
     match prover::smoke_test(&tc) {
         Ok(v) => println!("install: smoke proof {v}"),
@@ -1274,6 +1299,81 @@ fn cmd_studio_launch(
         None => welcome_project_path()?,
     };
     serve_studio(&model, port, with_stdlib, no_stdlib, None, !no_open)
+}
+
+/// Where the samples shipped with this program may be: `examples/` next to
+/// it (the installers put it there), or the source checkout's when run from
+/// `target/<profile>/`.
+fn sample_dirs() -> Vec<PathBuf> {
+    let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) else {
+        return Vec::new();
+    };
+    [dir.join("examples"), dir.join("../../examples")].into_iter().filter(|d| d.is_dir()).collect()
+}
+
+/// A shipped sample's working copy, `~/OpenLustre/samples/<name>`: copied
+/// on first use (an installed copy is read-only, and the Studio writes into
+/// the project folder), and reused after that so edits are kept.
+fn sample_workspace(name: &str) -> Result<PathBuf> {
+    let dirs = sample_dirs();
+    let valid = !name.is_empty() && !name.contains(['/', '\\']) && !name.starts_with('.');
+    let Some(src) = dirs.iter().map(|d| d.join(name)).find(|d| valid && d.is_dir()) else {
+        let mut names: Vec<String> = dirs
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.is_empty() {
+            anyhow::bail!("no samples found next to this program");
+        }
+        anyhow::bail!("no sample `{name}` — samples: {}", names.join(", "));
+    };
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+        .context("could not determine the home directory (HOME / USERPROFILE)")?;
+    let dest = home.join("OpenLustre").join("samples").join(name);
+    if !dest.exists() {
+        copy_tree(&src, &dest).with_context(|| format!("copying the sample to {}", dest.display()))?;
+        println!("studio: copied the `{name}` sample to {}", dest.display());
+    }
+    // A workspace file, else a model in model/.
+    let first = |dir: &Path, ext: &str| -> Option<PathBuf> {
+        let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == ext))
+            .collect();
+        found.sort();
+        found.into_iter().next()
+    };
+    first(&dest, "wksc")
+        .or_else(|| first(&dest.join("model"), "json"))
+        .with_context(|| format!("the `{name}` sample has no workspace (*.wksc) or model/*.json"))
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name == ".git" || name == "out" {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            copy_tree(&path, &to.join(&name))?;
+        } else {
+            std::fs::copy(&path, to.join(&name))?;
+        }
+    }
+    Ok(())
 }
 
 /// `~/OpenLustre/welcome.json`, created from a starter model on first run so

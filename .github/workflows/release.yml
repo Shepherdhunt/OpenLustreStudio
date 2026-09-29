@@ -1,7 +1,10 @@
-# Release packaging: push a tag like v0.1.0 and this workflow builds the
-# openlustre binary for Windows / Linux / macOS, compiles the Windows
-# installer (Inno Setup, preinstalled on the windows-latest runner), and
-# attaches everything to a GitHub release.
+# Release: push a version tag (v0.1.0, …) and this workflow runs the tests,
+# builds and smoke-tests every OS's downloads (package.yml), and attaches
+# them to a GitHub release for that tag — one download per OS and installer:
+#
+#   Windows  OpenLustreStudio-<v>-windows-x86_64-Setup.exe, …-windows-x86_64.zip
+#   Linux    openlustre-studio_<v>_amd64.deb, …-linux-x86_64.tar.gz
+#   macOS    …-macos-arm64.pkg / .tar.gz (Apple Silicon), …-macos-x86_64.pkg / .tar.gz (Intel)
 
 name: release
 
@@ -20,62 +23,29 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
-  build:
+  package:
     needs: test
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            artifact: openlustre-windows-x86_64
-          - os: ubuntu-latest
-            artifact: openlustre-linux-x86_64
-          - os: macos-latest
-            artifact: openlustre-macos-aarch64
-    runs-on: ${{ matrix.os }}
+    uses: ./.github/workflows/package.yml
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release binary
-        run: cargo build --release -p ol_cli
-
-      - name: Derive version from tag
-        id: version
-        shell: bash
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Build Windows installer (Inno Setup)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./packaging/windows/build-installer.ps1 -Version "${{ steps.version.outputs.version }}"
-
-      # Linux and macOS archives carry the pinned Kind 2 + Z3 in tools/bin,
-      # where `openlustre` finds them next to itself — proving works out of
-      # the box. (Kind 2 has no Windows build: the Windows zip carries the
-      # WSL / Docker wrappers instead.)
-      - name: Package archive (unix, with Kind 2 + Z3)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          mkdir -p dist stage
-          cp target/release/openlustre stage/
-          ./target/release/openlustre kind2 install --dir stage/tools
-          cp tools/kind2-docker.sh stage/tools/
-          OPENLUSTRE_TOOLS=/nonexistent ./stage/openlustre kind2 doctor
-          tar -C stage -czf "dist/${{ matrix.artifact }}.tar.gz" openlustre tools/bin tools/kind2-docker.sh
-      - name: Package archive (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          New-Item -ItemType Directory -Force stage/tools | Out-Null
-          Copy-Item target/release/openlustre.exe stage/
-          Copy-Item tools/kind2-wsl.cmd, tools/kind2-docker.sh stage/tools/
-          Compress-Archive -Path stage/* `
-            -DestinationPath "dist/${{ matrix.artifact }}.zip"
-          Copy-Item packaging/windows/dist/*.exe dist/
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body: |
+            OpenLustre Studio ${{ github.ref_name }} — for demonstration and prototyping (not a qualified tool).
+
+            | OS | Installer | Alternative |
+            |---|---|---|
+            | Windows 10/11 (x64) | `OpenLustreStudio-*-windows-x86_64-Setup.exe` | `…-windows-x86_64.zip` (portable) |
+            | Ubuntu 22.04+ (x64) | `openlustre-studio_*_amd64.deb` (`sudo apt install ./…deb`) | `…-linux-x86_64.tar.gz` + `./install.sh` |
+            | macOS 12+ Apple Silicon | `…-macos-arm64.pkg` | `…-macos-arm64.tar.gz` + `./install.sh` |
+            | macOS 12+ Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` + `./install.sh` |
+
+            Linux and macOS downloads bundle the Kind 2 prover and Z3; on Windows, Kind 2 runs through WSL or Docker (see README-windows.txt). Every download ships the PMS sample: `openlustre studio launch --sample pms`.

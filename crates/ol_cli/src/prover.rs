@@ -277,14 +277,19 @@ pub fn guidance(tc: &Toolchain) -> Vec<String> {
 
 /// The release assets for this platform: (Kind 2 tarball URL, Z3 zip URL).
 pub fn install_assets() -> Result<(String, String), String> {
-    let kind2_os = match (std::env::consts::OS, std::env::consts::ARCH) {
+    install_assets_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+/// The release assets for `os`/`arch` (`linux`/`macos`, `x86_64`/`aarch64`).
+pub fn install_assets_for(os: &str, arch: &str) -> Result<(String, String), String> {
+    let kind2_os = match (os, arch) {
         ("linux", "x86_64") => "linux-x86_64",
         ("linux", "aarch64") => "linux-arm64",
         ("macos", "x86_64") => "macos-12-x86_64",
         ("macos", "aarch64") => "macos-12-arm64",
         (os, arch) => return Err(format!("no Kind 2 release for {os}/{arch}")),
     };
-    let z3_os = match (std::env::consts::OS, std::env::consts::ARCH) {
+    let z3_os = match (os, arch) {
         ("linux", "x86_64") => "x64-glibc-2.35",
         ("linux", "aarch64") => "arm64-glibc-2.34",
         ("macos", "x86_64") => "x64-osx-13.7.1",
@@ -299,7 +304,15 @@ pub fn install_assets() -> Result<(String, String), String> {
 /// Download Kind 2 and Z3 into `dir/bin`, then check they run. `log`
 /// receives progress lines.
 pub fn install(dir: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, String> {
-    let (kind2_url, z3_url) = install_assets()?;
+    install_for(dir, std::env::consts::OS, std::env::consts::ARCH, log)
+}
+
+/// [`install`] for `os`/`arch`. For another platform than this one (packaging
+/// a download for it) the binaries are fetched but cannot be run here: the
+/// returned toolchain has no versions and is not checked.
+pub fn install_for(dir: &Path, os: &str, arch: &str, log: &mut dyn FnMut(String)) -> Result<Toolchain, String> {
+    let (kind2_url, z3_url) = install_assets_for(os, arch)?;
+    let native = os == std::env::consts::OS && arch == std::env::consts::ARCH;
     let bin = dir.join("bin");
     let work = dir.join("download");
     std::fs::create_dir_all(&bin).map_err(|e| format!("creating {}: {e}", bin.display()))?;
@@ -321,6 +334,15 @@ pub fn install(dir: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, Str
     copy_exe(&z3, &bin.join("z3"))?;
     let _ = std::fs::remove_dir_all(&work);
 
+    if !native {
+        log(format!("fetched Kind 2 and Z3 for {os}/{arch} into {} (not run: another platform)", bin.display()));
+        return Ok(Toolchain {
+            kind2: Some(Located { path: bin.join("kind2"), via: "tools directory".into() }),
+            kind2_version: None,
+            solver: Some((Solver::Z3, Located { path: bin.join("z3"), via: "tools directory".into() })),
+            solver_version: None,
+        });
+    }
     let tc = Toolchain {
         kind2: Some(Located { path: bin.join("kind2"), via: "tools directory".into() }),
         kind2_version: version_of(&bin.join("kind2"), "--version"),
