@@ -240,6 +240,33 @@
   /* Decorative strokes on operator glyphs: the XOR input arc, the memory
      block's state bar. Stroked like the block outline, never filled. */
   svg .glyph-line { fill: none; stroke: #2b579a; stroke-width: 1.1; pointer-events: none; }
+  /* --- Contract editor ------------------------------------------------- */
+  .ct-tabs { display: flex; gap: 2px; border-bottom: 1px solid #c5c5c5; margin: 8px 0 6px; }
+  .ct-tabs span { padding: 3px 12px; cursor: pointer; border: 1px solid transparent;
+                  border-bottom: none; color: #3c3c3c; }
+  .ct-tabs span.active { background: #fff; border-color: #c5c5c5; font-weight: 600; color: #2b579a;
+                         margin-bottom: -1px; }
+  .ct-sec { margin: 6px 0 10px; }
+  .ct-sec h5 { margin: 4px 0; font-size: 11px; color: #5a5a5a; text-transform: uppercase;
+               letter-spacing: 0.4px; }
+  .ct-row { display: flex; gap: 6px; align-items: center; margin: 3px 0; }
+  .ct-row input { font-family: Consolas, monospace; }
+  .ct-row .ct-label { width: 130px; }
+  .ct-row .ct-type { width: 90px; }
+  .ct-row .ct-expr { flex: 1; }
+  .ct-row .ct-x, .mode-table .ct-x { padding: 0 8px; margin: 0; color: #9a2b1c; }
+  input.invalid, textarea.invalid { border: 1.5px solid #d11a1a; background: #fdeeee; }
+  .mode-table { border-collapse: collapse; width: 100%; }
+  .mode-table th { font-size: 11px; background: #f0f0f0; }
+  .mode-table td { vertical-align: top; padding: 3px; }
+  .mode-table textarea { width: 100%; min-height: 44px; font-family: Consolas, monospace;
+                         font-size: 12px; padding: 3px 5px; }
+  .mode-table input { width: 110px; font-family: Consolas, monospace; }
+  #ct-text { font-family: Consolas, monospace; min-height: 260px; }
+  .ct-diag .warn { color: #9d5d00; }
+  .ct-diag .info { color: #555; }
+  /* Contract chip beside the diagram's operator name. */
+  #diagram-contract .chip { cursor: pointer; }
   /* Owned construct blocks (state machine / activation) on an operator canvas. */
   svg .box.construct { fill: #fbfcfe; }
   svg .construct-head { fill: #dde7f3; pointer-events: none; }
@@ -312,6 +339,7 @@
       <div class="mi" onclick="openDialog('dlg-equation')">Equation…</div>
       <div class="mi" id="mi-insert-fsm" onclick="openFsmEditor(null)">State Machine…</div>
       <div class="mi" id="mi-insert-act" onclick="openActForCurrent()">Activation (if / else)…</div>
+      <div class="mi" id="mi-insert-contract" onclick="openContractForCurrent()">Contract…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openLogMsgDialog()">Log Message…</div>
     </div>
@@ -397,6 +425,7 @@
       <div class="mi" onclick="showDock('verify'); proveRun()">Verify with Kind 2</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openFsmEditor(null)">State Machines…</div>
+      <div class="mi" id="mi-project-contracts" onclick="openContractEditor(null)">Contracts…</div>
     </div>
   </div>
 </div>
@@ -409,6 +438,7 @@
 <div id="center">
   <div style="display:flex; align-items:center; gap:10px; margin:2px 0 6px">
     <strong id="diagram-node-name">…</strong>
+    <span id="diagram-contract"></span>
     <div id="diagram-crumbs"></div>
   </div>
   <div id="diagram-problems"></div>
@@ -738,6 +768,43 @@
     </div>
   </div>
 
+  <div class="dlg" id="dlg-contract">
+    <p>A <strong>contract</strong> states what an operator may <em>assume</em> about its inputs and what it must <em>guarantee</em>, plus <strong>modes</strong>: situations (every <em>require</em> holds) with the reaction the operator then <em>ensures</em>. Ghost variables are contract-local helpers (e.g. <code class="inline">first_cycle = true -&gt; false</code>). It is checked as you type (types, vacuous or contradictory clauses, unreachable or overlapping modes), proved with Kind 2, and monitored at run time in simulation and in the generated C.</p>
+    <div class="row">view contract <select id="ct-select" onchange="ctView()"></select> <span class="build-note" id="ct-attached"></span></div>
+    <div class="edit-form">
+      <div class="row" style="justify-content:space-between">
+        <h4 id="ct-form-title">New contract</h4>
+        <button onclick="ctTemplate()">Load template</button>
+      </div>
+      <div class="row">
+        <label>name</label><input id="ct-name" placeholder="Guard_contract" oninput="ctScheduleCheck()">
+        <label>operator</label><select id="ct-operator" onchange="ctOperatorChanged()"></select>
+      </div>
+      <div class="row"><label>interface</label><span class="build-note" id="ct-iface"></span></div>
+      <div class="ct-tabs">
+        <span data-ct="clauses" class="active" onclick="ctShowTab('clauses')">Assume / Guarantee</span>
+        <span data-ct="modes" onclick="ctShowTab('modes')">Mode table</span>
+        <span data-ct="text" onclick="ctShowTab('text')">CoCoSpec text</span>
+      </div>
+      <div id="ct-pane-clauses"></div>
+      <div id="ct-pane-modes" style="display:none"></div>
+      <div id="ct-pane-text" style="display:none">
+        <textarea id="ct-text" style="width:100%" spellcheck="false"></textarea>
+        <div class="row">
+          <button onclick="ctApplyText()">Apply text</button>
+          <span class="build-note">CoCoSpec syntax; types use OpenLustre names (int32, float64 …). The Lustre pane shows the Kind 2 emission.</span>
+        </div>
+      </div>
+      <div id="ct-diags" class="fsm-preview ct-diag"></div>
+      <div class="row">
+        <button class="primary" id="ct-save-btn" onclick="ctSave()">Create contract</button>
+        <button onclick="ctTemplate(true)">New / reset</button>
+        <button id="ct-del-btn" onclick="ctDelete()" style="display:none">Delete contract</button>
+        <span class="build-note" id="ct-status"></span>
+      </div>
+    </div>
+  </div>
+
   <div class="dlg" id="dlg-csv">
     <p>CSV input — first row is the header (one column per main-operator input). Useful for batch traces.</p>
     <textarea id="sim-input" rows="8" placeholder="x,y&#10;1,2&#10;3,4"></textarea>
@@ -867,6 +934,7 @@ const DLG_TITLES = {
   "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
   "dlg-fsm": "State Machines",
   "dlg-act": "Conditional Activations",
+  "dlg-contract": "Contracts",
   "dlg-csv": "Run CSV Vector", "dlg-compile": "Compile C-Lite",
   "dlg-logmsg": "Insert Log Message",
 };
@@ -1272,6 +1340,16 @@ async function refresh() {
     // A state machine is added from the right Operations palette (drag/select
     // "State Machine" onto this operator's canvas), not from the tree.
     group("Outputs", (n.outputs || []).map(p => ({ text: p.name + " : " + typeName(p.type), name: p.name })));
+    // Its contract (assume / guarantee / modes).
+    if (n.contract) {
+      const c = document.createElement("div");
+      c.className = "node port";
+      c.style.cursor = "pointer";
+      c.innerHTML = '<span class="kind">C</span> Contract: ' + escapeHTML(n.contract);
+      c.onclick = e => { e.stopPropagation(); openContractEditor(n.contract); };
+      if (editable) c.oncontextmenu = ev => contractTreeMenu(ev, n.contract);
+      det.appendChild(c);
+    }
     return det;
   };
   const fillPackage = (host, pkg, editable) => {
@@ -1279,15 +1357,29 @@ async function refresh() {
     h.textContent = "Operators";
     host.appendChild(h);
     for (const n of pkg.nodes) host.appendChild(mkOperatorNode(n, editable));
-    if (pkg.contracts && pkg.contracts.length) {
+    if (editable || (pkg.contracts && pkg.contracts.length)) {
       const h2 = document.createElement("h3");
       h2.textContent = "Contracts";
       host.appendChild(h2);
-      for (const c of pkg.contracts) {
+      for (const c of (pkg.contracts || [])) {
         const d = document.createElement("div");
         d.className = "node";
-        d.textContent = c.name + "  modes: " + c.mode_count + " · g: " + c.guarantee_count;
+        d.innerHTML = '<span class="kind">C</span> ' + escapeHTML(c.name) +
+          ' <span class="tree-meta">a ' + c.assumption_count + " · g " + c.guarantee_count +
+          " · modes " + c.mode_count + "</span>";
+        if (editable) {
+          d.title = "Edit the " + c.name + " contract";
+          d.onclick = () => openContractEditor(c.name);
+          d.oncontextmenu = ev => contractTreeMenu(ev, c.name);
+        }
         host.appendChild(d);
+      }
+      if (editable) {
+        const add = document.createElement("div");
+        add.className = "node add-row";
+        add.textContent = "＋ New contract…";
+        add.onclick = () => openContractEditor(null);
+        host.appendChild(add);
       }
     }
   };
@@ -1792,6 +1884,7 @@ async function loadDiagram(nodeName, push) {
     if (last !== d.node) state.diagramStack.push(d.node);
   }
   document.getElementById("diagram-node-name").textContent = d.node + " (" + d.kind + ")";
+  renderContractChip(d.node);
   state.diagramData = d;
   // The model file's grid wins — the diagram opens with the grid it was drawn on.
   if (d.grid) document.getElementById("grid-size").value = String(d.grid);
@@ -3476,6 +3569,9 @@ function operatorTreeMenu(ev, name) {
   item("Add Output…", () => openPortDialog("output"));
   item("Add Local…", () => openPortDialog("local"));
   sep();
+  const contract = node && node.contract;
+  item(contract ? "Edit Contract…" : "Add Contract…", () => openContractEditor(contract || null, name));
+  sep();
   item("Set as Main", () => setMainNode(name));
   m.style.left = ev.clientX + "px";
   m.style.top = ev.clientY + "px";
@@ -4777,6 +4873,463 @@ function activationTreeMenu(ev, name) {
   m.style.left = ev.clientX + "px";
   m.style.top = ev.clientY + "px";
   m.style.display = "block";
+}
+
+// --- Contracts: assume / guarantee / modes, with a SCADE-style mode table -----
+
+// The contract open in the editor. The three views (clause rows, mode table,
+// CoCoSpec text) all read and write these lists; mode requires / ensures are
+// kept as one-expression-per-line text, exactly as the table cells show them.
+const ct = {
+  editing: null,
+  ghosts: [], assumptions: [], guarantees: [], modes: [],
+  tab: "clauses", textDirty: false,
+  checkTimer: null, checkSeq: 0,
+};
+
+function ctSetStatus(ok, msg) {
+  const el = document.getElementById("ct-status");
+  el.style.color = ok ? "#107c10" : "#c42b1c";
+  el.textContent = msg;
+}
+
+const ctLines = s => String(s || "").split("\n").map(x => x.trim()).filter(Boolean);
+
+/// The save / check payload. Rows still blank are drafts, not clauses — they
+/// are left out rather than rejected.
+function ctPayload() {
+  const clause = r => ({ name: r.name.trim(), expr: r.expr.trim() });
+  return {
+    name: ct.editing || document.getElementById("ct-name").value.trim(),
+    operator: document.getElementById("ct-operator").value,
+    ghosts: ct.ghosts.filter(g => g.name.trim() && g.expr.trim())
+      .map(g => ({ name: g.name.trim(), type: g.type.trim() || "bool", expr: g.expr.trim() })),
+    assumptions: ct.assumptions.filter(a => a.expr.trim()).map(clause),
+    guarantees: ct.guarantees.filter(g => g.expr.trim()).map(clause),
+    modes: ct.modes.filter(m => m.name.trim())
+      .map(m => ({ name: m.name.trim(), requires: ctLines(m.requires), ensures: ctLines(m.ensures) })),
+  };
+}
+
+function ctRenderClauses() {
+  const host = document.getElementById("ct-pane-clauses");
+  const attr = (sec, i, f) => ' data-sec="' + sec + '" data-i="' + i + '" data-f="' + f + '"';
+  const val = v => ' value="' + escapeAttr(v || "") + '"';
+  const x = (sec, i) => '<button class="ct-x" title="remove" onclick="ctRemove(\'' + sec + "'," + i + ')">×</button>';
+  let h = '<div class="ct-sec"><h5>Ghost variables — contract-local helpers</h5>';
+  ct.ghosts.forEach((g, i) => {
+    h += '<div class="ct-row" data-row="ghosts:' + i + '">' +
+      '<input class="ct-label" placeholder="name"' + attr("ghosts", i, "name") + val(g.name) + ">:" +
+      '<input class="ct-type" placeholder="bool"' + attr("ghosts", i, "type") + val(g.type) + ">=" +
+      '<input class="ct-expr" placeholder="true -> false"' + attr("ghosts", i, "expr") + val(g.expr) + ">" +
+      x("ghosts", i) + "</div>";
+  });
+  h += '<button onclick="ctAdd(\'ghosts\')">＋ ghost</button></div>';
+  const clauses = (sec, title, placeholder, add) => {
+    let s = '<div class="ct-sec"><h5>' + title + "</h5>";
+    ct[sec].forEach((c, i) => {
+      s += '<div class="ct-row" data-row="' + sec + ":" + i + '">' +
+        '<input class="ct-label" placeholder="label (optional)"' + attr(sec, i, "name") + val(c.name) + ">" +
+        '<input class="ct-expr" placeholder="' + escapeAttr(placeholder) + '"' + attr(sec, i, "expr") + val(c.expr) + ">" +
+        x(sec, i) + "</div>";
+    });
+    return s + '<button onclick="ctAdd(\'' + sec + '\')">' + add + "</button></div>";
+  };
+  h += clauses("assumptions", "Assumptions — what callers must respect (inputs, previous outputs)",
+    "e.g. speed >= 0", "＋ assumption");
+  h += clauses("guarantees", "Guarantees — what the operator promises every cycle",
+    "e.g. cmd => armed", "＋ guarantee");
+  host.innerHTML = h;
+}
+
+function ctRenderModes() {
+  const host = document.getElementById("ct-pane-modes");
+  const attr = (i, f) => ' data-sec="modes" data-i="' + i + '" data-f="' + f + '"';
+  let h = '<table class="mode-table"><thead><tr><th>mode</th>' +
+    "<th>requires — the situation (all must hold; one per line)</th>" +
+    "<th>ensures — the reaction then guaranteed (one per line)</th><th></th></tr></thead><tbody>";
+  ct.modes.forEach((m, i) => {
+    h += '<tr data-row="modes:' + i + '">' +
+      '<td><input placeholder="Name"' + attr(i, "name") + ' value="' + escapeAttr(m.name) + '"></td>' +
+      '<td><textarea rows="2"' + attr(i, "requires") + ">" + escapeHTML(m.requires) + "</textarea></td>" +
+      '<td><textarea rows="2"' + attr(i, "ensures") + ">" + escapeHTML(m.ensures) + "</textarea></td>" +
+      '<td><button class="ct-x" title="remove" onclick="ctRemove(\'modes\',' + i + ')">×</button></td></tr>';
+  });
+  if (!ct.modes.length) {
+    h += '<tr><td colspan="4" class="build-note">No modes yet. A mode pairs a situation with the reaction ' +
+      "the operator guarantees in it; Kind 2 checks the modes together cover every situation.</td></tr>";
+  }
+  host.innerHTML = h + '</tbody></table><button onclick="ctAdd(\'modes\')">＋ mode</button>';
+}
+
+function ctRenderAll() {
+  ctRenderClauses();
+  ctRenderModes();
+  if (ct.tab === "text") document.getElementById("ct-text").value = ctToText();
+}
+
+// One delegated handler per pane: typing updates the shared lists (the panes
+// are not re-rendered, so focus stays put) and schedules a check.
+["ct-pane-clauses", "ct-pane-modes"].forEach(id => {
+  document.getElementById(id).addEventListener("input", ev => {
+    const { sec, i, f } = ev.target.dataset || {};
+    if (!sec || !ct[sec] || !ct[sec][+i]) return;
+    ct[sec][+i][f] = ev.target.value;
+    ctScheduleCheck();
+  });
+});
+document.getElementById("ct-text").addEventListener("input", () => { ct.textDirty = true; });
+
+function ctAdd(sec) {
+  const blank = {
+    ghosts: { name: "", type: "bool", expr: "" },
+    assumptions: { name: "", expr: "" },
+    guarantees: { name: "", expr: "" },
+    modes: { name: "", requires: "", ensures: "" },
+  }[sec];
+  ct[sec].push(blank);
+  ctRenderAll();
+  // Focus the new row's first field.
+  const row = document.querySelector('[data-row="' + sec + ":" + (ct[sec].length - 1) + '"] input, ' +
+    '[data-row="' + sec + ":" + (ct[sec].length - 1) + '"] textarea');
+  if (row) row.focus();
+}
+
+function ctRemove(sec, i) {
+  ct[sec].splice(i, 1);
+  ctRenderAll();
+  ctScheduleCheck();
+}
+
+function ctShowTab(tab) {
+  if (ct.tab === "text" && tab !== "text" && ct.textDirty && !ctApplyText()) return;
+  ct.tab = tab;
+  document.querySelectorAll(".ct-tabs span").forEach(s => s.classList.toggle("active", s.dataset.ct === tab));
+  for (const t of ["clauses", "modes", "text"]) {
+    document.getElementById("ct-pane-" + t).style.display = t === tab ? "" : "none";
+  }
+  if (tab === "text") {
+    document.getElementById("ct-text").value = ctToText();
+    ct.textDirty = false;
+  }
+}
+
+/// The contract as CoCoSpec text (OpenLustre type names).
+function ctToText() {
+  const n = findNode(document.getElementById("ct-operator").value);
+  const sig = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join("; ");
+  const name = ct.editing || document.getElementById("ct-name").value.trim() || "Unnamed";
+  const q = label => label.trim() ? '"' + label.trim().replace(/"/g, "'") + '" ' : "";
+  let t = "contract " + name + "(" + sig(n && n.inputs) + ") returns (" + sig(n && n.outputs) + ");\nlet\n";
+  for (const g of ct.ghosts) {
+    if (g.name.trim()) t += "  var " + g.name.trim() + ": " + (g.type.trim() || "bool") + " = " + g.expr.trim() + ";\n";
+  }
+  for (const a of ct.assumptions) if (a.expr.trim()) t += "  assume " + q(a.name) + a.expr.trim() + ";\n";
+  for (const g of ct.guarantees) if (g.expr.trim()) t += "  guarantee " + q(g.name) + g.expr.trim() + ";\n";
+  for (const m of ct.modes) {
+    if (!m.name.trim()) continue;
+    t += "  mode " + m.name.trim() + " (\n";
+    for (const r of ctLines(m.requires)) t += "    require " + r + ";\n";
+    for (const e of ctLines(m.ensures)) t += "    ensure " + e + ";\n";
+    t += "  );\n";
+  }
+  return t + "tel\n";
+}
+
+/// Parse CoCoSpec text back into the clause lists. Returns the problems
+/// found (none = success, and the lists were replaced).
+function ctFromText(text) {
+  const src = text.split("\n").map(l => l.replace(/--.*$/, "")).join("\n");
+  const errors = [];
+  const out = { ghosts: [], assumptions: [], guarantees: [], modes: [] };
+  for (let stmt of splitAllTopLevel(src, ";")) {
+    stmt = stmt.trim().replace(/^let\b/, "").trim();
+    if (!stmt || stmt === "tel" || /^contract\b/.test(stmt)) continue;
+    let m;
+    if ((m = /^var\s+([A-Za-z_]\w*)\s*:\s*([^=]+?)\s*=\s*([\s\S]+)$/.exec(stmt))) {
+      out.ghosts.push({ name: m[1], type: m[2].trim(), expr: m[3].trim() });
+    } else if ((m = /^(assume|guarantee)\s+(?:"([^"]*)"\s*)?([\s\S]+)$/.exec(stmt))) {
+      out[m[1] === "assume" ? "assumptions" : "guarantees"].push({ name: m[2] || "", expr: m[3].trim() });
+    } else if ((m = /^mode\s+([A-Za-z_]\w*)\s*\(([\s\S]*)\)$/.exec(stmt))) {
+      const mode = { name: m[1], requires: [], ensures: [] };
+      for (let part of splitAllTopLevel(m[2], ";")) {
+        part = part.trim();
+        if (!part) continue;
+        const pm = /^(require|ensure)\s+([\s\S]+)$/.exec(part);
+        if (!pm) { errors.push("mode " + m[1] + ": expected `require e;` or `ensure e;` — got: " + part); continue; }
+        mode[pm[1] === "require" ? "requires" : "ensures"].push(pm[2].trim());
+      }
+      out.modes.push({ name: mode.name, requires: mode.requires.join("\n"), ensures: mode.ensures.join("\n") });
+    } else {
+      errors.push("not a contract item: " + stmt.split("\n")[0].slice(0, 60));
+    }
+  }
+  if (!errors.length) Object.assign(ct, out);
+  return errors;
+}
+
+/// Apply the text view to the clause lists; false (with the problems shown)
+/// when it doesn't parse — the text is kept for fixing.
+function ctApplyText() {
+  const errors = ctFromText(document.getElementById("ct-text").value);
+  if (errors.length) {
+    document.getElementById("ct-diags").innerHTML =
+      errors.map(e => '<span class="err">✖ ' + escapeHTML(e) + "</span>").join("<br>");
+    return false;
+  }
+  ct.textDirty = false;
+  ctRenderClauses();
+  ctRenderModes();
+  ctScheduleCheck();
+  return true;
+}
+
+function ctScheduleCheck() {
+  clearTimeout(ct.checkTimer);
+  ct.checkTimer = setTimeout(ctCheck, 350);
+}
+
+/// Dry-run the contract on the server: blocking errors, warnings (vacuous
+/// or contradictory clauses, unreachable / overlapping modes) and infos.
+async function ctCheck() {
+  const p = ctPayload();
+  if (!p.operator) return;
+  if (!p.name) p.name = "Draft"; // the check needs an identifier; saving asks for a real one
+  const seq = ++ct.checkSeq;
+  let res;
+  try {
+    const r = await fetch("/api/contract/check", { method: "POST", body: JSON.stringify(p) });
+    res = await r.json();
+  } catch (e) { return; }
+  if (seq !== ct.checkSeq) return; // a newer check superseded this one
+  const errs = [...(res.errors || [])];
+  for (const d of (res.diagnostics || [])) {
+    const s = d.code + ": " + d.message;
+    if (d.severity === "Error" && !errs.includes(s)) errs.push(s);
+  }
+  const others = (res.diagnostics || []).filter(d => d.severity !== "Error");
+  const line = d => (d.severity === "Warning" ? '<span class="warn">⚠ ' : '<span class="info">ℹ ') +
+    escapeHTML(d.code + ": " + d.message) + "</span>";
+  const n = p.assumptions.length + p.guarantees.length;
+  const head = errs.length
+    ? errs.map(e => '<span class="err">✖ ' + escapeHTML(e) + "</span>").join("<br>")
+    : '<span class="kw">✓</span> checks clean — ' + n + " clause(s), " + p.modes.length + " mode(s), " +
+      p.ghosts.length + " ghost(s)";
+  document.getElementById("ct-diags").innerHTML = head + (others.length ? "<br>" + others.map(line).join("<br>") : "");
+  ctMarkInvalid(errs);
+}
+
+/// Outline the rows an error names ("guarantee `safe`: …", "mode `M` …").
+function ctMarkInvalid(errs) {
+  const hit = key => errs.some(e => e.includes(key));
+  document.querySelectorAll("#dlg-contract .invalid").forEach(el => el.classList.remove("invalid"));
+  const mark = (sec, i, on) => {
+    if (!on) return;
+    document.querySelectorAll('[data-row="' + sec + ":" + i + '"] .ct-expr, [data-row="' + sec + ":" + i + '"] textarea')
+      .forEach(el => el.classList.add("invalid"));
+  };
+  ct.ghosts.forEach((g, i) => mark("ghosts", i, g.name.trim() && hit("ghost `" + g.name.trim() + "`")));
+  for (const [sec, word] of [["assumptions", "assumption"], ["guarantees", "guarantee"]]) {
+    let k = 0; // unlabeled clauses are reported by their index among non-blank rows
+    ct[sec].forEach((c, i) => {
+      if (!c.expr.trim()) return;
+      mark(sec, i, hit(word + " `" + (c.name.trim() || "#" + k) + "`"));
+      k++;
+    });
+  }
+  ct.modes.forEach((m, i) => mark("modes", i, m.name.trim() && hit("mode `" + m.name.trim() + "`")));
+}
+
+async function ctLoadList() {
+  let data;
+  try { data = await fetchJSON("/api/contract"); } catch (e) { return; }
+  const sel = document.getElementById("ct-select");
+  sel.innerHTML = '<option value="">— new —</option>';
+  for (const c of data.contracts) {
+    const o = document.createElement("option");
+    o.value = c.name;
+    o.textContent = c.name + (c.attached_to.length ? "  (" + c.attached_to.join(", ") + ")" : "  (unattached)");
+    sel.appendChild(o);
+  }
+}
+
+function ctPopulateOperators() {
+  const sel = document.getElementById("ct-operator");
+  const prev = sel.value;
+  sel.innerHTML = "";
+  for (const nm of (state.inspect?.project?.packages || []).filter(p => p.name !== "stdlib")
+    .flatMap(p => (p.nodes || []).map(n => n.name))) {
+    const o = document.createElement("option");
+    o.value = nm; o.textContent = nm;
+    sel.appendChild(o);
+  }
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+// The interface always comes from the operator (the checker requires an
+// exact match), so it is shown, not edited.
+function ctOperatorChanged() {
+  const op = document.getElementById("ct-operator").value;
+  const n = findNode(op);
+  const sig = ps => (ps || []).map(p => p.name + ": " + typeName(p.type)).join(", ") || "—";
+  document.getElementById("ct-iface").textContent = n ? "in: " + sig(n.inputs) + "   →   out: " + sig(n.outputs) : "";
+  const name = document.getElementById("ct-name");
+  if (!ct.editing && op && !name.value.trim()) name.value = op + "_contract";
+  if (!ct.editing && n && n.contract) {
+    ctSetStatus(false, op + " already has contract " + n.contract + " — open it from the list to edit");
+  } else {
+    ctSetStatus(true, "");
+  }
+  ctScheduleCheck();
+}
+
+/// Reset to a blank contract (`reset`), or scaffold one for the chosen
+/// operator: a first-cycle ghost and an initial mode to fill in.
+function ctTemplate(reset) {
+  if (reset) {
+    ct.editing = null;
+    Object.assign(ct, { ghosts: [], assumptions: [], guarantees: [], modes: [] });
+    document.getElementById("ct-form-title").textContent = "New contract";
+    document.getElementById("ct-save-btn").textContent = "Create contract";
+    document.getElementById("ct-del-btn").style.display = "none";
+    document.getElementById("ct-select").value = "";
+    document.getElementById("ct-attached").textContent = "";
+    const name = document.getElementById("ct-name");
+    name.value = ""; name.readOnly = false;
+    document.getElementById("ct-operator").disabled = false;
+    document.getElementById("ct-diags").innerHTML = "";
+    ctSetStatus(true, "");
+    ctRenderAll();
+    return;
+  }
+  const n = findNode(document.getElementById("ct-operator").value);
+  if (!n) { ctSetStatus(false, "choose the operator first"); return; }
+  const outB = (n.outputs || []).find(p => typeKind(p.type) === "Bool");
+  ct.ghosts = [{ name: "first_cycle", type: "bool", expr: "true -> false" }];
+  ct.assumptions = [{ name: "", expr: "" }];
+  ct.guarantees = [{ name: "", expr: "" }];
+  ct.modes = [{ name: "Init", requires: "first_cycle", ensures: outB ? "not " + outB.name : "" }];
+  ctRenderAll();
+  ctScheduleCheck();
+}
+
+async function ctView(name) {
+  name = name || document.getElementById("ct-select").value;
+  if (!name) { ctTemplate(true); return; }
+  let c;
+  try { c = await fetchJSON("/api/contract?name=" + encodeURIComponent(name)); }
+  catch (e) { ctSetStatus(false, "" + e); return; }
+  ct.editing = c.name;
+  ct.ghosts = c.ghosts.map(g => ({ name: g.name, type: g.type, expr: g.expr }));
+  ct.assumptions = c.assumptions.map(a => ({ name: a.name || "", expr: a.expr }));
+  ct.guarantees = c.guarantees.map(g => ({ name: g.name || "", expr: g.expr }));
+  ct.modes = c.modes.map(m => ({ name: m.name, requires: m.requires.join("\n"), ensures: m.ensures.join("\n") }));
+  document.getElementById("ct-select").value = c.name;
+  document.getElementById("ct-form-title").textContent = "Editing " + c.name;
+  document.getElementById("ct-save-btn").textContent = "Save changes";
+  document.getElementById("ct-del-btn").style.display = "";
+  const nameEl = document.getElementById("ct-name");
+  nameEl.value = c.name; nameEl.readOnly = true;
+  const sel = document.getElementById("ct-operator");
+  if (c.attached_to.length) sel.value = c.attached_to[0];
+  sel.disabled = c.attached_to.length > 0;
+  document.getElementById("ct-attached").textContent = c.attached_to.length
+    ? "attached to " + c.attached_to.join(", ") : "not attached — saving attaches it to the chosen operator";
+  const iface = document.getElementById("ct-iface");
+  ctOperatorChanged();
+  if (c.imports) iface.textContent += "   · " + c.imports + " contract import(s) kept as-is";
+  ctRenderAll();
+  ctCheck();
+}
+
+async function openContractEditor(name, ownerOp) {
+  openDialog("dlg-contract");
+  await ctLoadList();
+  ctPopulateOperators();
+  ctShowTab("clauses");
+  if (name) { await ctView(name); return; }
+  ctTemplate(true);
+  const op = ownerOp || state.diagramData?.node || (state.selectedNode && state.selectedNode.name);
+  const sel = document.getElementById("ct-operator");
+  if (op && [...sel.options].some(o => o.value === op)) sel.value = op;
+  // One contract per operator: open the existing one rather than a blank form.
+  const existing = findNode(sel.value)?.contract;
+  if (existing) { await ctView(existing); return; }
+  ctOperatorChanged();
+  ctTemplate(false);
+}
+
+// Insert ▸ Contract / the diagram chip: the contract of the open operator.
+function openContractForCurrent() {
+  const op = state.diagramData?.node;
+  openContractEditor(findNode(op)?.contract || null, op);
+}
+
+async function ctSave() {
+  if (ct.tab === "text" && ct.textDirty && !ctApplyText()) return;
+  const p = ctPayload();
+  if (!p.name) { ctSetStatus(false, "the contract needs a name"); return; }
+  if (!p.operator) { ctSetStatus(false, "choose the operator it describes"); return; }
+  const editing = ct.editing;
+  const r = await fetch(editing ? "/api/edit/update_contract" : "/api/edit/add_contract",
+    { method: "POST", body: JSON.stringify(p) });
+  const text = await r.text();
+  if (!r.ok) {
+    let msg = text;
+    try { msg = JSON.parse(text).error || text; } catch (_) {}
+    ctSetStatus(false, msg);
+    return;
+  }
+  await refresh();
+  await ctLoadList();
+  await ctView(p.name);
+  ctSetStatus(true, editing ? "saved ✓" : "created ✓ — attached to " + p.operator +
+    "; it is proved by Kind 2 and monitored in simulation and the generated C");
+  if (state.diagramData) loadDiagram(state.diagramData.node, false);
+}
+
+async function ctDelete() {
+  const name = ct.editing;
+  if (!name) return;
+  if (!(await postEdit("/api/edit/remove_contract", { name }))) return;
+  await ctLoadList();
+  ctTemplate(true);
+  ctSetStatus(true, "deleted " + name + " — Ctrl+Z restores it");
+}
+
+function contractTreeMenu(ev, name) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  const m = document.getElementById("ctx-menu");
+  m.innerHTML = "";
+  const item = (label, fn) => {
+    const d = document.createElement("div");
+    d.className = "ctx-item"; d.textContent = label;
+    d.onclick = () => { hideCtxMenu(); fn(); };
+    m.appendChild(d);
+  };
+  item("Edit " + name, () => openContractEditor(name));
+  item("Delete " + name, () => postEdit("/api/edit/remove_contract", { name }));
+  m.style.left = ev.clientX + "px";
+  m.style.top = ev.clientY + "px";
+  m.style.display = "block";
+}
+
+/// The chip beside the diagram's operator name: its contract (click to edit)
+/// or an offer to add one. Library operators get none.
+function renderContractChip(nodeName) {
+  const host = document.getElementById("diagram-contract");
+  const n = findNode(nodeName);
+  const isUser = (state.inspect?.project?.packages || [])
+    .some(p => p.name !== "stdlib" && (p.nodes || []).some(x => x.name === nodeName));
+  host.innerHTML = "";
+  if (!n || !isUser) return;
+  const chip = document.createElement("span");
+  chip.className = "chip";
+  chip.textContent = n.contract ? "contract: " + n.contract : "＋ contract";
+  chip.title = n.contract ? "Edit the contract (assume / guarantee / modes)" : "Add a contract to " + nodeName;
+  chip.onclick = () => openContractEditor(n.contract || null, nodeName);
+  host.appendChild(chip);
 }
 
 // --- Editing dialogs ----------------------------------------------------------------

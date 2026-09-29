@@ -211,4 +211,10 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("mi-insert-act"), "Insert > Activation missing");
     assert!(html.contains("function renderActTree"), "decision-tree chart missing");
     assert!(html.contains("function isConstructId"), "construct canvas blocks missing");
+    // The contract editor: dialog, its three views, and the entry points.
+    assert!(html.contains("id=\"dlg-contract\""), "contract editor dialog missing");
+    assert!(html.contains("function ctRenderModes"), "mode table missing");
+    assert!(html.contains("function ctFromText"), "CoCoSpec text view missing");
+    assert!(html.contains("mi-insert-contract") && html.contains("mi-project-contracts"),
+        "contract menu entries missing");
 }
