@@ -314,6 +314,19 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/set_fsm_layout") => {
             apply_edit_response(ctx, body, edit_set_fsm_layout)
         }
+        ("GET", "/api/activation") => match activation_get(ctx, &parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/edit/add_activation") => {
+            apply_edit_response(ctx, body, edit_add_activation)
+        }
+        ("POST", "/api/edit/update_activation") => {
+            apply_edit_response(ctx, body, edit_update_activation)
+        }
+        ("POST", "/api/edit/remove_activation") => {
+            apply_edit_response(ctx, body, edit_remove_activation)
+        }
         ("POST", "/api/edit/remove_state_machine") => {
             apply_edit_response(ctx, body, edit_remove_state_machine)
         }
@@ -514,6 +527,24 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // Activations are lowered into their owners too — list them from the raw
+    // model so the UI can show the decision trees distinctly.
+    let activations: Vec<serde_json::Value> = load_raw(ctx)
+        .map(|raw| {
+            raw.packages
+                .iter()
+                .flat_map(|p| p.activations.iter())
+                .map(|a| {
+                    serde_json::json!({
+                        "name": a.name,
+                        "owner": a.owner,
+                        "outputs": a.outputs.iter().map(|o| &o.name).collect::<Vec<_>>(),
+                        "branches": a.branches.iter().map(|b| &b.name).collect::<Vec<_>>(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let (undo_depth, redo_depth) = {
         let h = ctx.history.lock().unwrap();
         (h.undo.len(), h.redo.len())
@@ -528,6 +559,7 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
             "node_count": project.all_nodes().count(),
             "packages": packages,
             "state_machines": state_machines,
+            "activations": activations,
         },
         "history": { "undo": undo_depth, "redo": redo_depth },
         "diagnostics": diagnostics,
@@ -1866,6 +1898,231 @@ fn edit_remove_state_machine(
         Ok(())
     } else {
         Err(format!("state machine `{name}` not found"))
+    }
+}
+
+// --- Conditional activations (SCADE "activate if" decision trees) -----------
+
+/// Parse `[{"name": "cmd", "type": "int32"}, …]` into ports.
+fn parse_port_list(items: Option<&serde_json::Value>) -> Result<Vec<ol_ir::Port>, String> {
+    let empty: Vec<serde_json::Value> = vec![];
+    let arr = items.and_then(|v| v.as_array()).unwrap_or(&empty);
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let pname = item.get("name").and_then(|v| v.as_str()).ok_or("port missing name")?;
+        let tstr = item.get("type").and_then(|v| v.as_str()).ok_or("port missing type")?;
+        let ty = ol_stdlib::parse_type(tstr).map_err(|e| format!("output `{pname}`: {e}"))?;
+        out.push(ol_ir::Port { name: pname.to_string(), ty });
+    }
+    Ok(out)
+}
+
+/// Parse `[{"lhs": "cmd", "body": "x + 1"}, …]` into equations.
+fn parse_act_equations(
+    ctx_label: &str,
+    eqs_json: Option<&serde_json::Value>,
+) -> Result<Vec<ol_ir::Equation>, String> {
+    let empty: Vec<serde_json::Value> = vec![];
+    let eqs = eqs_json.and_then(|v| v.as_array()).unwrap_or(&empty);
+    let mut out = Vec::with_capacity(eqs.len());
+    for e in eqs {
+        let lhs = e.get("lhs").and_then(|v| v.as_str()).ok_or("equation missing lhs")?;
+        let body = e.get("body").and_then(|v| v.as_str()).ok_or("equation missing body")?;
+        let rhs = ol_stdlib::parse_expr(body)
+            .map_err(|er| format!("{ctx_label} equation `{lhs}`: {er}"))?;
+        out.push(ol_ir::Equation { lhs: vec![lhs.to_string()], rhs });
+    }
+    Ok(out)
+}
+
+/// Parse the structured activation payload:
+/// `{name, operator, outputs: [{name,type}], branches: [{name?, condition,
+/// equations}], else: {equations}}`.
+fn parse_activation_req(req: &serde_json::Value) -> Result<ol_ir::ActivationDef, String> {
+    let name = req_str(req, "name")?.to_string();
+    if !is_identifier(&name) {
+        return Err(format!("`{name}` is not a valid identifier"));
+    }
+    let owner = req_str(req, "operator")?.to_string();
+    let outputs = parse_port_list(req.get("outputs"))?;
+    let empty: Vec<serde_json::Value> = vec![];
+    let branches_json = req.get("branches").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let mut branches = Vec::with_capacity(branches_json.len());
+    for (i, b) in branches_json.iter().enumerate() {
+        let label = b
+            .get("name")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("B{}", i + 1));
+        let cond_str =
+            b.get("condition").and_then(|v| v.as_str()).ok_or("branch missing condition")?;
+        let condition = ol_stdlib::parse_expr(cond_str)
+            .map_err(|e| format!("branch `{label}` condition: {e}"))?;
+        let equations = parse_act_equations(&format!("branch `{label}`"), b.get("equations"))?;
+        branches.push(ol_ir::ActivationBranch { name: label, condition, equations });
+    }
+    let else_equations =
+        parse_act_equations("else branch", req.get("else").and_then(|v| v.get("equations")))?;
+    Ok(ol_ir::ActivationDef { name, outputs, branches, else_equations, owner })
+}
+
+/// Validate an activation exactly like a state machine: apply the candidate
+/// to a copy of the project, merge the stdlib, lower everything, slice to the
+/// owner, and type-check that slice — so a decision tree is GUARANTEED to
+/// translate before it is saved.
+fn validate_activation(
+    project: &ol_ir::Project,
+    act: &ol_ir::ActivationDef,
+) -> Result<(), String> {
+    let mut candidate = project.clone();
+    for pkg in &mut candidate.packages {
+        pkg.activations.retain(|a| a.name != act.name);
+    }
+    match candidate.packages.iter_mut().next() {
+        Some(pkg) => pkg.activations.push(act.clone()),
+        None => candidate.packages.push(ol_ir::Package {
+            name: "user".into(),
+            activations: vec![act.clone()],
+            ..Default::default()
+        }),
+    }
+    if let Ok(lib) = ol_stdlib::load_embedded() {
+        lib.merge_into(&mut candidate, "stdlib");
+    }
+    candidate
+        .lower_state_machines()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    candidate
+        .lower_activations()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    let to_check = candidate.slice_for_root(&act.owner).map_err(|e| e.to_string())?;
+    let report = ol_typecheck::check_project(&to_check);
+    let errors: Vec<String> = report
+        .errors()
+        .map(|d| {
+            if d.context.is_empty() {
+                format!("{}: {}", d.code, d.message)
+            } else {
+                format!("{}: {} [{}]", d.code, d.message, d.context.join(" · "))
+            }
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("the activation would not type-check: {}", errors.join("; ")))
+    }
+}
+
+fn edit_add_activation(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let act = parse_activation_req(req)?;
+    if project.find_node(&act.name).is_some()
+        || project.packages.iter().any(|p| {
+            p.state_machines.iter().any(|m| m.name == act.name)
+                || p.activations.iter().any(|a| a.name == act.name)
+        })
+    {
+        return Err(format!("`{}` already exists", act.name));
+    }
+    if project.find_node(&act.owner).is_none() {
+        return Err(format!("operator `{}` not found", act.owner));
+    }
+    validate_activation(project, &act)?;
+    if project.packages.is_empty() {
+        project.packages.push(ol_ir::Package { name: "user".into(), ..Default::default() });
+    }
+    project.packages[0].activations.push(act);
+    Ok(())
+}
+
+fn edit_update_activation(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let act = parse_activation_req(req)?;
+    validate_activation(project, &act)?;
+    for pkg in &mut project.packages {
+        if let Some(slot) = pkg.activations.iter_mut().find(|a| a.name == act.name) {
+            *slot = act;
+            return Ok(());
+        }
+    }
+    Err(format!("activation `{}` not found", act.name))
+}
+
+fn edit_remove_activation(
+    project: &mut ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(), String> {
+    let name = req_str(req, "name")?.to_string();
+    let mut removed = false;
+    for pkg in &mut project.packages {
+        let n = pkg.activations.len();
+        pkg.activations.retain(|a| a.name != name);
+        removed |= pkg.activations.len() != n;
+    }
+    if removed {
+        Ok(())
+    } else {
+        Err(format!("activation `{name}` not found"))
+    }
+}
+
+/// GET /api/activation — the list of activations, or (with `?name=`) one
+/// activation with its conditions and equations rendered back to text for
+/// the structured editor.
+fn activation_get(
+    ctx: &ServerCtx,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let project = load_raw(ctx)?;
+    match query.get("name") {
+        None => {
+            let names: Vec<&str> = project
+                .packages
+                .iter()
+                .flat_map(|p| p.activations.iter().map(|a| a.name.as_str()))
+                .collect();
+            Ok(serde_json::json!({ "schema_version": 1, "activations": names }).to_string())
+        }
+        Some(name) => {
+            let eqs_json = |eqs: &[ol_ir::Equation]| -> Vec<serde_json::Value> {
+                eqs.iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "lhs": e.lhs.join(", "),
+                            "body": ol_lustre_emit::format_expr(&e.rhs),
+                        })
+                    })
+                    .collect()
+            };
+            for pkg in &project.packages {
+                for a in &pkg.activations {
+                    if &a.name == name {
+                        let value = serde_json::json!({
+                            "schema_version": 1,
+                            "name": a.name,
+                            "owner": a.owner,
+                            "outputs": a.outputs.iter().map(|o| serde_json::json!({
+                                "name": o.name, "type": o.ty,
+                            })).collect::<Vec<_>>(),
+                            "branches": a.branches.iter().map(|b| serde_json::json!({
+                                "name": b.name,
+                                "condition": ol_lustre_emit::format_expr(&b.condition),
+                                "equations": eqs_json(&b.equations),
+                            })).collect::<Vec<_>>(),
+                            "else": { "equations": eqs_json(&a.else_equations) },
+                        });
+                        return Ok(value.to_string());
+                    }
+                }
+            }
+            Err(format!("activation `{name}` not found in the model file"))
+        }
     }
 }
 

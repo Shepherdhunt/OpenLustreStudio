@@ -568,6 +568,86 @@ fn fsm_chart_layout_persists_and_survives_update() {
     assert!(fsm["layout"].get("Blink").is_none(), "dropped with its state: {fsm}");
 }
 
+/// Conditional activations through the server: create one on an operator,
+/// see it in inspect and the GET endpoint (conditions as text), watch the
+/// owner build with the lowered decision tree, reject non-exhaustive and
+/// ill-typed trees BEFORE saving, update in place, and remove.
+#[test]
+fn activation_create_validate_edit_build_remove() {
+    let g = start_server_on_workspace("ws_act");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Guard","kind":"operator"}"#);
+    for p in [
+        r#"{"node":"Guard","side":"input","name":"arm","type":"bool"}"#,
+        r#"{"node":"Guard","side":"input","name":"fault","type":"bool"}"#,
+        r#"{"node":"Guard","side":"input","name":"x","type":"int32"}"#,
+        r#"{"node":"Guard","side":"output","name":"cmd","type":"int32"}"#,
+    ] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+
+    let act = |else_body: &str| -> String {
+        format!(
+            r#"{{"name":"Select","operator":"Guard",
+                 "outputs":[{{"name":"cmd","type":"int32"}}],
+                 "branches":[
+                   {{"name":"Fault","condition":"fault","equations":[{{"lhs":"cmd","body":"0"}}]}},
+                   {{"name":"Engaged","condition":"arm","equations":[{{"lhs":"cmd","body":"x + 1"}}]}}],
+                 "else":{{"equations":[{{"lhs":"cmd","body":"{else_body}"}}]}}}}"#
+        )
+    };
+
+    // Non-exhaustive (else misses cmd) and ill-typed trees are rejected
+    // before anything is saved.
+    let bad_missing = r#"{"name":"Select","operator":"Guard",
+        "outputs":[{"name":"cmd","type":"int32"}],
+        "branches":[{"name":"Fault","condition":"fault","equations":[{"lhs":"cmd","body":"0"}]}],
+        "else":{"equations":[]}}"#;
+    let (s, body) = request(port, "POST", "/api/edit/add_activation", bad_missing).expect("bad act");
+    assert_eq!(s, 400, "non-exhaustive tree must be rejected: {body}");
+    assert!(body.contains("else"), "error names the offending branch: {body}");
+    let (s2, body2) =
+        request(port, "POST", "/api/edit/add_activation", &act("true")).expect("ill-typed");
+    assert_eq!(s2, 400, "ill-typed tree must be rejected: {body2}");
+    let ins = get_json(port, "/api/inspect");
+    assert!(
+        ins["project"]["activations"].as_array().unwrap().is_empty(),
+        "rejected activations must not be persisted"
+    );
+
+    // The valid tree is accepted, listed, and its owner builds with the
+    // lowered branch flags visible in the generated Lustre.
+    post_ok(port, "/api/edit/add_activation", &act("x"));
+    let ins = get_json(port, "/api/inspect");
+    let a = ins["project"]["activations"].as_array().unwrap().iter()
+        .find(|a| a["name"] == "Select").cloned().expect("Select listed");
+    assert_eq!(a["owner"], "Guard");
+    assert_eq!(a["branches"].as_array().unwrap().len(), 2);
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Guard"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "operator with an activation should build: {bd}");
+    assert!(
+        bd["lustre"].as_str().unwrap().contains("__act_Select_b1"),
+        "branch flags in the lustre: {bd}"
+    );
+
+    // GET returns the tree with expressions rendered back to text.
+    let got = get_json(port, "/api/activation?name=Select");
+    assert_eq!(got["branches"][1]["condition"], "arm", "{got}");
+    assert_eq!(got["branches"][1]["equations"][0]["body"], "x + 1", "{got}");
+
+    // Update in place (new else body), then remove.
+    post_ok(port, "/api/edit/update_activation", &act("x - 1"));
+    let got = get_json(port, "/api/activation?name=Select");
+    assert_eq!(got["else"]["equations"][0]["body"], "x - 1", "{got}");
+    post_ok(port, "/api/edit/remove_activation", r#"{"name":"Select"}"#);
+    let (sr, _) = request(port, "POST", "/api/edit/remove_activation", r#"{"name":"Select"}"#)
+        .expect("re-remove");
+    assert_eq!(sr, 400, "removing a missing activation is rejected");
+}
+
 /// A state machine that would not translate cleanly (a per-state output
 /// assigned a value of the wrong type) is REJECTED at create time — before it
 /// is ever saved — so the model never holds a machine that fails to lower to
