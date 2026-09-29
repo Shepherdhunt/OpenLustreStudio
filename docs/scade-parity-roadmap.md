@@ -16,6 +16,12 @@ proposes what to build next, in priority order.
    design models graphically, have a code generator read the model and emit
    C-Lite, compile and run it, and step/simulate the running model.
 
+**Positioning (decided).** OpenLustre Studio is a free tool for
+demonstration and prototyping, for the foreseeable future not a certified
+one: a way to work in the SCADE style while waiting for Ansys SCADE, with
+the ability to carry the work into SCADE later (item 15). It ships for
+Windows, Ubuntu Linux and macOS (item 16).
+
 The two are compatible: SCADE's own value is exactly "graphical model →
 qualified code → evidence". But they weight things differently, and the
 review below shows the GUI has drifted toward (2) while the centre of (1) has
@@ -220,6 +226,28 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
     Project ▸ Evidence Report.
 14. **Imported C operators in the GUI (M).** Register a manifest, place it as
     a block, see its contract.
+
+### P4 — the bridge to SCADE, and shipping
+
+15. **Translate to SCADE (L).** Export a workspace as an Ansys SCADE Suite
+    project: operators, types and constants as SCADE textual models
+    (`.scade`, Scade 6 — itself a Lustre descendant), state machines and
+    activate-if blocks as SCADE's own constructs, contracts as comments or
+    observer operators, and the diagram layout where SCADE's graphical
+    format allows. Aim: a model prototyped here opens in SCADE and
+    regenerates with KCG, so demos and prototypes carry over. Needs a SCADE
+    installation to validate against; start with the textual export and a
+    round-trip test suite on the samples.
+16. ✅ **Downloads for Windows, Ubuntu and macOS — done.** One download
+    and installer per OS, built, installed and smoke-tested on that OS by
+    CI (`.github/workflows/package.yml`): a Setup.exe (and portable zip)
+    for Windows, a .deb (and tarball with `install.sh`) for Ubuntu, a .pkg
+    (and tarball) for macOS on Apple Silicon and Intel; the Linux and macOS
+    downloads bundle Kind 2. Running the suite on all three OSes found and
+    fixed two ways the generated C differed from the model (fused
+    multiply-add on ARM; line endings on Windows). Remaining: code signing
+    (Windows SmartScreen, macOS Gatekeeper/notarization) — a certificate
+    cost, not code.
 
 ### Deliberately not recommended now
 

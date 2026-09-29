@@ -8,12 +8,15 @@ CoCoSpec contracts — whose native storage and semantics are
 uses, is auto-generated into **Directional C-Lite** that compiles and
 provably behaves identically to the simulated model.
 
-OpenLustre Studio is **not a SCADE replacement**. It is a similar
-models-to-source-code capability — open, scriptable, and verifiable —
-for teams that want the SCADE workflow shape (draw → check → simulate →
-generate → test → prove) without a qualified-tool license, or as a
-front-of-pipeline workbench before downstream SCADE / qualified
-code-generation flows.
+OpenLustre Studio is **not a SCADE replacement** and not a certified
+tool: it is for **demonstration and prototyping**. It is a similar
+models-to-source-code capability — open, free (Apache-2.0), scriptable,
+and verifiable — for teams that want the SCADE workflow shape (draw →
+check → simulate → generate → test → prove) before they have a SCADE
+license: a way to work while waiting for Ansys SCADE. Models are Lustre,
+SCADE's own foundation, and translating them into SCADE projects is on
+the roadmap, so the work carries over when SCADE arrives. Runs on
+Windows, Ubuntu Linux and macOS.
 
 ```text
 The model is not just equations.
@@ -238,22 +241,38 @@ and the layout persists into the model file.
 
 ## Installing
 
-**Windows** — download `OpenLustreStudio-<version>-Setup.exe` from the
-releases page and run it. You get a normal install wizard, a Start Menu
-entry, and an optional Desktop shortcut; double-clicking the shortcut runs
-`openlustre studio launch`, which starts the Studio and opens your browser
-on a welcome project (created at `%USERPROFILE%\OpenLustre` on first run).
-The 41-block standard library is embedded in the binary — nothing else to
-install. (Installer built from `packaging/windows/openlustre.iss`; the
-`release` GitHub Actions workflow produces it on every version tag.)
+Each OS has its own download, with an installer (from the repository's
+Releases page, or from the latest run of the **package** workflow under
+Actions ▸ package ▸ Artifacts):
 
-**Linux / macOS** — grab the release archive (or `cargo build --release
--p ol_cli`), then `./packaging/linux/install.sh` to get the binary in
-`~/.local/bin` plus an application-menu shortcut, or just run:
+| OS | Installer | Or |
+|---|---|---|
+| **Windows** 10/11, x64 | `OpenLustreStudio-<v>-windows-x86_64-Setup.exe` — a setup wizard; installs for you (no admin rights) or for everyone, adds Start Menu shortcuts and, optionally, `openlustre` to PATH; uninstall from Settings ▸ Apps | `…-windows-x86_64.zip`: portable, unzip and run |
+| **Ubuntu** 22.04+ (and Debian-based), x64 | `openlustre-studio_<v>_amd64.deb` — `sudo apt install ./openlustre-studio_<v>_amd64.deb` | `…-linux-x86_64.tar.gz`: unpack, `./install.sh` (per user; `--system` for everyone; `--uninstall`) |
+| **macOS** 12+, Apple Silicon | `…-macos-arm64.pkg` — double-click (the download is not signed: right-click ▸ Open the first time) | `…-macos-arm64.tar.gz`: unpack, `./install.sh` |
+| **macOS** 12+, Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` |
+
+Every download carries the Studio, the 41-block library, and the samples;
+the Linux and macOS ones also bundle the Kind 2 prover and Z3, so proving
+works out of the box (`openlustre kind2 doctor` checks). Kind 2 has no
+Windows build: on Windows it runs through WSL or Docker
+(`README-windows.txt` in the install folder). Generating and testing C
+needs a C compiler (gcc or clang; on Windows MSVC Build Tools or MinGW).
+
+Start **OpenLustre Studio** or **OpenLustre Studio — PMS sample** from the
+Start Menu, the application menu, or Applications ▸ OpenLustre Studio: the
+Studio opens in your browser, with its log in a console window (close it to
+stop the Studio). From a terminal:
 
 ```bash
-openlustre studio launch        # starts the Studio + opens your browser
+openlustre studio launch                 # a welcome project in ~/OpenLustre
+openlustre studio launch --sample pms    # the Payload Management System sample
 ```
+
+To build the downloads yourself: `packaging/linux/build.sh <version>`,
+`packaging/macos/build.sh <version> <aarch64|x86_64>`, or
+`packaging\windows\build-installer.ps1 -Version <version>`; each OS has a
+`smoke` script that installs the result and checks it.
 
 ## The workflow
 
