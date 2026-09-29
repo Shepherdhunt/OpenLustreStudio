@@ -18,6 +18,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod sim_session;
+
 const STUDIO_UI_HTML: &str = include_str!("studio_ui.html");
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 
@@ -46,6 +48,8 @@ pub struct ServerCtx {
     pub use_embedded: bool,
     /// Undo/redo journal: file snapshots taken before each successful edit.
     pub history: std::sync::Mutex<History>,
+    /// The live simulation session (Simulation dock), if one is running.
+    pub sim: std::sync::Mutex<Option<sim_session::SimSession>>,
 }
 
 impl ServerCtx {
@@ -72,6 +76,8 @@ impl ServerCtx {
         let mut h = self.history.lock().unwrap();
         h.undo.clear();
         h.redo.clear();
+        // A simulation of the previous document is meaningless now.
+        *self.sim.lock().unwrap() = None;
     }
 }
 
@@ -258,6 +264,13 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(s) => (200, "text/plain; charset=utf-8", s.into_bytes()),
             Err(e) => (400, "text/plain", e.into_bytes()),
         },
+        ("POST", "/api/sim/start") => sim_start_response(ctx, body),
+        ("POST", "/api/sim/step") => sim_step_response(ctx, body),
+        ("POST", "/api/sim/stop") => {
+            *ctx.sim.lock().unwrap() = None;
+            (200, "application/json", b"{\"stopped\":true}".to_vec())
+        }
+        ("GET", "/api/sim/state") => (200, "application/json", sim_state(ctx).to_string().into_bytes()),
         ("POST", "/api/simulate") => {
             let csv = std::str::from_utf8(body).unwrap_or("");
             let full = parse_query(query).get("full").map(|v| v == "1").unwrap_or(false);
@@ -754,6 +767,161 @@ fn run_sim(ctx: &ServerCtx, csv: &str, full: bool) -> Result<String, String> {
         sim.run_csv(csv).map_err(|e| format!("{e}"))?
     };
     Ok(trace.to_csv())
+}
+
+// --- Live simulation session (the Simulation dock) ---------------------------
+
+/// A fingerprint of the model's *semantics*: the project as a build loads it
+/// with drawing metadata stripped — so dragging a box or re-gridding leaves a
+/// running simulation alone, while any real edit marks it stale.
+fn semantic_signature(project: &ol_ir::Project) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut p = project.clone();
+    for pkg in &mut p.packages {
+        for n in &mut pkg.nodes {
+            n.diagram = Default::default();
+        }
+        for m in &mut pkg.state_machines {
+            m.layout.clear();
+        }
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&p).unwrap_or_default().hash(&mut h);
+    h.finish()
+}
+
+fn json_response(result: Result<serde_json::Value, String>) -> (u16, &'static str, Vec<u8>) {
+    match result {
+        Ok(v) => (200, "application/json", v.to_string().into_bytes()),
+        Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// POST /api/sim/start `{node?}` — start a session on `node` (default: the
+/// root). Like SCADE, simulation needs a clean build of the operator.
+fn sim_start_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    json_response((|| {
+        let req: serde_json::Value = if body.iter().all(|b| b.is_ascii_whitespace()) {
+            serde_json::json!({})
+        } else {
+            serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?
+        };
+        let project = load(ctx)?;
+        let root = req
+            .get("node")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .or_else(|| project.main.clone())
+            .ok_or("no operator to simulate — build one first (building makes it the root)")?;
+        let node = project.find_node(&root).ok_or_else(|| format!("operator `{root}` not found"))?;
+        if node.is_imported() {
+            return Err(format!("`{root}` is an imported C operator — there is no model to simulate"));
+        }
+        let slice = project.slice_for_root(&root)?;
+        let errors = ol_typecheck::check_project(&slice).errors().count();
+        if errors > 0 {
+            return Err(format!("`{root}` has {errors} error(s) — fix them (see Messages) before simulating"));
+        }
+        let signature = semantic_signature(&project);
+        let session = sim_session::SimSession::start(project, root, signature)?;
+        let info = serde_json::json!({
+            "root": session.root,
+            "cycle": 0,
+            "signals": session.signals,
+            "monitored": session.monitored,
+        });
+        *ctx.sim.lock().unwrap() = Some(session);
+        Ok(info)
+    })())
+}
+
+/// POST /api/sim/step `{inputs: {name: value}, count?, break?,
+/// stop_on_violation?}` — run up to `count` cycles (default 1, at most
+/// 10 000) holding `inputs`, stopping early after the cycle on which `break`
+/// holds or (if asked) a contract clause is violated.
+fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let mut guard = ctx.sim.lock().unwrap();
+    let Some(session) = guard.as_mut() else {
+        return (409, "application/json", json_error("no simulation is running — start one").into_bytes());
+    };
+    let project = match load(ctx) {
+        Ok(p) => p,
+        Err(e) => return (400, "application/json", json_error(&e).into_bytes()),
+    };
+    if semantic_signature(&project) != session.signature {
+        *guard = None;
+        let v = serde_json::json!({
+            "schema_version": 1,
+            "stale": true,
+            "error": "the model changed since the simulation started — start it again",
+        });
+        return (409, "application/json", v.to_string().into_bytes());
+    }
+    json_response((|| {
+        let req: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+        let mut inputs = std::collections::BTreeMap::new();
+        if let Some(obj) = req.get("inputs").and_then(|v| v.as_object()) {
+            for (k, v) in obj {
+                let text = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                inputs.insert(k.clone(), text);
+            }
+        }
+        let count = req.get("count").and_then(|v| v.as_u64()).unwrap_or(1).clamp(1, 10_000) as usize;
+        let brk = match req.get("break").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()) {
+            None => None,
+            Some(text) => Some(parse_breakpoint(&project, session, text)?),
+        };
+        let stop_on_violation = req.get("stop_on_violation").and_then(|v| v.as_bool()).unwrap_or(false);
+        session.run(sim_session::RunReq { inputs, count, brk, stop_on_violation })
+    })())
+}
+
+/// A breakpoint is a Boolean condition on the cycle just observed: over the
+/// simulated operator's signals, constants and enum values — no `pre` / `->`.
+fn parse_breakpoint(
+    project: &ol_ir::Project,
+    session: &sim_session::SimSession,
+    text: &str,
+) -> Result<ol_ir::Expr, String> {
+    let expr = ol_stdlib::parse_expr(text).map_err(|e| format!("breakpoint: {e}"))?;
+    if expr.contains_temporal() {
+        return Err("breakpoint: a condition is about the current cycle — `pre` / `->` aren't allowed".into());
+    }
+    let mut known: std::collections::HashSet<String> = session
+        .signals
+        .as_array()
+        .map(|a| a.iter().filter_map(|s| s["name"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    for pkg in &project.packages {
+        known.extend(pkg.constants.iter().map(|c| c.name.clone()));
+        for t in &pkg.types {
+            if let ol_ir::TypeBody::Enum(e) = &t.body {
+                known.extend(e.variants.iter().cloned());
+            }
+        }
+    }
+    if let Some(v) = expr.free_vars().into_iter().find(|v| !known.contains(v)) {
+        return Err(format!("breakpoint: `{v}` is not a signal of `{}`", session.root));
+    }
+    Ok(expr)
+}
+
+/// GET /api/sim/state — the running session, if any.
+fn sim_state(ctx: &ServerCtx) -> serde_json::Value {
+    match ctx.sim.lock().unwrap().as_ref() {
+        Some(s) => serde_json::json!({
+            "active": true,
+            "root": s.root,
+            "cycle": s.cycle,
+            "signals": s.signals,
+            "monitored": s.monitored,
+        }),
+        None => serde_json::json!({ "active": false }),
+    }
 }
 
 // --- Diagram: a renderable dataflow view of one node ---

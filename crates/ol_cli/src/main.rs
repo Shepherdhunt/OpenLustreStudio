@@ -934,6 +934,7 @@ fn serve_studio(
         with_stdlib,
         use_embedded,
         history: Default::default(),
+        sim: Default::default(),
     };
     studio_server::serve(listener, ctx)?;
     Ok(())

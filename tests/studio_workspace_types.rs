@@ -699,6 +699,90 @@ fn activation_create_validate_edit_build_remove() {
     assert_eq!(sr, 400, "removing a missing activation is rejected");
 }
 
+/// The live simulation session: one simulator kept across requests. Steps
+/// advance one cycle each (no replay), Run N stops at a breakpoint or a
+/// contract violation, bad breakpoints are refused, dragging a box leaves
+/// the session alone while a real edit makes it stale, and stop ends it.
+#[test]
+fn simulation_session_steps_runs_breaks_and_goes_stale() {
+    let g = start_server_on_workspace("ws_sim");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Cnt","kind":"operator"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Cnt","side":"input","name":"inc","type":"bool"}"#);
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Cnt","side":"output","name":"n","type":"int32"}"#);
+
+    // A model with errors (n never assigned) is not simulated.
+    let (s, body) = request(port, "POST", "/api/sim/start", r#"{"node":"Cnt"}"#).expect("start");
+    assert_eq!(s, 400, "an operator with errors can't be simulated: {body}");
+
+    post_ok(port, "/api/edit/add_equation",
+        r#"{"node":"Cnt","lhs":"n","body":"(0 -> pre n) + (if inc then 1 else 0)"}"#);
+    post_ok(port, "/api/edit/add_contract",
+        r#"{"name":"CntC","operator":"Cnt","guarantees":[{"name":"small","expr":"n <= 3"}]}"#);
+
+    let (s, body) = request(port, "POST", "/api/sim/start", r#"{"node":"Cnt"}"#).expect("start");
+    assert_eq!(s, 200, "{body}");
+    let info: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(info["root"], "Cnt");
+    assert_eq!(info["monitored"], true);
+    let names: Vec<&str> = info["signals"].as_array().unwrap().iter().map(|s| s["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["inc", "n"], "inputs, locals, outputs in row order");
+    let n_col = 1;
+
+    let step = |body: &str| -> serde_json::Value {
+        let (s, b) = request(port, "POST", "/api/sim/step", body).expect("step");
+        assert_eq!(s, 200, "{b}");
+        serde_json::from_str(&b).unwrap()
+    };
+    // One cycle per Step — state carries across requests.
+    let r = step(r#"{"inputs":{"inc":"true"}}"#);
+    assert_eq!(r["cycle"], 1);
+    assert_eq!(r["rows"][0]["values"][n_col], "1");
+    let r = step(r#"{"inputs":{"inc":"false"}}"#);
+    assert_eq!(r["rows"][0]["values"][n_col], "1", "held, not replayed");
+    // Run up to 10 cycles, stopping when n reaches 3.
+    let r = step(r#"{"inputs":{"inc":"true"},"count":10,"break":"n = 3"}"#);
+    assert_eq!(r["stopped"], "break", "{r}");
+    assert_eq!(r["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(r["cycle"], 4);
+    // The next cycle violates `n <= 3`: stop on it.
+    let r = step(r#"{"inputs":{"inc":"true"},"count":10,"stop_on_violation":true}"#);
+    assert_eq!(r["stopped"], "violation", "{r}");
+    assert_eq!(r["rows"][0]["violations"], serde_json::json!(["small"]));
+    assert_eq!(r["rows"][0]["values"][n_col], "4");
+
+    // Bad breakpoints are refused before anything runs.
+    for bad in [r#""pre n > 1""#, r#""zz > 1""#, r#""n + ""#] {
+        let (s, b) = request(port, "POST", "/api/sim/step",
+            &format!(r#"{{"inputs":{{"inc":"true"}},"break":{bad}}}"#)).expect("bad break");
+        assert_eq!(s, 400, "{bad} rejected: {b}");
+    }
+    let state = get_json(port, "/api/sim/state");
+    assert_eq!(state["cycle"], 5, "rejected requests ran nothing: {state}");
+
+    // Moving a box is not a model change: the session survives.
+    post_ok(port, "/api/edit/set_layout", r#"{"node":"Cnt","positions":{"n":{"x":400,"y":40}}}"#);
+    let r = step(r#"{"inputs":{"inc":"false"}}"#);
+    assert_eq!(r["cycle"], 6);
+    // A real edit makes it stale.
+    post_ok(port, "/api/edit/update_equation",
+        r#"{"node":"Cnt","index":0,"lhs":"n","body":"(0 -> pre n) + (if inc then 2 else 0)"}"#);
+    let (s, b) = request(port, "POST", "/api/sim/step", r#"{"inputs":{"inc":"true"}}"#).expect("stale");
+    assert_eq!(s, 409, "{b}");
+    assert!(b.contains("\"stale\":true"), "{b}");
+    assert_eq!(get_json(port, "/api/sim/state")["active"], false);
+
+    // Restart, then stop.
+    let (s, _) = request(port, "POST", "/api/sim/start", r#"{"node":"Cnt"}"#).expect("restart");
+    assert_eq!(s, 200);
+    let r = step(r#"{"inputs":{"inc":"true"}}"#);
+    assert_eq!(r["rows"][0]["values"][n_col], "2", "the edited model runs from cycle 0");
+    post_ok(port, "/api/sim/stop", "{}");
+    let (s, _) = request(port, "POST", "/api/sim/step", r#"{"inputs":{"inc":"true"}}"#).expect("stopped");
+    assert_eq!(s, 409, "no session after stop");
+}
+
 /// Contracts through the Studio: dry-run check, create (attached to its
 /// operator, interface copied from it), CoCoSpec emission, error vs. warning
 /// handling, and the attached contract staying in step with port renames and
