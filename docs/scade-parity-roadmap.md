@@ -29,7 +29,7 @@ no GUI at all.
 | State machines (flat + hierarchical, operator-owned) | ✅ | ✅ textual editor, draggable chart, canvas block |
 | Conditional activation (activate-if) | ✅ stage 1 (selected, not clocked) | ✅ editor, decision-tree chart, canvas block |
 | Type checking, function/operator rules | ✅ | ✅ errors mapped onto boxes and wires |
-| **CoCoSpec contracts: assume / guarantee / modes** | ✅ IR, checker, CoCoSpec emit, runtime monitors | ❌ **read-only one-liner in the tree; no create/edit/attach, no mode table** |
+| **CoCoSpec contracts: assume / guarantee / modes** | ✅ IR, checker (now type-checks clauses), CoCoSpec emit, observer-based runtime monitors | ✅ **contract editor: clause rows, mode table, CoCoSpec text, live checking** (was read-only) |
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
 | C-Lite generation (selected root + closure) | ✅ | ✅ Generate / C pane / save files |
 | Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
@@ -78,12 +78,19 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ### P0 — close the gaps at the centre of both goals
 
-1. **Contract editor + mode table (M–L).** Structured editing of assume /
-   guarantee / mode (require/ensure) clauses, attach a contract to an
-   operator, a SCADE-style mode table grid, and a raw-CoCoSpec text mode.
-   The whole back end (IR, checker, emitter, runtime monitors) already
-   exists — this is GUI plus a few journaled edit endpoints, and it is the
-   project's headline promise.
+1. ✅ **Contract editor + mode table — done.** Contracts dialog with three
+   views (assume/guarantee rows, SCADE-style mode table, editable CoCoSpec
+   text), live dry-run checking that outlines offending rows, one contract
+   per operator with its interface kept in step with port edits.
+   *Correction to this plan:* the back end was **not** complete, as it
+   first said. Building the editor exposed that contract expressions were
+   never type-checked (now C0080), that five shipped library contracts
+   referenced undeclared names and one promised the opposite of its
+   block's behaviour (fixed, with ghost-variable support added to the
+   library format), and that both runtime monitors were stateless — `pre`
+   / `->` compiled to `1`, ghosts broke the C monitor's compile, and the
+   simulator skipped assumptions. Monitors now run each contract's
+   observer node in both the simulator and the generated C.
 2. **Stateful simulation session + live values on the diagram (M).** A
    server-side `Sim` session (step / run N / reset) replaces replay-from-zero
    stepping. With it: current values annotated on every wire, the active
@@ -143,7 +150,8 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-Items **1** (contracts in the Studio) and **2** (simulation session with live
-diagram values), in that order: the first restores the project's core
-promise, the second completes the SCADE design → generate → run → simulate
-loop that this effort set out to build.
+Item **1** is done. Next is item **2** (a stateful simulation session with
+live values on the diagram), which completes the SCADE design → generate →
+run → simulate loop — and pairs naturally with contracts: the per-cycle
+active mode and violations the monitors now compute correctly can be shown
+live on the canvas.

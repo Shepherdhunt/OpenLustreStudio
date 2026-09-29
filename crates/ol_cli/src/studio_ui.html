@@ -5111,9 +5111,11 @@ async function ctCheck() {
   const line = d => (d.severity === "Warning" ? '<span class="warn">⚠ ' : '<span class="info">ℹ ') +
     escapeHTML(d.code + ": " + d.message) + "</span>";
   const n = p.assumptions.length + p.guarantees.length;
+  const warns = others.filter(d => d.severity === "Warning").length;
   const head = errs.length
     ? errs.map(e => '<span class="err">✖ ' + escapeHTML(e) + "</span>").join("<br>")
-    : '<span class="kw">✓</span> checks clean — ' + n + " clause(s), " + p.modes.length + " mode(s), " +
+    : '<span class="kw">✓</span> ' + (warns ? "no errors (" + warns + " warning" + (warns > 1 ? "s" : "") + ")"
+      : "checks clean") + " — " + n + " clause(s), " + p.modes.length + " mode(s), " +
       p.ghosts.length + " ghost(s)";
   document.getElementById("ct-diags").innerHTML = head + (others.length ? "<br>" + others.map(line).join("<br>") : "");
   ctMarkInvalid(errs);

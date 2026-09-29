@@ -50,6 +50,19 @@ stepping, per-branch flags show which branch fired each cycle.
 
 ![A conditional activation in OpenLustre Studio — the Conditional Activations dialog with its decision-tree chart (if fault / elsif engage and not hold / elsif hold / else) above the textual branch editor.](docs/screenshots/04-activation.png)
 
+**Contracts, authored in the Studio.** Each operator can carry a CoCoSpec
+contract — ghost variables, assumptions, guarantees and modes — edited as
+clause rows, as a SCADE-style **mode table** (situation → reaction), or as
+CoCoSpec text. Every edit is checked live (types, vacuous or contradictory
+clauses, unreachable or overlapping modes) with the offending rows
+outlined, and the contract's interface follows the operator's ports. The
+same contract is proved with Kind 2 and monitored at run time: each
+contract compiles to an observer node that the simulator steps and the
+generated C runs, so `pre`/`->` and ghost variables behave identically in
+both.
+
+![The Contracts dialog in OpenLustre Studio — the mode table for an Autopilot contract (Init, Faulted, and an unreachable Contradiction mode flagged by the live check).](docs/screenshots/05-contract.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 
@@ -125,7 +138,8 @@ openlustre prove model.json --timeout 30 --waveform
 * **User-defined entry point** — any operator can be designated `main`;
   the generated build produces a standalone executable named after it.
   (SCADE fixes the runtime shape; OpenLustre lets the model own `main`.)
-* **Contracts are first-class** — CoCoSpec assume/guarantee/mode clauses
+* **Contracts are first-class** — CoCoSpec assume/guarantee/mode clauses,
+  authored in the Studio's contract editor,
   live beside the equations, are checked statically (vacuity,
   unreachable modes, import signatures), monitored at runtime in both
   the simulator and the generated C, and proved with Kind 2.

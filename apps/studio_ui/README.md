@@ -52,6 +52,15 @@ arrow), and the arrangement persists into the model file per machine —
 `/api/edit/set_fsm_layout`, journaled like every other edit, kept across
 textual machine updates.
 
+Contracts are edited in the Contracts dialog (Project ▸ Contracts,
+Insert ▸ Contract, the tree, an operator's right-click menu, or the chip
+beside the diagram's operator name): clause rows, a mode table, and a
+CoCoSpec text view over the same clauses. `/api/contract` serves them,
+`/api/contract/check` dry-runs an edit (introduced errors, every
+diagnostic about the contract, its CoCoSpec text), and
+`/api/edit/{add,update,remove}_contract` save them; the interface is
+copied from the operator and re-synced on port edits.
+
 Conditional activations (SCADE activate-if) have their own dialog —
 Insert ▸ Activation, the palette's *Activation (if / elsif / else)* item,
 or the workspace tree — with a one-branch-per-line editor
