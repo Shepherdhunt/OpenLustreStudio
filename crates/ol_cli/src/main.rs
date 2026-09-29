@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
+mod evidence;
 mod lustre_import;
 mod scenario;
 mod studio_server;
@@ -110,6 +111,32 @@ enum Cmd {
         /// per-cycle waveform table instead of raw JSON.
         #[arg(long)]
         waveform: bool,
+    },
+    /// Build the verification evidence report for one operator — static
+    /// checks, contract, Kind 2 proof, tests with decision / MC/DC coverage,
+    /// model ≡ generated code, and model-to-code traceability — as
+    /// `evidence_<operator>.html` (print it to PDF) and `.json`. Exits
+    /// non-zero when the verdict is FAIL.
+    Evidence {
+        model: PathBuf,
+        /// The operator; defaults to the project's `main`.
+        #[arg(long)]
+        root: Option<String>,
+        /// Scenario directory; defaults to `scenarios/` next to the model.
+        #[arg(long)]
+        scenarios: Option<PathBuf>,
+        #[arg(long, value_name = "DIR")]
+        with_stdlib: Option<PathBuf>,
+        /// Prove the contract with Kind 2 and include the results.
+        #[arg(long)]
+        prove: bool,
+        #[arg(long, default_value = "kind2")]
+        kind2: String,
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u32>,
+        /// Directory for the report files.
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
     },
     /// Contract-check only.
     ContractCheck {
@@ -315,6 +342,14 @@ fn main() -> Result<()> {
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
         }
+        Cmd::Evidence { model, root, scenarios, with_stdlib, prove, kind2, timeout, out } => cmd_evidence(
+            &model,
+            root.as_deref(),
+            scenarios.as_deref(),
+            with_stdlib.as_deref(),
+            prove.then_some(evidence::Prove { binary: kind2, timeout }),
+            &out,
+        ),
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
         Cmd::Studio { cmd } => match cmd {
             StudioCmd::Inspect {
@@ -448,6 +483,53 @@ fn cmd_check(
         anyhow::bail!("check failed");
     }
     println!("check: OK ({} nodes)", project.all_nodes().count());
+    Ok(())
+}
+
+fn cmd_evidence(
+    model: &Path,
+    root: Option<&str>,
+    scenarios: Option<&Path>,
+    with_stdlib: Option<&Path>,
+    prove: Option<evidence::Prove>,
+    out: &Path,
+) -> Result<()> {
+    let project = load_with_stdlib(model, with_stdlib)?;
+    let root = root
+        .map(str::to_string)
+        .or_else(|| project.main.clone())
+        .context("no operator given (--root) and the project has no `main`")?;
+    let model_dir = model.parent().unwrap_or(Path::new("."));
+    let scenarios = scenarios.map(Path::to_path_buf).unwrap_or_else(|| model_dir.join("scenarios"));
+    let mut model_files = vec![(
+        model.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        std::fs::read(model).with_context(|| format!("reading {}", model.display()))?,
+    )];
+    let types = model_dir.join("types.json");
+    if types.is_file() {
+        model_files.push(("types.json".into(), std::fs::read(&types)?));
+    }
+    let ev = evidence::collect(&evidence::Request {
+        project: &project,
+        root: &root,
+        scenarios: &scenarios,
+        model_files,
+        prove,
+    })
+    .map_err(|e| anyhow::anyhow!(e))?;
+    std::fs::create_dir_all(out)?;
+    let html = out.join(format!("evidence_{root}.html"));
+    let json = out.join(format!("evidence_{root}.json"));
+    std::fs::write(&html, ev.to_html())?;
+    std::fs::write(&json, serde_json::to_string_pretty(&ev)?)?;
+    println!("evidence for `{root}`: {}", ev.verdict);
+    for s in &ev.sections {
+        println!("  {:<40} {:<8} {}", s.title, s.status.label(), s.summary);
+    }
+    println!("wrote {} and {}", html.display(), json.display());
+    if ev.verdict == "FAIL" {
+        anyhow::bail!("evidence verdict: FAIL");
+    }
     Ok(())
 }
 

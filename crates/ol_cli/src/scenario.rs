@@ -681,6 +681,31 @@ pub fn cc_available() -> bool {
     find_compiler().is_some()
 }
 
+/// The flags the generated C is compiled with for the C backend (warnings
+/// are errors: the generated code must compile cleanly).
+pub const C_FLAGS: [&str; 6] = [
+    "-std=c11",
+    "-Wall",
+    "-Wextra",
+    "-Wno-unused-but-set-variable",
+    "-Wno-unused-variable",
+    "-Werror",
+];
+
+/// The C compiler the C backend uses, as it identifies itself (the first
+/// line of `--version`), or None when there is none.
+pub fn compiler_identity() -> Option<String> {
+    match find_compiler()? {
+        CompilerKind::Posix(name) => {
+            let out = Command::new(name).arg("--version").output().ok()?;
+            let first = String::from_utf8_lossy(&out.stdout).lines().next().unwrap_or(name).trim().to_string();
+            Some(format!("{name}: {first}"))
+        }
+        #[cfg(windows)]
+        CompilerKind::Msvc(p) => Some(format!("MSVC ({})", p.display())),
+    }
+}
+
 /// Compile C sources that already live in `dir` into `dir/<exe_name>`,
 /// using a POSIX-style compiler from PATH or MSVC via vcvars64 — the same
 /// discovery the scenario harness uses. `which` restricts the choice
@@ -830,15 +855,8 @@ pub(crate) fn compile_model(project: &ol_ir::Project, node_name: &str) -> Result
         .ok_or_else(|| "no C compiler found (cc/gcc/clang on PATH, or MSVC)".to_string())?;
     let cc = match compiler {
         CompilerKind::Posix(name) => Command::new(name)
-            .args([
-                "-std=c11",
-                "-Wall",
-                "-Wextra",
-                "-Wno-unused-but-set-variable",
-                "-Wno-unused-variable",
-                "-Werror",
-                "-o",
-            ])
+            .args(C_FLAGS)
+            .arg("-o")
             .arg(&exe)
             .args(&sources)
             .arg(format!("-I{}", d.display()))

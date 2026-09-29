@@ -87,6 +87,14 @@
   #side-c .cl.hl.ct { background: #ffe79a; }
   #side-c .cl.cur { background: #ffd98a; box-shadow: inset 3px 0 0 #b86e00; }
   .report-body { max-height: 70vh; overflow: auto; font-size: 12px; }
+  #ev-result { margin-top: 10px; }
+  #ev-result table { width: 100%; }
+  .ev-verdict { display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: 700; margin: 4px 0 8px; }
+  .ev-st { display: inline-block; padding: 0 8px; border-radius: 10px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .ev-pass { color: #107c10; background: #e6f4ea; }
+  .ev-gaps { color: #8a5300; background: #fff4e0; }
+  .ev-fail { color: #b3261e; background: #fdeeee; }
+  .ev-not_run { color: #5a5a5a; background: #eeeeee; }
   .report-body table { width: auto; margin: 6px 0 12px; }
   .report-body td, .report-body th { padding: 2px 8px; }
   .report-body code { font-family: Consolas, monospace; font-size: 11px; }
@@ -544,6 +552,7 @@
       <div class="mi" onclick="showDock('tests'); loadTests(); testsRun()">Run Test Scenarios</div>
       <div class="mi" onclick="showDock('tests'); testsRecord()">Record Golden Traces</div>
       <div class="mi" onclick="showDock('verify'); proveRun()">Verify with Kind 2</div>
+      <div class="mi" id="mi-project-evidence" onclick="openEvidence()">Evidence Report…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openFsmEditor(null)">State Machines…</div>
       <div class="mi" id="mi-project-contracts" onclick="openContractEditor(null)">Contracts…</div>
@@ -667,6 +676,7 @@
       <div class="row">
         timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
         <button class="primary" onclick="proveRun()">Run Kind 2</button>
+        <button onclick="openEvidence()" title="Checks, proof, tests and coverage, model ≡ code and traceability in one document">Evidence report…</button>
         <span class="build-note" id="verify-status"></span>
       </div>
       <div id="verify-results"></div>
@@ -960,6 +970,18 @@
     <pre id="sim-output"></pre>
   </div>
 
+  <div class="dlg" id="dlg-evidence">
+    <p>The <strong>verification evidence</strong> for one operator in one document: static checks, its contract, the Kind 2 proof, tests with decision and MC/DC coverage, the compiled generated C checked against the model cycle by cycle, and model-to-code traceability with the generated files' SHA-256. Open it to review or print to PDF; the JSON is for archiving and tools.</p>
+    <div class="row" style="gap:10px; flex-wrap:wrap">
+      <label>operator <select id="ev-node"></select></label>
+      <label><input type="checkbox" id="ev-prove" checked> prove with Kind 2</label>
+      <label>timeout <input id="ev-timeout" type="number" value="30" min="1" style="width:60px"> s</label>
+      <button class="primary" onclick="evidenceRun()">Generate</button>
+      <span class="build-note" id="ev-status"></span>
+    </div>
+    <div id="ev-result"></div>
+  </div>
+
   <div class="dlg" id="dlg-report">
     <div class="row" style="margin-bottom:6px">
       <span class="build-note" id="report-note">Every equation of the generated C carries an <code class="inline">@trace</code> comment back to its diagram element; click one in the Generated C pane to find it in the model.</span>
@@ -1097,7 +1119,7 @@ const DLG_TITLES = {
   "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
   "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
-  "dlg-report": "C-Lite Generation Report",
+  "dlg-report": "C-Lite Generation Report", "dlg-evidence": "Evidence Report",
   "dlg-fsm": "State Machines",
   "dlg-act": "Conditional Activations",
   "dlg-contract": "Contracts",
@@ -1243,6 +1265,66 @@ document.getElementById("side-c").addEventListener("click", ev => {
   if (!line || String(window.getSelection() || "")) return; // selecting text, not navigating
   codeGoto(Number(line.dataset.t));
 });
+
+// --- Evidence report -----------------------------------------------------------
+
+const EV_STATUS = { pass: ["✔", "pass"], gaps: ["▲", "gaps"], fail: ["✖", "fail"], not_run: ["—", "not run"] };
+
+function openEvidence() {
+  const sel = document.getElementById("ev-node");
+  const names = [];
+  for (const pkg of (state.inspect?.project?.packages || [])) {
+    if (pkg.name === "stdlib") continue;
+    for (const n of pkg.nodes) if (n.kind !== "Imported") names.push(n.name);
+  }
+  const want = state.buildTarget || state.inspect?.project?.main || names[0];
+  sel.innerHTML = names.map(n => '<option' + (n === want ? " selected" : "") + ">" + escapeHTML(n) + "</option>").join("");
+  document.getElementById("ev-result").innerHTML = "";
+  document.getElementById("ev-status").textContent = "";
+  openDialog("dlg-evidence");
+}
+
+async function evidenceRun() {
+  const node = document.getElementById("ev-node").value;
+  const prove = document.getElementById("ev-prove").checked;
+  const timeout = parseInt(document.getElementById("ev-timeout").value, 10) || 30;
+  const status = document.getElementById("ev-status");
+  const host = document.getElementById("ev-result");
+  status.textContent = "collecting evidence — checks, " + (prove ? "Kind 2, " : "") + "tests on the model and the compiled C…";
+  host.innerHTML = "";
+  let r, d;
+  try {
+    r = await fetch("/api/evidence", { method: "POST", body: JSON.stringify({ node, prove, timeout }) });
+    d = await r.json();
+  } catch (e) { status.textContent = "the request failed"; return; }
+  if (!r.ok) { status.textContent = ""; host.innerHTML = '<div class="diag severity-Error">' + escapeHTML(d.error || "failed") + "</div>"; return; }
+  state.evidence = d;
+  status.textContent = "";
+  const vcls = d.verdict === "PASS" ? "pass" : d.verdict === "FAIL" ? "fail" : "gaps";
+  host.innerHTML =
+    '<div class="ev-verdict ev-' + vcls + '">' + EV_STATUS[vcls][0] + " " + escapeHTML(d.verdict) + " — " + escapeHTML(d.operator) + "</div>" +
+    "<table><thead><tr><th>evidence</th><th>status</th><th>result</th></tr></thead><tbody>" +
+    d.sections.map(s => "<tr><td>" + escapeHTML(s.title) + '</td><td><span class="ev-st ev-' + s.status + '">' +
+      EV_STATUS[s.status][0] + " " + EV_STATUS[s.status][1] + "</span></td><td>" + escapeHTML(s.summary) + "</td></tr>").join("") +
+    "</tbody></table>" +
+    '<div class="row" style="gap:8px; margin-top:8px"><button class="primary" onclick="evidenceOpen()">Open full report</button>' +
+    '<button onclick="evidenceDownload(\'html\')">Download HTML</button><button onclick="evidenceDownload(\'json\')">Download JSON</button></div>';
+}
+
+/// The full report in a new tab (print it to PDF from there).
+function evidenceOpen() {
+  const d = state.evidence;
+  if (!d) return;
+  const url = URL.createObjectURL(new Blob([d.html], { type: "text/html" }));
+  window.open(url, "_blank");
+}
+
+function evidenceDownload(kind) {
+  const d = state.evidence;
+  if (!d) return;
+  if (kind === "html") downloadDataUrl("evidence_" + d.operator + ".html", "data:text/html;charset=utf-8," + encodeURIComponent(d.html));
+  else downloadDataUrl("evidence_" + d.operator + ".json", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(d.evidence, null, 2)));
+}
 
 /// The generation report: files with SHA-256, operators, state, coverage.
 async function openReport() {

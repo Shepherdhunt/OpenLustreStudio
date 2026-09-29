@@ -311,6 +311,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
+        ("POST", "/api/evidence") => json_response(evidence_response(ctx, body)),
         ("POST", "/api/prove") => match prove_run(ctx, &parse_query(query)) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -1819,6 +1820,50 @@ fn tests_list(ctx: &ServerCtx) -> Result<String, String> {
         "cc_available": crate::scenario::cc_available(),
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// POST /api/evidence `{node?, prove?, timeout?}` — the verification
+/// evidence report for an operator (default: the build root): its verdict and
+/// section statuses, the full report as JSON, and the standalone HTML page.
+fn evidence_response(ctx: &ServerCtx, body: &[u8]) -> Result<serde_json::Value, String> {
+    let req: serde_json::Value = serde_json::from_slice(body).unwrap_or(serde_json::json!({}));
+    let project = load(ctx)?;
+    let root = req
+        .get("node")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| project.main.clone())
+        .ok_or("no operator to report on — build one first")?;
+    let mut model_files = Vec::new();
+    let model = ctx.model();
+    if let Ok(bytes) = std::fs::read(&model) {
+        let name = model.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        model_files.push((name, bytes));
+    }
+    if let Some(types) = ctx.types_file() {
+        if let Ok(bytes) = std::fs::read(&types) {
+            model_files.push(("types.json".into(), bytes));
+        }
+    }
+    let prove = req.get("prove").and_then(|v| v.as_bool()).unwrap_or(false).then(|| crate::evidence::Prove {
+        binary: "kind2".into(),
+        timeout: req.get("timeout").and_then(|v| v.as_u64()).map(|t| t as u32),
+    });
+    let ev = crate::evidence::collect(&crate::evidence::Request {
+        project: &project,
+        root: &root,
+        scenarios: &ctx.scenarios(),
+        model_files,
+        prove,
+    })?;
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "operator": root,
+        "verdict": ev.verdict,
+        "sections": ev.sections,
+        "html": ev.to_html(),
+        "evidence": ev,
+    }))
 }
 
 fn tests_run(ctx: &ServerCtx) -> Result<String, String> {

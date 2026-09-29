@@ -163,3 +163,7 @@ path = "float_fidelity.rs"
 [[test]]
 name = "traceability"
 path = "traceability.rs"
+
+[[test]]
+name = "evidence"
+path = "evidence.rs"

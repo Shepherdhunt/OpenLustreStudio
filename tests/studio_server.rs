@@ -175,6 +175,15 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(body.contains("ReleaseLogic_step"), "driver text: {body}");
     assert!(body.contains("int main"));
 
+    // The evidence report for the root, as JSON sections + standalone HTML.
+    let (s, _, body) = http_post(port, "/api/evidence", r#"{"prove":false}"#).expect("evidence");
+    assert_eq!(s, 200, "{body}");
+    let ev: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(ev["operator"], "ReleaseLogic");
+    assert_eq!(ev["sections"].as_array().unwrap().len(), 7, "{ev}");
+    assert!(ev["html"].as_str().unwrap().contains("<title>Evidence — ReleaseLogic</title>"));
+    assert!(["PASS", "PASS WITH GAPS", "FAIL"].contains(&ev["verdict"].as_str().unwrap()));
+
     // The trace matrix: every equation of the generated C, with its diagram
     // element and line range; the report fingerprints the generated files.
     let (s, _, body) = http_get(port, "/api/clite/trace").expect("trace");
@@ -254,6 +263,8 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("/api/clite/trace") && html.contains("function renderCPane") && html.contains("function codeGoto"),
         "model-to-code navigation missing");
     assert!(html.contains("mi-code-report") && html.contains("function openReport"), "generation report missing");
+    assert!(html.contains("id=\"dlg-evidence\"") && html.contains("/api/evidence") && html.contains("mi-project-evidence"),
+        "evidence report UI missing");
     // Clocked activations: the editor explains last(), the live views hide
     // the lowering's plumbing locals.
     assert!(html.contains("last(v, init)") && html.contains("function simPlumbing"), "clocked activation UI missing");
