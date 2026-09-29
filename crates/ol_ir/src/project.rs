@@ -71,6 +71,11 @@ pub struct Package {
     /// before any downstream tool runs.
     #[serde(default)]
     pub state_machines: Vec<StateMachineDef>,
+    /// Conditional activations (SCADE "activate if" decision trees). Lowered
+    /// into their owner operators by [`Project::lower_activations`] before
+    /// any downstream tool runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub activations: Vec<crate::ActivationDef>,
 }
 
 impl Package {
@@ -125,6 +130,7 @@ impl Project {
                 dst_pkg.contracts.extend(src_pkg.contracts);
                 dst_pkg.imported_operators.extend(src_pkg.imported_operators);
                 dst_pkg.state_machines.extend(src_pkg.state_machines);
+                dst_pkg.activations.extend(src_pkg.activations);
             } else {
                 self.packages.push(src_pkg);
             }
@@ -183,6 +189,57 @@ impl Project {
                         None => errors
                             .push(LowerError::UnknownOwner(sm.name.clone(), op.clone())),
                     },
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Merge every [`crate::ActivationDef`] into its owner operator's body:
+    /// the branch-selected flags become locals, and each activation output
+    /// gains its selection-chain equation. After this call, downstream tools
+    /// see only ordinary dataflow. Call it after
+    /// [`Project::lower_state_machines`] — both constructs are owned sugar
+    /// over the same operator body.
+    pub fn lower_activations(&mut self) -> Result<(), Vec<crate::ActLowerError>> {
+        let mut errors = Vec::new();
+        for pkg in &mut self.packages {
+            let activations = std::mem::take(&mut pkg.activations);
+            for act in &activations {
+                let low = match crate::activation::lower(act) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                };
+                match pkg.nodes.iter_mut().find(|n| n.name == act.owner) {
+                    None => errors.push(crate::ActLowerError::UnknownOwner(
+                        act.name.clone(),
+                        act.owner.clone(),
+                    )),
+                    Some(node) => {
+                        // The driven variables must exist on the owner — the
+                        // activation is their definition, not their declaration.
+                        let known = |n: &str| {
+                            node.outputs.iter().any(|p| p.name == n)
+                                || node.locals.iter().any(|l| l.name == n)
+                        };
+                        if let Some(bad) = act.outputs.iter().find(|o| !known(&o.name)) {
+                            errors.push(crate::ActLowerError::OutputUnknownOnOwner(
+                                act.name.clone(),
+                                bad.name.clone(),
+                                act.owner.clone(),
+                            ));
+                            continue;
+                        }
+                        node.locals.extend(low.locals);
+                        node.equations.extend(low.equations);
+                    }
                 }
             }
         }

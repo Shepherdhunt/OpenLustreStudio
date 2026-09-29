@@ -241,12 +241,20 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
             .filter(|sm| kept_nodes.contains(&sm.name))
             .cloned()
             .collect();
+        // An activation rides with its owner: keep it iff the owner is kept.
+        let activations: Vec<_> = pkg
+            .activations
+            .iter()
+            .filter(|a| kept_nodes.contains(&a.owner))
+            .cloned()
+            .collect();
         if nodes.is_empty()
             && types.is_empty()
             && constants.is_empty()
             && contracts.is_empty()
             && imported_operators.is_empty()
             && state_machines.is_empty()
+            && activations.is_empty()
         {
             continue;
         }
@@ -258,6 +266,7 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
             contracts,
             imported_operators,
             state_machines,
+            activations,
         });
     }
 

@@ -21,9 +21,15 @@ pub mod order;
 pub mod project;
 pub mod slice;
 pub mod state_machine;
+pub mod activation;
 pub mod diag;
 pub mod loader;
 pub mod clocks;
+
+pub use activation::{
+    branch_flag, lower as lower_activation, ActLowerError, ActivationBranch, ActivationDef,
+    LoweredActivation,
+};
 
 pub use clocks::{infer_clocks, node_uses_clocks, Clock, ClockError, ClockInfo};
 pub use diag::{Diagnostic, Severity, SourceSpan};

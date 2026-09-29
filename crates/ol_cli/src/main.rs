@@ -394,8 +394,9 @@ pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol
         }
         lib.merge_into(&mut project, "stdlib");
     }
-    // Lower any state machines to dataflow before downstream tools see the
-    // project, so they can treat the lowered nodes as ordinary operators.
+    // Lower any state machines and activations to dataflow before downstream
+    // tools see the project, so they can treat the lowered nodes as ordinary
+    // operators.
     if let Err(errs) = project.lower_state_machines() {
         let joined = errs
             .into_iter()
@@ -403,6 +404,14 @@ pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
+    }
+    if let Err(errs) = project.lower_activations() {
+        let joined = errs
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("activation lowering failed:\n{joined}");
     }
     Ok(project)
 }
@@ -860,6 +869,14 @@ pub(crate) fn load_for_studio(
             .collect::<Vec<_>>()
             .join("\n");
         anyhow::bail!("state-machine lowering failed:\n{joined}");
+    }
+    if let Err(errs) = project.lower_activations() {
+        let joined = errs
+            .into_iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        anyhow::bail!("activation lowering failed:\n{joined}");
     }
     Ok(project)
 }
