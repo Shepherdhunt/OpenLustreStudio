@@ -859,6 +859,25 @@ fn clock_active(ck: &ol_ir::Clock, env: &BTreeMap<String, Value>) -> Result<bool
     Ok(true)
 }
 
+/// Lustre computes every call on every cycle of its clock, whichever branch
+/// of an `if` (or side of an `->`) is selected — the generated C hoists
+/// calls out of the choice. Step the calls in the branch not taken so their
+/// instances stay in step; its value, coverage and errors are discarded.
+fn step_untaken(
+    other: &Expr,
+    env: &BTreeMap<String, Value>,
+    state: &mut State,
+    call_states: &mut HashMap<usize, State>,
+    project: &Project,
+    site_clocks: Option<&HashMap<usize, ol_ir::Clock>>,
+) {
+    let mut has_call = false;
+    other.visit(|e| has_call |= matches!(e, Expr::Call { .. }));
+    if has_call {
+        let _ = eval(other, env, state, call_states, project, site_clocks, &mut None);
+    }
+}
+
 /// Whether a `pre`/`->` site is on its first tick: cycle 0 for base-clocked
 /// sites, "chain never active before" for clocked ones.
 fn first_tick(
@@ -1022,6 +1041,7 @@ fn eval(
             };
             let (taken, other) = if cval { (then_branch, else_branch) } else { (else_branch, then_branch) };
             let v = eval(taken, env, state, call_states, project, site_clocks, cov)?;
+            step_untaken(other, env, state, call_states, project, site_clocks);
             Ok(common_real(v, other, env, project))
         }
         Expr::Pre { arg } => {
@@ -1044,6 +1064,7 @@ fn eval(
         Expr::Arrow { init, body } => {
             let (taken, other) = if first_tick(expr, state, site_clocks) { (init, body) } else { (body, init) };
             let v = eval(taken, env, state, call_states, project, site_clocks, cov)?;
+            step_untaken(other, env, state, call_states, project, site_clocks);
             Ok(common_real(v, other, env, project))
         }
         // The clock checker guarantees a `when` is only reached on cycles

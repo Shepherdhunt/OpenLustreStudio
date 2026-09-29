@@ -5,7 +5,8 @@
 //! * Every scenario matches its golden trace on the model and on the
 //!   compiled generated C, with full decision and MC/DC coverage.
 //! * With Kind 2 installed (see kind2_projection.rs for how it is found),
-//!   every property of every contract is proved.
+//!   every property of every contract is proved, and so is the absence of
+//!   runtime errors (RTE-1).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -61,7 +62,7 @@ fn every_scenario_matches_on_the_model_and_the_generated_c_with_full_mcdc() {
     assert!(o.status.success(), "{text}");
     let runs = if backend == "both" { 16 } else { 8 };
     assert!(text.contains(&format!("{runs} passed, 0 failed")), "{text}");
-    assert!(text.contains("MC/DC: 150/150 conditions independent (95/95 decisions fully covered)"), "{text}");
+    assert!(text.contains("MC/DC: 151/151 conditions independent (96/96 decisions fully covered)"), "{text}");
 }
 
 /// The C test driver reads and prints enums by name, as the simulator's
@@ -124,4 +125,11 @@ fn the_sms_is_proved_by_kind2() {
                "BAL_2_stays_balanced", "BAL_5_complete"] {
         assert!(result.properties.iter().any(|p| p.label.contains(id)), "{id} not reported");
     }
+    // RTE-1: no runtime error — every moment, sum and counter fits int32, in
+    // the context of SMS (so all of them are among the proved properties).
+    assert!(input.checks.len() >= 50, "{} runtime-error checks", input.checks.len());
+    for c in &input.checks {
+        assert!(result.properties.iter().any(|p| p.name == c.name), "{} not reported", c.describe());
+    }
+    assert!(input.checks.iter().any(|c| c.node == "ReleaseSequencer" && c.what == "pre cnt + 1 fits int32"));
 }

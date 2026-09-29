@@ -694,7 +694,8 @@
       <div class="row">
         <button id="k2-chip" class="k2-chip" onclick="openKind2()" title="The prover and SMT solver in use — click for details or to set them up">Kind 2 …</button>
         timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
-        <button class="primary" onclick="proveRun('prove')" title="Prove every guarantee, mode ensure and property of the root's contract, and check its modes">Prove</button>
+        <button class="primary" onclick="proveRun('prove')" title="Prove every guarantee, mode ensure and property of the root's contract, check its modes, and prove it free of runtime errors">Prove</button>
+        <label title="Also prove that no integer overflows its C type, no division by zero, every index in bounds, every real-to-integer conversion in range — in the context of the root"><input type="checkbox" id="verify-rte" checked> runtime errors</label>
         <button onclick="proveRun('realizability')" title="Can any implementation meet the contract's guarantees for every input its assumptions allow?">Realizability</button>
         <button onclick="proveRun('modes')" title="Is every mode of the contract reachable, and is some mode always active?">Mode coverage</button>
         <button onclick="openEvidence()" title="Checks, proof, tests and coverage, model ≡ code and traceability in one document">Evidence report…</button>
@@ -4494,7 +4495,8 @@ async function proveRun(mode) {
   const t = document.getElementById("verify-timeout").value || "30";
   const label = { prove: "proving", realizability: "checking realizability", modes: "checking mode coverage" }[mode];
   document.getElementById("verify-status").textContent = label + " with " + (st && st.ready ? st.summary : "kind2") + "…";
-  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t) + "&mode=" + mode, { method: "POST" });
+  const rte = document.getElementById("verify-rte").checked ? "1" : "0";
+  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t) + "&mode=" + mode + "&rte=" + rte, { method: "POST" });
   const text = await r.text();
   let data;
   try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
@@ -4534,6 +4536,9 @@ async function proveRun(mode) {
     html += '<div class="k2-summary"><span class="' + (fails ? "bad" : "good") + '">' + holds + " of " + ps.length + " hold</span>" +
       (fails ? ' · <span class="bad">✗ ' + fails + " failed</span>" : "") + (unk ? ' · <span class="unk">? ' + unk + " unknown</span>" : "") +
       ' <span class="build-note">— ' + escapeHTML(data.toolchain || "") + "</span></div>";
+    if (data.timed_out && unk) {
+      html += '<div class="diag severity-Warning">Kind 2 stopped at the ' + escapeHTML(t) + ' s timeout: the unknown properties were neither proved nor refuted — raise the timeout, or (for a runtime error) bound the value, e.g. saturate a counter.</div>';
+    }
     html += '<table class="k2-table"><thead><tr><th>property</th><th>kind</th><th>clause</th><th>result</th><th></th></tr></thead><tbody>';
     const row = (p, i) => {
       const cls = p.outcome === "Holds" ? "ok" : p.outcome === "Fails" ? "bad" : "unk";
@@ -4541,16 +4546,32 @@ async function proveRun(mode) {
       const cex = p.trace || p.waveform
         ? '<button class="verify-cex-btn" data-i="' + i + '" title="Show the counterexample, cycle by cycle">〰 counterexample</button>'
         : "";
+      if (p.rte) {
+        // Where: the operator, and the call instance it is reached through.
+        const where = p.rte.path || p.rte.node;
+        return '<tr><td title="' + escapeHTML(p.name) + '">' + escapeHTML(where) + "</td><td>" + escapeHTML(rteKindLabel(p.rte.kind)) +
+          '</td><td class="clause"><code>' + escapeHTML(p.rte.what) + '</code></td><td class="k2-res ' + cls + '">' + icon +
+          escapeHTML(p.status) + "</td><td>" + cex + "</td></tr>";
+      }
       return "<tr><td>" + escapeHTML(p.label || p.name) + "</td><td>" + escapeHTML(p.kind || "property") +
         '</td><td class="clause"><code>' + escapeHTML(p.clause || "") + '</code></td><td class="k2-res ' + cls + '">' + icon +
         escapeHTML(p.status) + "</td><td>" + cex + "</td></tr>";
     };
-    const props = ps.map((p, i) => [p, i]).filter(([p]) => !p.mode_check);
+    const props = ps.map((p, i) => [p, i]).filter(([p]) => !p.mode_check && !p.rte);
     const modes = ps.map((p, i) => [p, i]).filter(([p]) => p.mode_check);
-    if (props.length && modes.length) html += '<tr class="k2-group"><td colspan="5">Contract properties</td></tr>';
+    // In property order (rte1, rte2, …): the root's own, then call by call.
+    const rteNo = p => Number(p.name.replace(/^rte/, "")) || 0;
+    const rtes = ps.map((p, i) => [p, i]).filter(([p]) => p.rte).sort(([a], [b]) => rteNo(a) - rteNo(b));
+    if (props.length && (modes.length || rtes.length)) html += '<tr class="k2-group"><td colspan="5">Contract properties</td></tr>';
     props.forEach(([p, i]) => html += row(p, i));
     if (modes.length) html += '<tr class="k2-group"><td colspan="5">Mode coverage</td></tr>';
     modes.forEach(([p, i]) => html += row(p, i));
+    if (rtes.length) {
+      const ok = rtes.filter(([p]) => p.outcome === "Holds").length;
+      html += '<tr class="k2-group"><td colspan="5">Runtime errors — ' + ok + " of " + rtes.length +
+        " checks hold (overflow, division by zero, index bounds, conversion; in the context of " + escapeHTML(data.main || "the root") + ")</td></tr>";
+      rtes.forEach(([p, i]) => html += row(p, i));
+    }
     html += "</tbody></table>";
     if ((data.notes || []).length) {
       html += '<div class="k2-assume">The proof assumes: ' + data.notes.map(escapeHTML).join("; ") + ".</div>";
@@ -4562,6 +4583,11 @@ async function proveRun(mode) {
   host.querySelectorAll(".verify-cex-btn").forEach(b => b.onclick = () => verifyShowCex(Number(b.dataset.i)));
   const first = (data.properties || []).findIndex(p => p.trace || p.waveform);
   if (first >= 0) verifyShowCex(first); else verifyCexClose();
+}
+
+function rteKindLabel(k) {
+  return { overflow: "overflow", narrowing: "narrowing", division_by_zero: "division by zero",
+           index_out_of_bounds: "index out of bounds", conversion: "conversion" }[k] || k;
 }
 
 /// A Kind 2 counterexample on the waveform viewer: every stream of the
@@ -4577,7 +4603,8 @@ function verifyShowCex(i) {
   const text = document.getElementById("verify-text");
   const t = p.trace;
   const falsified = "falsified at cycle " + (t ? t.cycles - 1 : "?");
-  head.innerHTML = "<b>" + escapeHTML(p.label || p.name) + "</b> · counterexample" +
+  const title = p.rte ? rteKindLabel(p.rte.kind) + " in " + p.rte.node + ": " + p.rte.what : p.label || p.name;
+  head.innerHTML = "<b>" + escapeHTML(title) + "</b> · counterexample" +
     (t ? ", " + t.cycles + (t.cycles === 1 ? " cycle" : " cycles") + ' — <span class="bad">✖ ' + falsified + "</span>" : "") +
     (t ? ' <button id="verify-replay" title="Run the counterexample\'s inputs in the live simulator, then step through it on the diagram">▶ Replay in simulator</button>' : "") +
     (t && p.waveform ? ' <button id="verify-text-btn" title="The counterexample as a text table">Text</button>' : "") +

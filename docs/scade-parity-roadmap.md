@@ -200,6 +200,14 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
     clock elimination checked against the clocked original, C-faithful
     integer helpers). It also found a real gap in the example — its mode
     table was not exhaustive — now fixed.
+12b. ✅ **Machine integers — done.** The proof no longer *assumes* that no
+    integer overflows: runtime-error checks (overflow at C's promoted width,
+    narrow stores, division by zero, index bounds, real → integer
+    conversion) are proved with the contract, in the context of the root —
+    SCADE Design Verifier's "runtime errors" analysis. Checks in callees are
+    passed up per call instance, so each is proved for the inputs its caller
+    can give it. On the SMS they found an unbounded phase counter (an int32
+    overflow after 2³¹ cycles), now saturating; the other 59 hold.
 13. ✅ **Evidence report — done.** One document per operator — the plan's
     "evidence layer": identification (interface, contract, model files'
     SHA-256, a layout-independent fingerprint of the operator's slice),
@@ -225,7 +233,8 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 end to end in the Studio from an implementation plan — exercises the whole
 chain on a realistic design: Import Lustre, an owned state machine, an
 activation decision tree, contracts on every operator, scenarios with full
-MC/DC, C equivalence, 111 Kind 2 proofs and a PASS evidence report. Building
+MC/DC, C equivalence, 171 Kind 2 proofs (60 of them runtime-error checks)
+and a PASS evidence report. Building
 it surfaced and fixed: edits and the contract live check not seeing the
 workspace's `types.json`; enum outputs in state machines; unreachable
 terminal branches in state-machine and activation lowering that no test
@@ -240,6 +249,6 @@ matches the simulator and the generated C.
 
 Item **7** (target integration: cross-compilation, cyclic-task wrappers) is
 the last P1 item, and item **9** (drawing states and branches directly on the
-charts) the biggest remaining graphical gap with SCADE. A smaller follow-up
-to item 12: prove over machine integers (Kind 2's `int8`…`uint64`) so the
-"no overflow" assumption the proof states becomes something it checks.
+charts) the biggest remaining graphical gap with SCADE. Proving over machine
+integers (12b) is done: the "no overflow" assumption is now something the
+proof checks.

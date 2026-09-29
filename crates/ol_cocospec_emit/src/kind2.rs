@@ -18,6 +18,10 @@
 //! * **Iterators** (`map`, `fold`) are unrolled over the static array length.
 //! * **Bit operations** have no Kind 2 counterpart on unbounded integers;
 //!   they are declared as imported (uninterpreted) functions.
+//! * **Machine integers**: runtime-error checks ([`crate::rte`]) prove that
+//!   no integer leaves its C type as the root runs, so the mathematical
+//!   integers Kind 2 reasons about are exactly the C values. They are named
+//!   properties of the root (`rte1`, …) — see [`Kind2Input::checks`].
 //!
 //! What the view abstracts is returned as [`Kind2Input::notes`], so reports
 //! can say what a proof assumes.
@@ -30,12 +34,38 @@ use ol_ir::{BinOp, Equation, Expr, IterKind, Local, NodeDef, NodeKind, Port, Pro
 use ol_lustre_emit::{emit_declarations, emit_node_annotated, Annotations};
 use ol_typecheck::ExprTyper;
 
+use crate::rte::{self, RteCheck};
+
 /// The generated Kind 2 input.
 #[derive(Debug, Clone)]
 pub struct Kind2Input {
     pub text: String,
     /// What the proof assumes about the model, in plain words.
     pub notes: Vec<String>,
+    /// The runtime-error checks proved at the root (`rte1`, …); empty when
+    /// not requested or the project has no root.
+    pub checks: Vec<RteCheck>,
+}
+
+impl Kind2Input {
+    /// The runtime-error check a property result names, if it is one.
+    pub fn check(&self, property: &str) -> Option<&RteCheck> {
+        self.checks.iter().find(|c| c.name == property)
+    }
+}
+
+/// What the view proves besides the model's contracts.
+#[derive(Debug, Clone, Copy)]
+pub struct EmitOptions {
+    /// Prove the root free of runtime errors over machine integers
+    /// ([`crate::rte`]). Needs `project.main`.
+    pub runtime_errors: bool,
+}
+
+impl Default for EmitOptions {
+    fn default() -> Self {
+        EmitOptions { runtime_errors: true }
+    }
 }
 
 /// Identifiers Kind 2's Lustre front end reserves. A model using one cannot
@@ -50,8 +80,13 @@ pub const RESERVED: &[&str] = &[
 ];
 
 /// Build the Kind 2 view of `project` (every node; slice first to prove one
-/// operator). Errors name what blocks a faithful view.
+/// operator), with runtime-error checks at the root. Errors name what blocks
+/// a faithful view.
 pub fn emit(project: &Project) -> Result<Kind2Input, Vec<String>> {
+    emit_with(project, EmitOptions::default())
+}
+
+pub fn emit_with(project: &Project, opts: EmitOptions) -> Result<Kind2Input, Vec<String>> {
     let reserved = reserved_names(project);
     if !reserved.is_empty() {
         return Err(reserved
@@ -65,31 +100,66 @@ pub fn emit(project: &Project) -> Result<Kind2Input, Vec<String>> {
     let contracts: Vec<ContractDef> =
         project.packages.iter().flat_map(|p| parse_contracts(&p.contracts).0).collect();
 
-    // C semantics first (typing needs the original, clocked program), then
-    // clock elimination on the result.
-    let typer = ExprTyper::new(project);
-    let mut rw = Rewriter::new(&typer);
-    let mut semantic = project.clone();
+    // Clocks eliminated, then iterators unrolled; runtime-error checks on
+    // that (still in model semantics), then C's integer semantics.
+    let uses_clocks = project.all_nodes().any(ol_ir::node_uses_clocks);
+    let declocked = ol_ir::declock_project(project)
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>())?;
+    let typer = ExprTyper::new(&declocked);
+    let mut unroll = Rewriter::new(&typer, Phase::Unroll);
+    let mut unrolled = declocked.clone();
+    for pkg in &mut unrolled.packages {
+        for node in &mut pkg.nodes {
+            *node = unroll.node(node);
+        }
+    }
+    let contracts: Vec<ContractDef> = contracts.iter().map(|c| unroll.contract(c)).collect();
+
+    let root = project
+        .main
+        .clone()
+        .filter(|r| opts.runtime_errors && unrolled.find_node(r).is_some_and(|n| !n.is_imported()));
+    let before_checks = unrolled.clone();
+    let node_checks = if root.is_some() { rte::instrument(&mut unrolled) } else { Default::default() };
+
+    let typer = ExprTyper::new(&unrolled);
+    let mut rw = Rewriter::new(&typer, Phase::CSemantics);
+    let mut semantic = unrolled.clone();
     for pkg in &mut semantic.packages {
         for node in &mut pkg.nodes {
             *node = rw.node(node);
         }
     }
-    let contracts: Vec<ContractDef> = contracts.iter().map(|c| rw.contract(c)).collect();
-    let uses_clocks = semantic.all_nodes().any(ol_ir::node_uses_clocks);
-    let declocked = ol_ir::declock_project(&semantic)
-        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>())?;
+    let mut contracts: Vec<ContractDef> = contracts.iter().map(|c| rw.contract(c)).collect();
+
+    let original_outputs: BTreeMap<String, Vec<Port>> =
+        semantic.all_nodes().map(|n| (n.name.clone(), n.outputs.clone())).collect();
+    let mut checks = Vec::new();
+    let mut lines = Vec::new();
+    if let Some(root) = &root {
+        let proved = rte::propagate(&mut semantic, root, &node_checks);
+        spec_twins(&mut semantic, &mut contracts, &original_outputs, &before_checks, &mut rw);
+        for (local, check) in &proved {
+            lines.push(format!("--%PROPERTY \"{}\" {local};", check.name));
+        }
+        if let Some(r) = project.find_node(root) {
+            for e in rte::input_ranges(r, &typer) {
+                lines.push(format!("assert {};", ol_lustre_emit::format_expr_lustre(&e)));
+            }
+        }
+        checks = proved.into_iter().map(|(_, c)| c).collect();
+    }
 
     let mut out = String::new();
     let _ = writeln!(out, "-- Generated by OpenLustre Studio for Kind 2.");
     let _ = writeln!(out, "-- project: {}", project.name);
-    let notes = notes(project, &rw, uses_clocks);
+    let notes = notes(project, &rw, uses_clocks, root.as_deref().map(|r| (r, checks.len())));
     for n in &notes {
         let _ = writeln!(out, "-- note: {n}");
     }
     out.push('\n');
 
-    for pkg in &declocked.packages {
+    for pkg in &semantic.packages {
         emit_declarations(pkg, &mut out);
     }
     rw.emit_helpers(&mut out);
@@ -97,25 +167,112 @@ pub fn emit(project: &Project) -> Result<Kind2Input, Vec<String>> {
         super::emit_modern_contract(c, &mut out);
         out.push('\n');
     }
-    for pkg in &declocked.packages {
+    for pkg in &semantic.packages {
         for n in &pkg.nodes {
+            let outputs = original_outputs.get(&n.name).unwrap_or(&n.outputs);
             let contract_import = n
                 .contract
                 .as_ref()
                 .filter(|c| contracts.iter().any(|d| &d.name == *c))
                 .map(|c| {
                     let names = |ps: &[Port]| ps.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-                    format!("import {c}({}) returns ({});", names(&n.inputs), names(&n.outputs))
+                    format!("import {c}({}) returns ({});", names(&n.inputs), names(outputs))
                 });
-            let ann = Annotations { contract_import, main: project.main.as_deref() == Some(n.name.as_str()) };
+            let is_root = project.main.as_deref() == Some(n.name.as_str());
+            let ann = Annotations {
+                contract_import,
+                main: is_root,
+                lines: if is_root { lines.clone() } else { Vec::new() },
+            };
             emit_node_annotated(n, &ann, &mut out);
             out.push('\n');
         }
     }
-    Ok(Kind2Input { text: out, notes })
+    Ok(Kind2Input { text: out, notes, checks })
 }
 
-fn notes(project: &Project, rw: &Rewriter, uses_clocks: bool) -> Vec<String> {
+/// Nodes a contract calls keep their own signature there: when checks were
+/// passed up through one (it gained outputs), the contract calls a twin
+/// without them (`__ol_spec_N`), built from the node before instrumenting.
+fn spec_twins(
+    semantic: &mut Project,
+    contracts: &mut [ContractDef],
+    original_outputs: &BTreeMap<String, Vec<Port>>,
+    before_checks: &Project,
+    rw: &mut Rewriter,
+) {
+    let grown: BTreeSet<String> = semantic
+        .all_nodes()
+        .filter(|n| original_outputs.get(&n.name).is_some_and(|o| o.len() != n.outputs.len()))
+        .map(|n| n.name.clone())
+        .collect();
+    let mut wanted: Vec<String> = Vec::new();
+    let note = |e: &Expr, wanted: &mut Vec<String>| {
+        e.visit(|x| {
+            if let Expr::Call { node, .. } = x {
+                if grown.contains(node) && !wanted.contains(node) {
+                    wanted.push(node.clone());
+                }
+            }
+        })
+    };
+    for c in contracts.iter() {
+        for_each_contract_expr(c, |e| note(e, &mut wanted));
+    }
+    if wanted.is_empty() {
+        return;
+    }
+    let twin = |n: &str| format!("__ol_spec_{n}");
+    let rename = |e: &mut Expr| {
+        e.walk_mut(&mut |x| {
+            if let Expr::Call { node, .. } = x {
+                if grown.contains(node.as_str()) {
+                    *node = twin(node);
+                }
+            }
+        })
+    };
+    let mut twins = Vec::new();
+    let mut i = 0;
+    while i < wanted.len() {
+        let name = wanted[i].clone();
+        i += 1;
+        let Some(orig) = before_checks.find_node(&name) else { continue };
+        let mut t = rw.node(orig);
+        for eq in &t.equations {
+            note(&eq.rhs, &mut wanted);
+        }
+        for eq in &mut t.equations {
+            rename(&mut eq.rhs);
+        }
+        t.name = twin(&name);
+        t.contract = None;
+        twins.push(t);
+    }
+    for c in contracts.iter_mut() {
+        for_each_contract_expr_mut(c, rename);
+    }
+    // After the nodes they call; each twin after the twins it calls.
+    if let Some(pkg) = semantic.packages.last_mut() {
+        pkg.nodes.extend(twins.into_iter().rev());
+    }
+}
+
+fn for_each_contract_expr(c: &ContractDef, mut f: impl FnMut(&Expr)) {
+    c.ghost_vars.iter().for_each(|g| f(&g.definition));
+    c.assumptions.iter().for_each(|a| f(&a.expr));
+    c.guarantees.iter().for_each(|g| f(&g.expr));
+    c.modes.iter().flat_map(|m| m.requires.iter().chain(&m.ensures)).for_each(f);
+}
+
+fn for_each_contract_expr_mut(c: &mut ContractDef, mut f: impl FnMut(&mut Expr)) {
+    c.ghost_vars.iter_mut().for_each(|g| f(&mut g.definition));
+    c.assumptions.iter_mut().for_each(|a| f(&mut a.expr));
+    c.guarantees.iter_mut().for_each(|g| f(&mut g.expr));
+    c.modes.iter_mut().flat_map(|m| m.requires.iter_mut().chain(m.ensures.iter_mut())).for_each(f);
+}
+
+fn notes(project: &Project, rw: &Rewriter, uses_clocks: bool, checked: Option<(&str, usize)>) -> Vec<String> {
     let mut ints = false;
     let mut floats = false;
     let mut see = |t: &Type| {
@@ -135,12 +292,19 @@ fn notes(project: &Project, rw: &Rewriter, uses_clocks: bool) -> Vec<String> {
         }
     }
     let mut notes = Vec::new();
-    if ints {
-        notes.push(
+    match (ints, checked) {
+        (true, Some((root, n))) => notes.push(format!(
+            "integers are proved as mathematical integers, and {n} runtime-error check(s) prove that \
+             every integer value stays within its C type as `{root}` runs (no overflow, no division \
+             by zero, indexes in bounds; integer division and casts follow C; `{root}`'s integer \
+             inputs are assumed within their types)"
+        )),
+        (true, None) => notes.push(
             "integers are proved as mathematical integers — the result holds for the generated C \
              as long as no arithmetic overflows (integer division and casts follow C)"
                 .to_string(),
-        );
+        ),
+        _ => {}
     }
     if floats {
         notes.push("floating-point values are proved as exact reals — rounding is not modeled".to_string());
@@ -213,10 +377,19 @@ fn reserved_names(project: &Project) -> Vec<(String, String)> {
     hits
 }
 
-/// Rewrites C semantics Kind 2 lacks into helper calls; remembers which
-/// helpers to emit.
+/// Which rewrite a [`Rewriter`] pass makes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// Iterators unrolled over their static length.
+    Unroll,
+    /// C semantics Kind 2 lacks, as helper calls.
+    CSemantics,
+}
+
+/// Rewrites what Kind 2 lacks; remembers which helpers to emit.
 struct Rewriter<'a> {
     typer: &'a ExprTyper,
+    phase: Phase,
     div: bool,
     trunc: bool,
     wraps: BTreeSet<&'static str>,
@@ -234,8 +407,8 @@ struct NodeCx<'n> {
 }
 
 impl<'a> Rewriter<'a> {
-    fn new(typer: &'a ExprTyper) -> Self {
-        Rewriter { typer, div: false, trunc: false, wraps: BTreeSet::new(), bit_ops: BTreeSet::new() }
+    fn new(typer: &'a ExprTyper, phase: Phase) -> Self {
+        Rewriter { typer, phase, div: false, trunc: false, wraps: BTreeSet::new(), bit_ops: BTreeSet::new() }
     }
 
     fn node(&mut self, node: &NodeDef) -> NodeDef {
@@ -303,17 +476,19 @@ impl<'a> Rewriter<'a> {
 
     fn expr(&mut self, e: &Expr, cx: &mut NodeCx) -> Expr {
         match e {
-            Expr::Binary { op: op @ (BinOp::Div | BinOp::Mod), lhs, rhs } if self.is_integer(lhs, cx) => {
+            Expr::Binary { op: op @ (BinOp::Div | BinOp::Mod), lhs, rhs }
+                if self.phase == Phase::CSemantics && self.is_integer(lhs, cx) =>
+            {
                 self.div = true;
                 let f = if *op == BinOp::Div { "__ol_div" } else { "__ol_mod" };
                 Expr::call(f, vec![self.expr(lhs, cx), self.expr(rhs, cx)])
             }
-            Expr::Binary { op, lhs, rhs } if bit_op(*op).is_some() => {
+            Expr::Binary { op, lhs, rhs } if self.phase == Phase::CSemantics && bit_op(*op).is_some() => {
                 let f = bit_op(*op).expect("bit op");
                 self.bit_ops.insert(f.to_string());
                 Expr::call(f, vec![self.expr(lhs, cx), self.expr(rhs, cx)])
             }
-            Expr::Cast { to, arg } => {
+            Expr::Cast { to, arg } if self.phase == Phase::CSemantics => {
                 let from = self.type_of(arg, cx);
                 let a = self.expr(arg, cx);
                 let to = self.typer.resolve(to);
@@ -329,7 +504,7 @@ impl<'a> Rewriter<'a> {
                     _ => a,
                 }
             }
-            Expr::Iterate { kind, node, init, arrays } => {
+            Expr::Iterate { kind, node, init, arrays } if self.phase == Phase::Unroll => {
                 let len = arrays.first().and_then(|a| match self.type_of(a, cx) {
                     Some(Type::Array { len, .. }) => Some(len),
                     _ => None,
@@ -389,6 +564,13 @@ impl<'a> Rewriter<'a> {
                 clock: clock.clone(),
                 on_true: Box::new(self.expr(on_true, cx)),
                 on_false: Box::new(self.expr(on_false, cx)),
+            },
+            Expr::Cast { to, arg } => Expr::Cast { to: to.clone(), arg: Box::new(self.expr(arg, cx)) },
+            Expr::Iterate { kind, node, init, arrays } => Expr::Iterate {
+                kind: *kind,
+                node: node.clone(),
+                init: init.as_ref().map(|i| Box::new(self.expr(i, cx))),
+                arrays: arrays.iter().map(|a| self.expr(a, cx)).collect(),
             },
         }
     }

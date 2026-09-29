@@ -9,3 +9,4 @@ ol_ir = { workspace = true }
 ol_contract_ir = { workspace = true }
 ol_lustre_emit = { workspace = true }
 ol_typecheck = { workspace = true }
+serde = { workspace = true }

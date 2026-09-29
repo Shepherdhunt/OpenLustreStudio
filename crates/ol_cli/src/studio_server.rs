@@ -1977,7 +1977,16 @@ fn prove_run(
 ) -> Result<String, String> {
     let project = sliced_for_main(ctx)?;
     let main = project.main.clone();
-    let input = match ol_cocospec_emit::kind2::emit(&project) {
+    let mode = match query.get("mode").map(String::as_str) {
+        Some("realizability") => ol_kind2::SerMode::Realizability,
+        Some("modes") => ol_kind2::SerMode::ModeCoverage,
+        _ => ol_kind2::SerMode::BmcInd,
+    };
+    // Runtime errors are proved with the properties, not with a contract's
+    // realizability or its modes.
+    let runtime_errors = matches!(mode, ol_kind2::SerMode::BmcInd) && query.get("rte").map(String::as_str) != Some("0");
+    let opts = ol_cocospec_emit::kind2::EmitOptions { runtime_errors };
+    let input = match ol_cocospec_emit::kind2::emit_with(&project, opts) {
         Ok(i) => i,
         Err(errs) => {
             let value = serde_json::json!({
@@ -2003,11 +2012,6 @@ fn prove_run(
     std::fs::write(&lus_path, &combined).map_err(|e| e.to_string())?;
 
     let timeout = query.get("timeout").and_then(|t| t.parse::<u32>().ok());
-    let mode = match query.get("mode").map(String::as_str) {
-        Some("realizability") => ol_kind2::SerMode::Realizability,
-        Some("modes") => ol_kind2::SerMode::ModeCoverage,
-        _ => ol_kind2::SerMode::BmcInd,
-    };
     let toolchain = crate::prover::Toolchain::detect(None);
     let opts = toolchain.apply(ol_kind2::Kind2Options {
         main_node: main.clone(),
@@ -2030,9 +2034,14 @@ fn prove_run(
             // The same counterexample as signals over cycles, for the
             // waveform viewer and for replay in the simulator.
             let trace = p.counterexample.as_ref().and_then(ol_kind2::counterexample_streams);
-            let (kind, clause) = p.describe(&combined);
+            let rte = input.check(&p.name);
+            let (kind, clause) = match rte {
+                Some(c) => ("runtime error", c.describe()),
+                None => p.describe(&combined),
+            };
             serde_json::json!({
                 "name": p.name,
+                "rte": rte,
                 "label": p.label,
                 "status": p.status,
                 "outcome": p.outcome(),
@@ -2069,6 +2078,8 @@ fn prove_run(
         "realizability": result.realizability,
         "errors": result.errors,
         "notes": input.notes,
+        "runtime_errors": input.checks.len(),
+        "timed_out": result.timed_out,
         "stdout_tail": stdout_tail,
         "hint": if kind2_found && result.errors.is_empty() { serde_json::Value::Null } else if !kind2_found {
             serde_json::Value::String(format!("kind2 not found — {}", guidance.first().cloned().unwrap_or_default()))

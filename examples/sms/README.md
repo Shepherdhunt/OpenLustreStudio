@@ -45,15 +45,28 @@ something else first. `next1..4` show which hooks the next release would
 open. Kind 2 proves that every plan keeps the vehicle within the limits, and
 that a plan is found whenever a single safe release exists.
 
+## No runtime errors
+
+The SMS computes masses and moments in `int32` (grams, g·mm). `Prove` also
+proves it free of runtime errors (requirement RTE-1): every sum, difference
+and product in `Balance`, `PlanRelease` and each of the six `Candidate`
+instances fits `int32`, and so does every negation in `Abs` — proved for the
+values the stations can actually report, not for any `int32`. The check found
+one real defect: the sequencer's phase counter `cnt` counted up forever while
+the SMS sat in one phase, and would have overflowed after 2³¹ cycles (about
+eight months at 100 Hz). It now saturates at `PULSE_CYCLES + VERIFY_CYCLES`,
+above every bound it is compared with, and all 60 checks hold.
+
 ## Check, test, prove
 
 ```sh
 openlustre check examples/sms/sms.wksc
 openlustre test run examples/sms/sms.wksc --scenarios examples/sms/scenarios
-#   16 passed (8 scenarios on the model and the compiled C); MC/DC 150/150
+#   16 passed (8 scenarios on the model and the compiled C); MC/DC 151/151
 openlustre kind2 install            # once (Linux/macOS)
 openlustre prove examples/sms/sms.wksc --timeout 600
-#   prove: 111 of 111 hold
+#   prove: 171 of 171 hold
+#   prove: runtime errors — 60 of 60 checks hold (overflow, division by zero, bounds, conversion)
 openlustre evidence examples/sms/sms.wksc --scenarios examples/sms/scenarios \
     --prove --timeout 600 --out evidence/
 #   evidence for `SMS`: PASS
@@ -69,9 +82,9 @@ openlustre evidence examples/sms/sms.wksc --scenarios examples/sms/scenarios \
 | `interlocks` | every refusal reason; disarming mid-pulse; a request during a release ignored |
 | `jettison` | emergency jettison below the release altitude; losing the arm stops it |
 
-![The Verify dock: 111 of 111 properties proved by Kind 2 v2.2.0 with Z3 — SMS contract guarantees and mode ensures, and mode coverage (every mode reachable, some mode always active).](../../docs/screenshots/16-sms-verify.png)
+![The Verify dock: 171 of 171 properties proved by Kind 2 v2.2.0 with Z3 — the mode coverage of SMS_contract, then the Runtime errors group: 60 of 60 checks hold in the context of SMS, each named by its call path (Balance#1, Balance#1 › Abs#1, PlanRelease#1, …) with what must hold (m1 + m2 + m3 + m4 fits int32).](../../docs/screenshots/16-sms-verify.png)
 
-![The Evidence Report for SMS: PASS — static checks, contract, Kind 2 proof (111 of 111, realizable), 8 of 8 scenarios, if-decisions 57/57 and MC/DC 150/150, compiled C matches the model on 182 cycles, 104 of 104 equations traced.](../../docs/screenshots/17-sms-evidence.png)
+![The Evidence Report for SMS: PASS — static checks, contract, Kind 2 proof (171 of 171, among them 60 of 60 runtime-error checks; realizable), 8 of 8 scenarios, if-decisions 58/58 and MC/DC 151/151, compiled C matches the model on 182 cycles, 104 of 104 equations traced.](../../docs/screenshots/17-sms-evidence.png)
 
 ## Files
 

@@ -175,3 +175,7 @@ path = "kind2_projection.rs"
 [[test]]
 name = "sms_example"
 path = "sms_example.rs"
+
+[[test]]
+name = "runtime_errors"
+path = "runtime_errors.rs"

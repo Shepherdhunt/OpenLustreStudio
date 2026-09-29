@@ -133,7 +133,10 @@ var pulse: bool; jett: bool; cnt: int32; start: bool; start_j: bool;
     settled1: bool; settled2: bool; settled3: bool; settled4: bool;
     clear: bool; timeout: bool; reset: bool; permit: bool;
 let
-  cnt = 0 -> if phase <> pre phase then 0 else pre cnt + 1;
+  -- Cycles in the current phase, saturating (RTE-1): every use compares it
+  -- with a smaller bound, and a counter left to run would overflow int32.
+  cnt = 0 -> if phase <> pre phase then 0
+             else if pre cnt < PULSE_CYCLES + VERIFY_CYCLES then pre cnt + 1 else pre cnt;
   start = phase = PhReady and fire_req;
   start_j = phase = PhReady and jettison_req;
   lat1 = false -> if start_j then present1 else if start then sel1 else pre lat1;

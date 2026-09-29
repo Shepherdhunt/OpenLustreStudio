@@ -76,6 +76,10 @@ pub struct Kind2Result {
     /// Realizability results (`SerMode::Realizability`), in report order.
     #[serde(default)]
     pub realizability: Vec<RealizabilityResult>,
+    /// Kind 2 stopped at the wall-clock timeout: the properties it had not
+    /// settled by then are `unknown` (not an error — the others stand).
+    #[serde(default)]
+    pub timed_out: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -243,6 +247,7 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
                 properties: vec![],
                 errors: vec![],
                 realizability: vec![],
+                timed_out: false,
             });
         }
     };
@@ -266,6 +271,7 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
         properties.retain(|p| p.is_mode_check());
     }
     let (errors, realizability) = parse_kind2_log(&stdout);
+    let timed_out = stdout.contains("Wallclock timeout");
 
     Ok(Kind2Result {
         invocation,
@@ -275,6 +281,7 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
         properties,
         errors,
         realizability,
+        timed_out,
     })
 }
 
@@ -298,6 +305,12 @@ pub fn parse_kind2_log(text: &str) -> (Vec<String>, Vec<RealizabilityResult>) {
         match get("objectType").as_str() {
             "log" if matches!(get("level").as_str(), "error" | "fatal") => {
                 let msg = get("value").trim().to_string();
+                // The timeout leaves unsettled properties `unknown`; an engine
+                // that cannot handle the input (IC3 on nonlinear arithmetic)
+                // stops while the others go on. Neither is a model error.
+                if msg.starts_with("Wallclock timeout") || msg.starts_with("Runtime failure in ") {
+                    continue;
+                }
                 let at = match (v.get("line").and_then(|l| l.as_u64()), v.get("column").and_then(|c| c.as_u64())) {
                     (Some(l), Some(c)) => format!("line {l}, column {c}: "),
                     (Some(l), None) => format!("line {l}: "),

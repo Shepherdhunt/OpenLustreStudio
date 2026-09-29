@@ -380,7 +380,8 @@ impl Expr {
         f(self);
     }
 
-    fn for_each_child_mut(&mut self, g: &mut dyn FnMut(&mut Expr)) {
+    /// Apply `g` to each direct subexpression.
+    pub fn for_each_child_mut(&mut self, g: &mut dyn FnMut(&mut Expr)) {
         match self {
             Expr::Const { .. } | Expr::Var { .. } => {}
             Expr::Unary { arg, .. }

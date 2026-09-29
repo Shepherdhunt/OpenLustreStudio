@@ -113,6 +113,11 @@ enum Cmd {
         /// per-cycle waveform table instead of raw JSON.
         #[arg(long)]
         waveform: bool,
+        /// Prove the contracts only: skip the runtime-error checks (integer
+        /// overflow, division by zero, index bounds, conversions) and prove
+        /// over mathematical integers.
+        #[arg(long)]
+        no_runtime_errors: bool,
     },
     /// Build the verification evidence report for one operator — static
     /// checks, contract, Kind 2 proof, tests with decision / MC/DC coverage,
@@ -354,6 +359,7 @@ fn main() -> Result<()> {
             timeout,
             property,
             waveform,
+            no_runtime_errors,
         } => cmd_prove(
             &model,
             node.as_deref(),
@@ -364,6 +370,7 @@ fn main() -> Result<()> {
             timeout,
             &property,
             waveform,
+            !no_runtime_errors,
         ),
         Cmd::ContractCheck { model, with_stdlib } => {
             cmd_contract_check(&model, with_stdlib.as_deref())
@@ -962,6 +969,7 @@ fn cmd_prove(
     timeout: Option<u32>,
     properties: &[String],
     waveform: bool,
+    runtime_errors: bool,
 ) -> Result<()> {
     let mut project = load_with_stdlib(model, with_stdlib)?;
     if let Some(root) = node {
@@ -977,7 +985,12 @@ fn cmd_prove(
         None => std::env::temp_dir().join("openlustre_prove"),
     };
     std::fs::create_dir_all(&work)?;
-    let input = ol_cocospec_emit::kind2::emit(&project)
+    // Runtime errors are proved with the properties, not with a contract's
+    // realizability or its modes.
+    let emit_opts = ol_cocospec_emit::kind2::EmitOptions {
+        runtime_errors: runtime_errors && matches!(mode, ProveMode::BmcInd),
+    };
+    let input = ol_cocospec_emit::kind2::emit_with(&project, emit_opts)
         .map_err(|errs| anyhow::anyhow!("the model cannot be handed to Kind 2:\n  {}", errs.join("\n  ")))?;
     let lus_path = work.join("model_with_contracts.lus");
     std::fs::write(&lus_path, &input.text)?;
@@ -1035,8 +1048,17 @@ fn cmd_prove(
         anyhow::bail!("Kind 2 reported no properties");
     } else {
         let text = std::fs::read_to_string(&lus_path).unwrap_or_default();
-        for p in &result.properties {
-            let (kind, clause) = p.describe(&text);
+        // Runtime-error checks last, in property order (rte1, rte2, …).
+        let rte_no = |p: &ol_kind2::PropertyResult| {
+            input.check(&p.name).and_then(|c| c.name.trim_start_matches("rte").parse::<usize>().ok()).unwrap_or(0)
+        };
+        let mut ordered: Vec<&ol_kind2::PropertyResult> = result.properties.iter().collect();
+        ordered.sort_by_key(|p| rte_no(p));
+        for p in ordered {
+            let (kind, clause) = match input.check(&p.name) {
+                Some(c) => ("runtime error", c.describe()),
+                None => p.describe(&text),
+            };
             let clause = format!("   [{}]", if clause.is_empty() { kind.to_string() } else { clause });
             println!("  {}: {}{clause}", p.label, p.status);
             if let Some(cex) = &p.counterexample {
@@ -1061,6 +1083,14 @@ fn cmd_prove(
     let (holds, fails, unknown) =
         (count(ol_kind2::Outcome::Holds), count(ol_kind2::Outcome::Fails), count(ol_kind2::Outcome::Unknown));
     println!("prove: {holds} of {} hold, {fails} failed, {unknown} unknown", result.properties.len());
+    if !input.checks.is_empty() {
+        let rte: Vec<_> = result.properties.iter().filter(|p| input.check(&p.name).is_some()).collect();
+        let ok = rte.iter().filter(|p| p.outcome() == ol_kind2::Outcome::Holds).count();
+        println!("prove: runtime errors — {ok} of {} checks hold (overflow, division by zero, bounds, conversion)", rte.len());
+    }
+    if result.timed_out && unknown > 0 {
+        println!("prove: Kind 2 stopped at the {}s timeout — the unknown properties were neither proved nor refuted", timeout.unwrap_or(0));
+    }
     if fails > 0 || unknown > 0 {
         anyhow::bail!("not every property holds");
     }

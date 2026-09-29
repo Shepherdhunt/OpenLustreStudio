@@ -2392,20 +2392,53 @@
                     }
                   },
                   "else_branch": {
-                    "expr": "Binary",
-                    "op": "Add",
-                    "lhs": {
+                    "expr": "IfThenElse",
+                    "cond": {
+                      "expr": "Binary",
+                      "op": "Lt",
+                      "lhs": {
+                        "expr": "Pre",
+                        "arg": {
+                          "expr": "Var",
+                          "name": "cnt"
+                        }
+                      },
+                      "rhs": {
+                        "expr": "Binary",
+                        "op": "Add",
+                        "lhs": {
+                          "expr": "Var",
+                          "name": "PULSE_CYCLES"
+                        },
+                        "rhs": {
+                          "expr": "Var",
+                          "name": "VERIFY_CYCLES"
+                        }
+                      }
+                    },
+                    "then_branch": {
+                      "expr": "Binary",
+                      "op": "Add",
+                      "lhs": {
+                        "expr": "Pre",
+                        "arg": {
+                          "expr": "Var",
+                          "name": "cnt"
+                        }
+                      },
+                      "rhs": {
+                        "expr": "Const",
+                        "lit": {
+                          "lit": "Int",
+                          "value": 1
+                        }
+                      }
+                    },
+                    "else_branch": {
                       "expr": "Pre",
                       "arg": {
                         "expr": "Var",
                         "name": "cnt"
-                      }
-                    },
-                    "rhs": {
-                      "expr": "Const",
-                      "lit": {
-                        "lit": "Int",
-                        "value": 1
                       }
                     }
                   }

@@ -28,11 +28,13 @@ pub fn emit_project(project: &Project) -> String {
 
 /// What a node carries for Kind 2 besides its body: the contract it imports
 /// (spliced between the signature and the body) and whether it is the entry
-/// point (`--%MAIN;` inside its body).
+/// point (`--%MAIN;` inside its body), plus annotation lines ending its
+/// body (`--%PROPERTY …;`, `assert …;`).
 #[derive(Debug, Default, Clone)]
 pub struct Annotations {
     pub contract_import: Option<String>,
     pub main: bool,
+    pub lines: Vec<String>,
 }
 
 pub fn emit_package(pkg: &Package, out: &mut String) {
@@ -158,6 +160,9 @@ pub fn emit_node_annotated(node: &NodeDef, ann: &Annotations, out: &mut String) 
             format!("({})", eq.lhs.join(", "))
         };
         let _ = writeln!(out, "  {lhs} = {};", format_expr_lustre(&eq.rhs));
+    }
+    for l in &ann.lines {
+        let _ = writeln!(out, "  {l}");
     }
     let _ = writeln!(out, "tel");
 }

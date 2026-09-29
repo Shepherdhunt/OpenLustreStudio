@@ -118,6 +118,9 @@ pub struct ProofRow {
     pub clause: String,
     pub status: String,
     pub holds: bool,
+    /// For a runtime-error check: what it guards against and where.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_error: Option<ol_cocospec_emit::rte::RteCheck>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -485,13 +488,14 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     let Some(opts) = opts else {
         return (Status::NotRun, info("not requested (run with proving enabled to include Kind 2 results)"));
     };
-    if !has_contract {
-        return (Status::NotRun, info("no contract to prove"));
-    }
     let input = match ol_cocospec_emit::kind2::emit(slice) {
         Ok(i) => i,
         Err(errs) => return (Status::Gaps, info(&format!("the model cannot be handed to Kind 2: {}", errs.join("; ")))),
     };
+    // Without a contract there may still be runtime errors to rule out.
+    if !has_contract && input.checks.is_empty() {
+        return (Status::NotRun, info("no contract to prove"));
+    }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let work = std::env::temp_dir().join(format!("openlustre_evidence_{stamp}"));
     if std::fs::create_dir_all(&work).is_err() {
@@ -499,10 +503,19 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     }
     let lus_path = work.join("model_with_contracts.lus");
     let _ = std::fs::write(&lus_path, &input.text);
+    // Realizability is a property of the contract alone: its view carries
+    // no runtime-error checks.
+    let contract_path = work.join("contract_only.lus");
+    let contract_only = ol_cocospec_emit::kind2::EmitOptions { runtime_errors: false };
+    let _ = std::fs::write(
+        &contract_path,
+        ol_cocospec_emit::kind2::emit_with(slice, contract_only).map(|i| i.text).unwrap_or_default(),
+    );
     let toolchain = crate::prover::Toolchain::detect(Some(&opts.binary));
     let run = |mode| {
+        let path = if matches!(mode, ol_kind2::SerMode::Realizability) { &contract_path } else { &lus_path };
         ol_kind2::run_kind2(
-            &lus_path,
+            path,
             &toolchain.apply(ol_kind2::Kind2Options {
                 mode,
                 main_node: Some(root.to_string()),
@@ -513,7 +526,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     };
     let result = run(ol_kind2::SerMode::BmcInd);
     let realizability = match &result {
-        Ok(r) if r.exit_code != -1 && r.errors.is_empty() => run(ol_kind2::SerMode::Realizability).ok(),
+        Ok(r) if has_contract && r.exit_code != -1 && r.errors.is_empty() => run(ol_kind2::SerMode::Realizability).ok(),
         _ => None,
     };
     let _ = std::fs::remove_dir_all(&work);
@@ -528,17 +541,35 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     if let Some(e) = result.errors.first() {
         return (Status::Gaps, info(&format!("Kind 2 could not analyse the model: {e}")));
     }
-    let properties: Vec<ProofRow> = result
-        .properties
-        .iter()
+    // Runtime-error checks in property order (the root's own, then call by
+    // call), after the contract's properties.
+    let rte_no = |name: &str| input.check(name).and_then(|c| c.name.trim_start_matches("rte").parse::<usize>().ok());
+    let mut ordered: Vec<&ol_kind2::PropertyResult> = result.properties.iter().collect();
+    ordered.sort_by_key(|p| rte_no(&p.name).unwrap_or(0));
+    let properties: Vec<ProofRow> = ordered
+        .into_iter()
         .map(|p| {
-            let (kind, clause) = p.describe(&input.text);
-            ProofRow {
-                name: p.label.clone(),
-                kind: kind.into(),
-                clause,
-                status: p.status.clone(),
-                holds: p.outcome() == ol_kind2::Outcome::Holds,
+            let holds = p.outcome() == ol_kind2::Outcome::Holds;
+            match input.check(&p.name) {
+                Some(c) => ProofRow {
+                    name: if c.path.is_empty() { c.node.clone() } else { c.path.clone() },
+                    kind: c.kind.label().into(),
+                    clause: c.what.clone(),
+                    status: p.status.clone(),
+                    holds,
+                    runtime_error: Some(c.clone()),
+                },
+                None => {
+                    let (kind, clause) = p.describe(&input.text);
+                    ProofRow {
+                        name: p.label.clone(),
+                        kind: kind.into(),
+                        clause,
+                        status: p.status.clone(),
+                        holds,
+                        runtime_error: None,
+                    }
+                }
             }
         })
         .collect();
@@ -573,11 +604,22 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     } else {
         Status::Pass
     };
+    let rte: Vec<&ProofRow> = info.properties.iter().filter(|p| p.runtime_error.is_some()).collect();
     info.note = format!(
-        "{holds} of {n} {} hold{}{}",
+        "{holds} of {n} {} hold{}{}{}{}",
         if n == 1 { "property" } else { "properties" },
         if fails > 0 { format!(", {fails} falsified") } else { String::new() },
+        if rte.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " — {} of {} runtime-error checks (overflow, division by zero, index bounds, conversion)",
+                rte.iter().filter(|p| p.holds).count(),
+                rte.len()
+            )
+        },
         if info.realizability.is_empty() { String::new() } else { format!("; contract {}", info.realizability) },
+        if result.timed_out && holds < n { "; Kind 2 stopped at the timeout" } else { "" },
     );
     (status, info)
 }
@@ -705,18 +747,34 @@ impl Evidence {
         if !self.proof.toolchain.is_empty() {
             h.push_str(&format!("<p class=\"muted\">Prover: {}</p>", esc(&self.proof.toolchain)));
         }
-        if !self.proof.properties.is_empty() {
+        let row = |p: &ProofRow| {
+            let (cls, icon) = if p.holds { ("st-pass", "✓") } else { ("st-fail", "✗") };
+            format!(
+                "<tr><td>{}</td><td>{}</td><td><code>{}</code></td><td class=\"{cls}\">{icon} {}</td></tr>",
+                esc(&p.name),
+                esc(&p.kind),
+                esc(&p.clause),
+                esc(&p.status)
+            )
+        };
+        let (rte, props): (Vec<&ProofRow>, Vec<&ProofRow>) =
+            self.proof.properties.iter().partition(|p| p.runtime_error.is_some());
+        if !props.is_empty() {
             h.push_str("<table><thead><tr><th>property</th><th>kind</th><th>clause</th><th>result</th></tr></thead><tbody>");
-            for p in &self.proof.properties {
-                let (cls, icon) = if p.holds { ("st-pass", "✓") } else { ("st-fail", "✗") };
-                h.push_str(&format!(
-                    "<tr><td>{}</td><td>{}</td><td><code>{}</code></td><td class=\"{cls}\">{icon} {}</td></tr>",
-                    esc(&p.name),
-                    esc(&p.kind),
-                    esc(&p.clause),
-                    esc(&p.status)
-                ));
-            }
+            props.iter().for_each(|p| h.push_str(&row(p)));
+            h.push_str("</tbody></table>");
+        }
+        if !rte.is_empty() {
+            h.push_str(&format!(
+                "<p><strong>Runtime errors</strong> — {} of {} checks hold: every integer operation fits the C type it is \
+                 computed in, no division by zero, every index in bounds, every real-to-integer conversion in range, \
+                 proved in the context of <code>{}</code>.</p>",
+                rte.iter().filter(|p| p.holds).count(),
+                rte.len(),
+                esc(&self.identity.operator)
+            ));
+            h.push_str("<table><thead><tr><th>where</th><th>check</th><th>must hold</th><th>result</th></tr></thead><tbody>");
+            rte.iter().for_each(|p| h.push_str(&row(p)));
             h.push_str("</tbody></table>");
         }
         if !self.proof.assumptions.is_empty() {

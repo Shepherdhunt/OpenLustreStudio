@@ -98,6 +98,12 @@ and the evidence report trace straight back here.
 | REL-8 | Dropping the master arm or landing stops any pulse in the same cycle. | `ReleaseSequencer` | proof (REL-1), tests `interlocks`, `jettison` |
 | REL-9 | A request made while a release is in progress is ignored; `phase` shows the release progress (`PhSafe`, `PhReady`, `PhFiring`, `PhJettison`, `PhVerify`). | `Sequencer` state machine | test `balanced_release` |
 
+### Robustness — the code that runs on the vehicle
+
+| id | requirement | implemented in | verified by |
+|----|-------------|----------------|-------------|
+| RTE-1 | No runtime error in any reachable state, however long the vehicle flies: no integer computation overflows its C type (int32), no division by zero, no array index out of bounds. Counters saturate. | every operator (`ReleaseSequencer`'s phase counter saturates at `PULSE_CYCLES + VERIFY_CYCLES`) | proof (runtime-error checks, in context of `SMS`) |
+
 ## 3. Architecture
 
 One root operator, `SMS`, composes four functions and one stateful operator.
@@ -182,7 +188,9 @@ else                       → Clear
    - `SMS_contract` — REL-1..5 as guarantees; a mode table over the flight
      situation (`Grounded`, `Disarmed`, `ArmedAirborne`) whose modes Kind 2
      checks reachable and exhaustive (REL-6).
-   Contract realizability is checked as well.
+   Contract realizability is checked as well, and the whole of `SMS` is
+   proved free of runtime errors (RTE-1): integer overflow, division by
+   zero, index bounds — in context, for every call instance.
 3. **Scenarios** — recorded golden traces, each run on the model *and* the
    compiled generated C (`openlustre test run`, Tests dock):
    `inventory_loading`, `balanced_release`, `planner_choice`,
@@ -210,12 +218,16 @@ else                       → Clear
 | 8 | Studio walkthrough, README | done |
 
 **Result.** The evidence report for `SMS` is **PASS** with no gaps: static
-checks clean across the 8 operators; 111 of 111 properties proved by Kind 2
+checks clean across the 8 operators; 171 of 171 properties proved by Kind 2
 v2.2.0 (every guarantee and mode ensure of the 8 contracts, all three flight
-modes reachable and exhaustive) and the contract realizable; 8 of 8
-scenarios match their goldens on the model and on the compiled generated C
-(182 cycles); if-decisions 57/57 and MC/DC 150/150; 104 of 104 generated
-equations traced to the model.
+modes reachable and exhaustive, and 60 runtime-error checks) and the contract
+realizable; 8 of 8 scenarios match their goldens on the model and on the
+compiled generated C (182 cycles); if-decisions 58/58 and MC/DC 151/151;
+104 of 104 generated equations traced to the model.
+
+The runtime-error proof found one defect, fixed: `ReleaseSequencer`'s phase
+counter counted up without bound while the SMS stayed in one phase (an
+`int32` overflow after 2³¹ cycles). It now saturates (RTE-1).
 
 The model was built in the Studio through its editing API —
 `build/build_sms.py` replays those steps from `build/sms_source.lus` (the
@@ -229,8 +241,10 @@ annotated steps. The workspace files are the source of truth from then on.
 - Sensors are trusted as reported each cycle; a mismatched station is
   reported rather than guessed. Tags are read when the store is hung on.
 - Masses are catalogue values; moments use integer grams and millimetres
-  (no overflow: at most 4 × 2000 g × 200 mm).
+  (at most 4 × 2000 g × 200 mm — proved not to overflow, RTE-1).
 - The proof treats integers as mathematical integers (Kind 2 view); the
-  generated C uses `int32_t`, and the value ranges above keep them equal.
+  generated C uses `int32_t`. The runtime-error checks prove the two equal:
+  no integer value ever leaves `int32` (RTE-1). Sensor inputs are assumed
+  within their C types.
 - The SMS does not fly the vehicle: the flight controller trims residual
   imbalance within the limits.

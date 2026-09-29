@@ -169,7 +169,23 @@ equations (and so activations) are rewritten onto the base clock with the
 same hold semantics the simulator and the C execute — checked against the
 clocked original cycle by cycle — and integer division, remainder and casts
 go through helpers that behave as in C (Kind 2's own are Euclidean and
-floor). The proof states what it assumes (unbounded integers, exact reals).
+floor). The proof states what it assumes (exact reals, the root's inputs
+within their types).
+
+**Proving over machine integers.** Kind 2 reasons about mathematical
+integers; the generated C computes in `int8_t`…`uint64_t`. **Prove** closes
+that gap with runtime-error checks, proved alongside the contract in the
+context of the root: every integer operation fits the type C computes it in
+(`a + b` on two `int8` is computed in `int` and cannot overflow; `p * q` on
+two `int32` can), a narrow value stored back (`s: int8 = a + b`) fits, no
+division by zero, every index in bounds, every real-to-integer conversion in
+range. A check in a called operator is proved for each call instance — for
+the inputs the caller can actually give it — and reported with its path
+(`overflow in PlanRelease#1 › Candidate#3: roll - droll fits int32`) in the Verify dock's **Runtime errors** group, the CLI and the
+evidence report. A counter left to run forever is reported (Kind 2 cannot
+settle `pre n + 1` before the timeout); saturate it and it is proved.
+`openlustre prove --no-runtime-errors` (or the dock's checkbox) proves the
+contracts alone.
 
 Kind 2 and an SMT solver are found wherever they are — `OPENLUSTRE_KIND2` /
 `OPENLUSTRE_Z3`, the per-user tools folder, next to the `openlustre` binary
@@ -189,9 +205,10 @@ of four hooks, plans releases that keep the vehicle balanced (single hooks or
 lateral pairs, refusing what would unbalance it), and drops stores on
 command behind arming, airborne and altitude interlocks. It has a release
 sequencer state machine, an inhibit decision tree, and a contract on every
-operator. Its evidence report is a clean PASS: 111 of 111 properties proved
-by Kind 2, 8 scenarios passing on the model and the generated C with MC/DC
-150/150, and every generated equation traced.
+operator. Its evidence report is a clean PASS: 171 of 171 properties proved
+by Kind 2 — among them 60 runtime-error checks, so no moment, sum or counter
+can overflow `int32` however long it flies — 8 scenarios passing on the model
+and the generated C with MC/DC 151/151, and every generated equation traced.
 
 ![The SMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](docs/screenshots/13-sms-diagram.png)
 

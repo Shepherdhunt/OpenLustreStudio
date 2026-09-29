@@ -193,6 +193,7 @@ dependencies = [
  "ol_ir",
  "ol_lustre_emit",
  "ol_typecheck",
+ "serde",
 ]
 
 [[package]]

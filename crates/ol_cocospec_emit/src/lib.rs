@@ -12,6 +12,7 @@
 use std::fmt::Write as _;
 
 pub mod kind2;
+pub mod rte;
 
 use ol_contract_ir::{parse_contracts, ContractDef};
 use ol_ir::{NodeDef, Project};

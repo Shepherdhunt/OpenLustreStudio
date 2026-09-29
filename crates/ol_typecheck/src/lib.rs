@@ -182,15 +182,38 @@ impl ExprTyper {
     }
 
     /// The type of `expr` in `node`, aliases resolved; `None` if it does not
-    /// type-check.
+    /// type-check. Understands clock elimination's `condact(clock, call,
+    /// defaults…)`, which has the type of its call.
     pub fn type_of(&self, node: &NodeDef, env: &BTreeMap<String, Type>, expr: &Expr) -> Option<Type> {
         let mut diags = Vec::new();
+        let mut plain;
+        let expr = if expr_has_condact(expr) {
+            plain = expr.clone();
+            plain.walk_mut(&mut strip_condact);
+            &plain
+        } else {
+            expr
+        };
         infer_expr_type(expr, env, &self.sigs, node, &mut diags, "", &self.tctx, None)
             .map(|t| self.tctx.resolve(&t))
     }
 
     pub fn resolve(&self, ty: &Type) -> Type {
         self.tctx.resolve(ty)
+    }
+}
+
+fn expr_has_condact(e: &Expr) -> bool {
+    let mut found = false;
+    e.visit(|x| found |= matches!(x, Expr::Call { node, .. } if node == ol_ir::declock::CONDACT));
+    found
+}
+
+fn strip_condact(e: &mut Expr) {
+    if let Expr::Call { node, args } = e {
+        if node == ol_ir::declock::CONDACT && args.len() >= 2 {
+            *e = args.swap_remove(1);
+        }
     }
 }
 

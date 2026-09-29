@@ -296,7 +296,10 @@ fn the_view_follows_c_integer_semantics() {
     let pr = project(vec![n, add2], "Arith");
     let tc = ol_typecheck::check_project(&pr);
     assert!(!tc.has_errors(), "{:?}", tc.errors().collect::<Vec<_>>());
-    let view = ol_cocospec_emit::kind2::emit(&pr).expect("view");
+    // The contract view (with runtime-error checks, calls are hoisted to
+    // equations of their own).
+    let contracts_only = ol_cocospec_emit::kind2::EmitOptions { runtime_errors: false };
+    let view = ol_cocospec_emit::kind2::emit_with(&pr, contracts_only).expect("view");
     let t = &view.text;
     assert!(t.contains("q = __ol_div(a, b);") && t.contains("r = __ol_mod(a, b);"), "{t}");
     assert!(t.contains("i = __ol_trunc(x);"), "{t}");
@@ -348,8 +351,11 @@ fn kind2() -> Option<ol_kind2::Kind2Options> {
     }
 }
 
+/// Prove the contracts of the view. Runtime errors are off: these models
+/// count without bound on purpose (`tests/runtime_errors.rs` proves those).
 fn prove(project: &Project, root: &str, opts: ol_kind2::Kind2Options) -> (String, ol_kind2::Kind2Result) {
-    let input = ol_cocospec_emit::kind2::emit(project).expect("view");
+    let contracts_only = ol_cocospec_emit::kind2::EmitOptions { runtime_errors: false };
+    let input = ol_cocospec_emit::kind2::emit_with(project, contracts_only).expect("view");
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let dir = std::env::temp_dir().join(format!("ol_kind2_projection_{stamp}"));
     std::fs::create_dir_all(&dir).unwrap();
