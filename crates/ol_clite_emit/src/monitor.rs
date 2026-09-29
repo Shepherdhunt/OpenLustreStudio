@@ -84,7 +84,7 @@ fn emit_monitor(
     let obs = c.observer();
     let on = obs.node.name.clone();
     crate::emit_node_header(&obs.node, project, header);
-    crate::emit_node_source(&obs.node, project, source);
+    crate::emit_node_source(&obs.node, project, source, &mut Vec::new());
 
     let monitor_name = format!("{}_monitor", c.name);
     let _ = writeln!(header, "/* monitor for contract `{}` over `{owner}` */", c.name);

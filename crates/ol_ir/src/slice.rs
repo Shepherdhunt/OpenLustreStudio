@@ -270,11 +270,19 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
         });
     }
 
+    // Lowered constructs stay attributed in the slice (same node bodies).
+    let origins = project
+        .origins
+        .iter()
+        .filter(|o| packages.iter().any(|p| p.nodes.iter().any(|n| n.name == o.node)))
+        .cloned()
+        .collect();
     Ok(Project {
         name: project.name.clone(),
         packages,
         main: Some(root.to_string()),
         includes: vec![],
+        origins,
     })
 }
 

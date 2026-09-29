@@ -159,3 +159,7 @@ path = "activations.rs"
 [[test]]
 name = "float_fidelity"
 path = "float_fidelity.rs"
+
+[[test]]
+name = "traceability"
+path = "traceability.rs"

@@ -100,6 +100,41 @@ pub struct Project {
     /// loader follows these recursively and concatenates packages by name.
     #[serde(default)]
     pub includes: Vec<String>,
+    /// Provenance of lowered equations: which owned construct each block of
+    /// an operator's equations came from. Filled by
+    /// [`Project::lower_state_machines`] / [`Project::lower_activations`]
+    /// (never saved) and read by the code generator's traceability.
+    #[serde(skip)]
+    pub origins: Vec<ConstructOrigin>,
+}
+
+/// A block of an operator's equations produced by lowering one owned
+/// construct: equations `equations` of `node` came from state machine or
+/// activation `name`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstructOrigin {
+    pub node: String,
+    pub kind: ConstructKind,
+    pub name: String,
+    pub equations: std::ops::Range<usize>,
+    /// An activation's branch names, in order (the else scope is "else").
+    pub branches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructKind {
+    StateMachine,
+    Activation,
+}
+
+impl ConstructKind {
+    /// The diagram's id prefix for a construct block (`sm:` / `act:`).
+    pub fn id_prefix(self) -> &'static str {
+        match self {
+            ConstructKind::StateMachine => "sm",
+            ConstructKind::Activation => "act",
+        }
+    }
 }
 
 impl Project {
@@ -114,6 +149,11 @@ impl Project {
 
     pub fn all_nodes(&self) -> impl Iterator<Item = &NodeDef> {
         self.packages.iter().flat_map(|p| p.nodes.iter())
+    }
+
+    /// The construct (if any) that equation `index` of `node` was lowered from.
+    pub fn origin_of(&self, node: &str, index: usize) -> Option<&ConstructOrigin> {
+        self.origins.iter().find(|o| o.node == node && o.equations.contains(&index))
     }
 
     /// Merge `other` into `self`. Packages with the same name combine their
@@ -183,8 +223,16 @@ impl Project {
                     // drive the operator's outputs (no separate node).
                     Some(op) => match pkg.nodes.iter_mut().find(|n| &n.name == op) {
                         Some(node) => {
+                            let first = node.equations.len();
                             node.locals.extend(low.node.locals);
                             node.equations.extend(low.node.equations);
+                            self.origins.push(ConstructOrigin {
+                                node: op.clone(),
+                                kind: ConstructKind::StateMachine,
+                                name: sm.name.clone(),
+                                equations: first..node.equations.len(),
+                                branches: vec![],
+                            });
                         }
                         None => errors
                             .push(LowerError::UnknownOwner(sm.name.clone(), op.clone())),
@@ -231,8 +279,21 @@ impl Project {
                 match crate::activation::lower(act, &pkg.nodes[idx], &first_variant) {
                     Ok(low) => {
                         let node = &mut pkg.nodes[idx];
+                        let first = node.equations.len();
                         node.locals.extend(low.locals);
                         node.equations.extend(low.equations);
+                        self.origins.push(ConstructOrigin {
+                            node: act.owner.clone(),
+                            kind: ConstructKind::Activation,
+                            name: act.name.clone(),
+                            equations: first..node.equations.len(),
+                            branches: act
+                                .branches
+                                .iter()
+                                .map(|b| b.name.clone())
+                                .chain(std::iter::once("else".to_string()))
+                                .collect(),
+                        });
                     }
                     Err(e) => errors.push(e),
                 }

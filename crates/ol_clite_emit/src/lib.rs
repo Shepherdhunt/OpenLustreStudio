@@ -21,6 +21,7 @@
 //! initialized in the parent's `_init`.
 
 pub mod harness;
+pub mod trace;
 pub mod imported;
 pub mod manifest;
 pub mod monitor;
@@ -39,6 +40,8 @@ pub use manifest::{load_manifest_dir, ImportedOperator};
 pub struct EmittedClite {
     pub header: String,
     pub source: String,
+    /// Model-to-code trace matrix of `source`: every equation's line range.
+    pub trace: Vec<trace::TraceEntry>,
 }
 
 pub fn emit_project(project: &Project) -> EmittedClite {
@@ -85,13 +88,15 @@ pub fn emit_project(project: &Project) -> EmittedClite {
     // Topologically sort nodes so each callee's struct/function is declared
     // before any caller that embeds or invokes it.
     let ordered = topo_sort_nodes(project);
+    let mut spans = Vec::new();
     for node in &ordered {
         emit_node_header(node, project, &mut header);
-        emit_node_source(node, project, &mut source);
+        emit_node_source(node, project, &mut source, &mut spans);
     }
 
     let _ = writeln!(header, "#endif /* OL_GENERATED_H */");
-    EmittedClite { header, source }
+    let trace = trace::resolve(project, &source, spans);
+    EmittedClite { header, source, trace }
 }
 
 fn emit_const(c: &ol_ir::ConstDef, out: &mut String) {
@@ -448,7 +453,7 @@ fn emit_node_header(node: &NodeDef, project: &Project, out: &mut String) {
     out.push('\n');
 }
 
-fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
+fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String, spans: &mut Vec<trace::Span>) {
     if node.is_imported() {
         let _ = writeln!(
             out,
@@ -523,6 +528,27 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         .unwrap_or_else(|_| (0..node.equations.len()).collect());
     for &i in &order {
         let eq = &node.equations[i];
+        // Traceability: a one-line `@trace` comment before each equation,
+        // and its span for the trace matrix.
+        let start = out.len();
+        let _ = writeln!(out, "  {}", trace::comment(project, node, i, eq));
+        emit_equation(node, i, eq, &clocks, &scope, &mut ctx, out);
+        spans.push(trace::Span { operator: node.name.clone(), equation: i, start, end: out.len() });
+    }
+    finish_step(node, &state_fields, &clocks, &scope, &types, out);
+}
+
+/// One equation's statements, gated by its clock when it has one.
+fn emit_equation(
+    node: &NodeDef,
+    i: usize,
+    eq: &Equation,
+    clocks: &NodeClocks,
+    scope: &Scope,
+    ctx: &mut EmitCtx,
+    out: &mut String,
+) {
+    {
         let eq_clock = clocks
             .info
             .equation_clocks
@@ -530,15 +556,15 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
             .cloned()
             .unwrap_or(ol_ir::Clock::Base);
         if eq_clock.is_base() || node.kind == NodeKind::Function {
-            emit_equation_body(eq, &mut ctx, out);
-            continue;
+            emit_equation_body(eq, ctx, out);
+            return;
         }
         // Clocked equation: run only on active cycles, hold the lhs through
         // inactive ones — exactly the simulator's gating.
-        let cond = clocks.chain_cond(&eq_clock, &scope);
+        let cond = clocks.chain_cond(&eq_clock, scope);
         let _ = writeln!(out, "  if ({cond}) {{");
         let mut body = String::new();
-        emit_equation_body(eq, &mut ctx, &mut body);
+        emit_equation_body(eq, ctx, &mut body);
         for line in body.lines() {
             let _ = writeln!(out, "  {line}");
         }
@@ -551,14 +577,24 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         }
         let _ = writeln!(out, "  }}");
     }
+}
 
+/// The end of a step function: state updates, clock ticks, debug probes.
+fn finish_step(
+    node: &NodeDef,
+    state_fields: &[(String, Type)],
+    clocks: &NodeClocks,
+    scope: &Scope,
+    types: &HashMap<String, Type>,
+    out: &mut String,
+) {
     if node.kind != NodeKind::Function {
-        for (sname, _) in &state_fields {
-            let driver = state_driver_name(sname, &scope);
+        for (sname, _) in state_fields {
+            let driver = state_driver_name(sname, scope);
             let _ = writeln!(out, "  self->{sname} = {driver};");
         }
         for (i, ck) in clocks.info.chains.iter().enumerate() {
-            let cond = clocks.chain_cond(ck, &scope);
+            let cond = clocks.chain_cond(ck, scope);
             let _ = writeln!(out, "  if ({cond}) self->clk{i}_ticked = true;");
         }
         let _ = writeln!(out, "  self->initialized = true;");
@@ -570,7 +606,7 @@ fn emit_node_source(node: &NodeDef, project: &Project, out: &mut String) {
         let _ = writeln!(out, "#ifdef OL_DEBUG");
         let _ = writeln!(out, "  if (ol_dbg_print) {{");
         for probe in &node.probes {
-            let _ = writeln!(out, "    {}", probe_printf(probe, &types, &scope));
+            let _ = writeln!(out, "    {}", probe_printf(probe, types, scope));
         }
         let _ = writeln!(out, "  }}");
         let _ = writeln!(out, "#endif");

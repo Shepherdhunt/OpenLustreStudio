@@ -101,6 +101,7 @@ impl Library {
             packages: vec![pkg],
             main: None,
             includes: vec![],
+            origins: Vec::new(),
         }
     }
 

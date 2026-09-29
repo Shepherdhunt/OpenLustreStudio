@@ -675,12 +675,19 @@ fn cmd_emit_clite(
     std::fs::create_dir_all(&clite_dir)?;
     std::fs::create_dir_all(&mon_dir)?;
     let bundle = ol_clite_emit::emit_project(&project);
-    std::fs::write(clite_dir.join("openlustre_generated.h"), bundle.header)?;
-    std::fs::write(clite_dir.join("openlustre_generated.c"), bundle.source)?;
+    std::fs::write(clite_dir.join("openlustre_generated.h"), &bundle.header)?;
+    std::fs::write(clite_dir.join("openlustre_generated.c"), &bundle.source)?;
 
     let mon = monitor::emit_monitors(&project);
-    std::fs::write(mon_dir.join("openlustre_monitors.h"), mon.header)?;
-    std::fs::write(mon_dir.join("openlustre_monitors.c"), mon.source)?;
+    std::fs::write(mon_dir.join("openlustre_monitors.h"), &mon.header)?;
+    std::fs::write(mon_dir.join("openlustre_monitors.c"), &mon.source)?;
+    // Every generated file, for the generation report's fingerprints.
+    let mut generated: Vec<(String, String)> = vec![
+        ("clite/openlustre_generated.h".into(), bundle.header.clone()),
+        ("clite/openlustre_generated.c".into(), bundle.source.clone()),
+        ("monitors/openlustre_monitors.h".into(), mon.header.clone()),
+        ("monitors/openlustre_monitors.c".into(), mon.source.clone()),
+    ];
 
     if driver {
         let entry_name = project
@@ -691,7 +698,8 @@ fn cmd_emit_clite(
             .find_node(&entry_name)
             .with_context(|| format!("no node named `{entry_name}`"))?;
         let driver_src = ol_clite_emit::harness::emit_csv_driver(entry);
-        std::fs::write(clite_dir.join("driver.c"), driver_src)?;
+        std::fs::write(clite_dir.join("driver.c"), &driver_src)?;
+        generated.push(("clite/driver.c".into(), driver_src));
         // A Makefile so the generated tree builds with one command. This is
         // the "user-defined main operator becomes the entry point of the
         // standalone executable" OpenLustre-vs-SCADE differentiator made
@@ -736,6 +744,18 @@ fn cmd_emit_clite(
         );
         std::fs::write(imp_dir.join("BUILD.txt"), build_manifest)?;
     }
+
+    // Traceability: the trace matrix (every equation → file and lines) and
+    // the generation report (files with SHA-256, operators, state, coverage).
+    let files: Vec<(&str, &str)> = generated.iter().map(|(n, t)| (n.as_str(), t.as_str())).collect();
+    let report = ol_clite_emit::trace::report(&project, root.or(project.main.as_deref()), &files, &bundle.trace);
+    std::fs::write(out.join("trace.json"), serde_json::to_string_pretty(&bundle.trace)?)?;
+    std::fs::write(out.join("generation_report.json"), serde_json::to_string_pretty(&report)?)?;
+    std::fs::write(out.join("generation_report.md"), report.to_markdown())?;
+    println!(
+        "emit-clite: traced {} of {} equations — trace.json, generation_report.md",
+        report.traced, report.equations
+    );
 
     println!(
         "emit-clite: wrote {} (sources){}{} and {} (monitors)",
