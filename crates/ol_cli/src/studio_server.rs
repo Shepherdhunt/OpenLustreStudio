@@ -1892,39 +1892,82 @@ fn validate_state_machine(project: &ol_ir::Project, machine: &ol_ir::StateMachin
             ..Default::default()
         }),
     }
-    // Best-effort: include the embedded standard library so a machine that calls
-    // a library block in a transition/output checks against it. If it can't be
-    // loaded, fall back to checking without it.
-    if let Ok(lib) = ol_stdlib::load_embedded() {
-        lib.merge_into(&mut candidate, "stdlib");
-    }
-    candidate
-        .lower_state_machines()
-        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-    candidate
-        .lower_activations()
-        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-
     // The machine merges into its owning operator; check that operator's slice.
-    let to_check = match machine.owner.as_deref() {
-        Some(owner) => candidate.slice_for_root(owner).map_err(|e| e.to_string())?,
-        None => candidate.clone(),
+    let introduced = introduced_errors(project, &candidate, machine.owner.as_deref())?;
+    if !introduced.is_empty() {
+        return Err(format!("the machine would not translate cleanly — {}", introduced.join("; ")));
+    }
+    Ok(())
+}
+
+/// Merge the embedded stdlib (best-effort, so a construct calling a library
+/// block checks against it), lower every state machine and activation, slice
+/// to `owner` (or keep the whole project), and type-check. Returns one
+/// `(comparison key, display text)` per error; a lowering failure is `Err`.
+fn owner_type_errors(
+    project: &ol_ir::Project,
+    owner: Option<&str>,
+) -> Result<Vec<(String, String)>, String> {
+    let join = |errs: Vec<String>| errs.join("; ");
+    let mut p = project.clone();
+    if let Ok(lib) = ol_stdlib::load_embedded() {
+        lib.merge_into(&mut p, "stdlib");
+    }
+    p.lower_state_machines()
+        .map_err(|errs| join(errs.into_iter().map(|e| e.to_string()).collect()))?;
+    p.lower_activations()
+        .map_err(|errs| join(errs.into_iter().map(|e| e.to_string()).collect()))?;
+    let checked = match owner {
+        Some(o) => p.slice_for_root(o).map_err(|e| e.to_string())?,
+        None => p,
     };
-    let report = ol_typecheck::check_project(&to_check);
-    let errors: Vec<String> = report
+    Ok(ol_typecheck::check_project(&checked)
         .errors()
         .map(|d| {
-            if d.context.is_empty() {
+            // Equation numbers shift when one construct's lowered equations
+            // land before another's, so they don't decide "same error".
+            let ctx_key: Vec<&str> = d
+                .context
+                .iter()
+                .map(|c| c.split(" · equation ").next().unwrap_or(c))
+                .collect();
+            let key = format!("{}|{}|{}", d.code, d.message, ctx_key.join(" · "));
+            let shown = if d.context.is_empty() {
                 format!("{}: {}", d.code, d.message)
             } else {
                 format!("{}: {} [{}]", d.code, d.message, d.context.join(" · "))
-            }
+            };
+            (key, shown)
         })
-        .collect();
-    if !errors.is_empty() {
-        return Err(format!("the machine would not translate cleanly — {}", errors.join("; ")));
+        .collect())
+}
+
+/// The type errors `candidate` would INTRODUCE on `owner`'s slice relative to
+/// the current `project` (a multiset difference). An operator under
+/// construction legitimately carries errors — an output that a construct
+/// still to be added will drive is "never assigned" — so only what THIS edit
+/// breaks may block the save. Lowering failures of the candidate always do.
+fn introduced_errors(
+    project: &ol_ir::Project,
+    candidate: &ol_ir::Project,
+    owner: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let after = owner_type_errors(candidate, owner)?;
+    let mut before: std::collections::HashMap<String, usize> = Default::default();
+    for (k, _) in owner_type_errors(project, owner).unwrap_or_default() {
+        *before.entry(k).or_default() += 1;
     }
-    Ok(())
+    Ok(after
+        .into_iter()
+        .filter(|(k, _)| match before.get_mut(k) {
+            Some(n) if *n > 0 => {
+                *n -= 1;
+                false
+            }
+            _ => true,
+        })
+        .map(|(_, shown)| shown)
+        .collect())
 }
 
 /// Create a new state machine. The name must be free (no node or machine).
@@ -2099,9 +2142,10 @@ fn parse_activation_req(req: &serde_json::Value) -> Result<ol_ir::ActivationDef,
 }
 
 /// Validate an activation exactly like a state machine: apply the candidate
-/// to a copy of the project, merge the stdlib, lower everything, slice to the
-/// owner, and type-check that slice — so a decision tree is GUARANTEED to
-/// translate before it is saved.
+/// to a copy of the project, lower everything, slice to the owner, and reject
+/// any type error the tree INTRODUCES — so a saved decision tree is
+/// guaranteed to translate, while an operator still under construction
+/// (other outputs not yet driven) doesn't block it.
 fn validate_activation(
     project: &ol_ir::Project,
     act: &ol_ir::ActivationDef,
@@ -2110,7 +2154,7 @@ fn validate_activation(
     for pkg in &mut candidate.packages {
         pkg.activations.retain(|a| a.name != act.name);
     }
-    match candidate.packages.iter_mut().next() {
+    match candidate.packages.iter_mut().find(|p| p.name != "stdlib") {
         Some(pkg) => pkg.activations.push(act.clone()),
         None => candidate.packages.push(ol_ir::Package {
             name: "user".into(),
@@ -2118,31 +2162,11 @@ fn validate_activation(
             ..Default::default()
         }),
     }
-    if let Ok(lib) = ol_stdlib::load_embedded() {
-        lib.merge_into(&mut candidate, "stdlib");
-    }
-    candidate
-        .lower_state_machines()
-        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-    candidate
-        .lower_activations()
-        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
-    let to_check = candidate.slice_for_root(&act.owner).map_err(|e| e.to_string())?;
-    let report = ol_typecheck::check_project(&to_check);
-    let errors: Vec<String> = report
-        .errors()
-        .map(|d| {
-            if d.context.is_empty() {
-                format!("{}: {}", d.code, d.message)
-            } else {
-                format!("{}: {} [{}]", d.code, d.message, d.context.join(" · "))
-            }
-        })
-        .collect();
-    if errors.is_empty() {
+    let introduced = introduced_errors(project, &candidate, Some(&act.owner))?;
+    if introduced.is_empty() {
         Ok(())
     } else {
-        Err(format!("the activation would not type-check: {}", errors.join("; ")))
+        Err(format!("the activation would not type-check: {}", introduced.join("; ")))
     }
 }
 

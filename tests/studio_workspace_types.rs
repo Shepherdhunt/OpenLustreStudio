@@ -699,6 +699,53 @@ fn activation_create_validate_edit_build_remove() {
     assert_eq!(sr, 400, "removing a missing activation is rejected");
 }
 
+/// Models are built incrementally: an operator whose outputs come from two
+/// constructs must accept the FIRST one while the other outputs are still
+/// unassigned. Validation blocks only errors the edit itself introduces.
+#[test]
+fn constructs_can_be_added_to_an_operator_under_construction() {
+    let g = start_server_on_workspace("ws_incremental");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Pilot","kind":"operator"}"#);
+    for p in [
+        r#"{"node":"Pilot","side":"input","name":"engage","type":"bool"}"#,
+        r#"{"node":"Pilot","side":"input","name":"err","type":"int32"}"#,
+        r#"{"node":"Pilot","side":"output","name":"cmd","type":"int32"}"#,
+        r#"{"node":"Pilot","side":"output","name":"lit","type":"bool"}"#,
+    ] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    // `lit` is still unassigned when the activation (driving only `cmd`) lands.
+    post_ok(port, "/api/edit/add_activation", r#"{"name":"Cmd","operator":"Pilot",
+        "outputs":[{"name":"cmd","type":"int32"}],
+        "branches":[{"name":"On","condition":"engage","equations":[{"lhs":"cmd","body":"err"}]}],
+        "else":{"equations":[{"lhs":"cmd","body":"0"}]}}"#);
+    // And the state machine driving `lit` lands next to it.
+    post_ok(port, "/api/edit/add_state_machine", r#"{"name":"Lamp","operator":"Pilot","initial_state":"Off",
+        "inputs":[{"name":"engage","type":"bool"}],"outputs":[{"name":"lit","type":"bool"}],
+        "states":[{"name":"Off","equations":[{"lhs":"lit","body":"false"}],"transitions":[{"guard":"engage","target":"On"}]},
+                  {"name":"On","equations":[{"lhs":"lit","body":"true"}],"transitions":[{"guard":"not engage","target":"Off"}]}]}"#);
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Pilot"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "both constructs together build cleanly: {bd}");
+
+    // Both show as blocks on the canvas.
+    let dg = get_json(port, "/api/diagram?node=Pilot");
+    let ids: Vec<&str> = dg["constructs"].as_array().unwrap().iter()
+        .map(|c| c["id"].as_str().unwrap()).collect();
+    assert!(ids.contains(&"act:Cmd") && ids.contains(&"sm:Lamp"), "{ids:?}");
+
+    // But an error the edit itself introduces still blocks it: this update
+    // makes `cmd` a bool in one branch.
+    let (s, body) = request(port, "POST", "/api/edit/update_activation", r#"{"name":"Cmd","operator":"Pilot",
+        "outputs":[{"name":"cmd","type":"int32"}],
+        "branches":[{"name":"On","condition":"engage","equations":[{"lhs":"cmd","body":"true"}]}],
+        "else":{"equations":[{"lhs":"cmd","body":"0"}]}}"#).expect("bad update");
+    assert_eq!(s, 400, "introduced type error rejected: {body}");
+}
+
 /// A state machine that would not translate cleanly (a per-state output
 /// assigned a value of the wrong type) is REJECTED at create time — before it
 /// is ever saved — so the model never holds a machine that fails to lower to
