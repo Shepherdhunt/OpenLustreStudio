@@ -527,21 +527,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         .properties
         .iter()
         .map(|p| {
-            let (kind, clause) = match p.source.as_deref() {
-                Some("OneModeActive") => ("modes exhaustive", "some mode is always active".to_string()),
-                Some("NonVacuityCheck") => {
-                    ("mode reachable", format!("mode {} can be active", p.label.rsplit('.').next().unwrap_or("")))
-                }
-                other => (
-                    match other {
-                        Some("Guarantee") => "guarantee",
-                        Some("Ensure") => "mode ensure",
-                        Some("Assumption") => "assumption",
-                        _ => "property",
-                    },
-                    p.line.and_then(|l| ol_kind2::clause_at(&input.text, l)).unwrap_or_default(),
-                ),
-            };
+            let (kind, clause) = p.describe(&input.text);
             ProofRow {
                 name: p.label.clone(),
                 kind: kind.into(),

@@ -131,6 +131,28 @@ impl PropertyResult {
     pub fn display_name(&self) -> String {
         display_name(&self.name)
     }
+
+    /// What the property is (`guarantee`, `mode ensure`, `mode reachable`,
+    /// `modes exhaustive`, `assumption`, `property`) and what it says —
+    /// the clause from `input`, the Kind 2 file that was proved.
+    pub fn describe(&self, input: &str) -> (&'static str, String) {
+        match self.source.as_deref() {
+            Some("OneModeActive") => ("modes exhaustive", "some mode is always active".into()),
+            Some("NonVacuityCheck") => {
+                let mode = self.display_name().rsplit('.').next().unwrap_or("").to_string();
+                ("mode reachable", format!("mode {mode} can be active"))
+            }
+            other => (
+                match other {
+                    Some("Guarantee") => "guarantee",
+                    Some("Ensure") => "mode ensure",
+                    Some("Assumption") => "assumption",
+                    _ => "property",
+                },
+                self.line.and_then(|l| clause_at(input, l)).unwrap_or_default(),
+            ),
+        }
+    }
 }
 
 /// Strip `[l12c3]` position tags from a Kind 2 property name.

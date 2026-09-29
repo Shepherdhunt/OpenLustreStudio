@@ -135,6 +135,20 @@ output and monitor columns). And `POST /api/prove`'s per-property
 class, values}]}` alongside the text `waveform`, plus the `main`
 operator it belongs to.
 
+`POST /api/prove?timeout=S&mode=prove|realizability|modes` runs Kind 2 on
+the root's Kind 2 view. Each property carries `label` (unique, positions
+stripped), `kind` (`guarantee`, `mode ensure`, `mode reachable`, `modes
+exhaustive`, …), `clause`, `status`, `outcome` (`Holds` / `Fails` /
+`Unknown`) and `mode_check`; the response adds `realizability` (per node
+and context — `environment` or `contract` — with the `conflicting`
+clauses), Kind 2's `errors`, the proof's `notes` (what it assumes), the
+`toolchain` in use, and, when Kind 2 is missing, a `hint` and `guidance`.
+`GET /api/kind2/status` reports the Kind 2 and solver found (`path`, `via`,
+versions), `ready`, the tools folder, `can_install` and `guidance`;
+`POST /api/kind2/install` downloads Kind 2 + Z3 into the tools folder
+(Linux, macOS), runs a sample proof and returns the `log`, a `message` and
+the new status.
+
 The Tauri shell described below is still the longer-term target (it
 gives native desktop windows, file-pickers, and a block-diagram
 ReactFlow canvas), but the back-end contract is what was actually

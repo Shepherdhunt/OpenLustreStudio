@@ -368,6 +368,22 @@
   svg .box.live-branch { fill: #fff0a8; stroke-width: 2; }
   .chip.live { background: #e6f4ea; border-color: #6fb07f; color: #107c10; }
   .chip.bad { background: #fdeeee; border-color: #d11a1a; color: #c42b1c; }
+  /* --- Verify dock: prover status and results ---------------------------- */
+  .k2-chip { border-radius: 10px; padding: 1px 10px; font-size: 11px; font-weight: 600;
+             border: 1px solid #b9c8d9; background: #eef2f7; color: #2b579a; }
+  .k2-chip.ok { background: #e6f4ea; border-color: #6fb07f; color: #107c10; }
+  .k2-chip.missing { background: #fff4e0; border-color: #d9a441; color: #8a5300; }
+  .k2-summary { margin: 6px 0 4px; font-weight: 600; }
+  .k2-summary .good { color: #107c10; } .k2-summary .bad { color: #c42b1c; } .k2-summary .unk { color: #8a5300; }
+  .k2-table td.clause code { white-space: pre-wrap; }
+  .k2-res { white-space: nowrap; font-weight: 600; }
+  .k2-res.ok { color: #107c10; } .k2-res.bad { color: #c42b1c; } .k2-res.unk { color: #8a5300; }
+  .k2-group td { background: #f3f4f6; font-weight: 600; color: #5a5a5a; font-size: 11px;
+                 text-transform: uppercase; letter-spacing: .04em; }
+  .k2-assume { color: #5a5a5a; font-size: 11px; margin: 4px 0 8px; }
+  .k2-found td:first-child { color: #5a5a5a; padding-right: 12px; white-space: nowrap; }
+  .k2-found td { padding: 2px 0; vertical-align: top; }
+  .k2-guidance li { margin: 4px 0; }
   /* --- Contract editor ------------------------------------------------- */
   .ct-tabs { display: flex; gap: 2px; border-bottom: 1px solid #c5c5c5; margin: 8px 0 6px; }
   .ct-tabs span { padding: 3px 12px; cursor: pointer; border: 1px solid transparent;
@@ -551,7 +567,9 @@
       <div class="menu-sep"></div>
       <div class="mi" onclick="showDock('tests'); loadTests(); testsRun()">Run Test Scenarios</div>
       <div class="mi" onclick="showDock('tests'); testsRecord()">Record Golden Traces</div>
-      <div class="mi" onclick="showDock('verify'); proveRun()">Verify with Kind 2</div>
+      <div class="mi" onclick="showDock('verify'); proveRun('prove')">Verify with Kind 2</div>
+      <div class="mi" onclick="showDock('verify'); proveRun('realizability')">Check Contract Realizability</div>
+      <div class="mi" id="mi-project-kind2" onclick="openKind2()">Kind 2 Prover…</div>
       <div class="mi" id="mi-project-evidence" onclick="openEvidence()">Evidence Report…</div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="openFsmEditor(null)">State Machines…</div>
@@ -674,8 +692,11 @@
     </div>
     <div class="dock-pane" id="dock-verify" style="display:none">
       <div class="row">
+        <button id="k2-chip" class="k2-chip" onclick="openKind2()" title="The prover and SMT solver in use — click for details or to set them up">Kind 2 …</button>
         timeout (s) <input id="verify-timeout" type="number" value="30" style="width:70px">
-        <button class="primary" onclick="proveRun()">Run Kind 2</button>
+        <button class="primary" onclick="proveRun('prove')" title="Prove every guarantee, mode ensure and property of the root's contract, and check its modes">Prove</button>
+        <button onclick="proveRun('realizability')" title="Can any implementation meet the contract's guarantees for every input its assumptions allow?">Realizability</button>
+        <button onclick="proveRun('modes')" title="Is every mode of the contract reachable, and is some mode always active?">Mode coverage</button>
         <button onclick="openEvidence()" title="Checks, proof, tests and coverage, model ≡ code and traceability in one document">Evidence report…</button>
         <span class="build-note" id="verify-status"></span>
       </div>
@@ -982,6 +1003,18 @@
     <div id="ev-result"></div>
   </div>
 
+  <div class="dlg" id="dlg-kind2">
+    <p><strong>Kind 2</strong> proves the contracts of the root operator; it needs an SMT solver (Z3, cvc5 or Yices 2) to answer. The Studio looks for both in <code class="inline">OPENLUSTRE_KIND2</code> / <code class="inline">OPENLUSTRE_Z3</code>, the tools folder, next to the <code class="inline">openlustre</code> program, then <code class="inline">PATH</code>.</p>
+    <table class="k2-found" id="k2-found"></table>
+    <ol class="k2-guidance" id="k2-guidance"></ol>
+    <div class="row" style="gap:8px">
+      <button class="primary" id="k2-install" onclick="kind2Install()">Install Kind 2 + Z3</button>
+      <button onclick="kind2Status(true)">Check again</button>
+      <span class="build-note" id="k2-note"></span>
+    </div>
+    <pre id="k2-log" style="display:none; max-height:160px"></pre>
+  </div>
+
   <div class="dlg" id="dlg-report">
     <div class="row" style="margin-bottom:6px">
       <span class="build-note" id="report-note">Every equation of the generated C carries an <code class="inline">@trace</code> comment back to its diagram element; click one in the Generated C pane to find it in the model.</span>
@@ -1119,7 +1152,7 @@ const DLG_TITLES = {
   "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
   "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
-  "dlg-report": "C-Lite Generation Report", "dlg-evidence": "Evidence Report",
+  "dlg-report": "C-Lite Generation Report", "dlg-evidence": "Evidence Report", "dlg-kind2": "Kind 2 Prover",
   "dlg-fsm": "State Machines",
   "dlg-act": "Conditional Activations",
   "dlg-contract": "Contracts",
@@ -1160,6 +1193,7 @@ function showDock(name) {
     t.classList.toggle("active", t.dataset.dock === name));
   document.querySelectorAll("#bottomdock .dock-pane").forEach(p =>
     p.style.display = p.id === "dock-" + name ? "" : "none");
+  if (name === "verify") kind2Status(false);
 }
 
 // --- Right side text panes -------------------------------------------------------
@@ -4399,11 +4433,68 @@ async function propsBindGhost() {
 
 // --- Verify (Kind 2) ------------------------------------------------------------
 
-async function proveRun() {
+/// The prover in use, shown as a chip in the Verify dock; `force` re-checks.
+async function kind2Status(force) {
+  if (state.kind2 && !force) return state.kind2;
+  let st;
+  try { st = await fetchJSON("/api/kind2/status"); } catch (e) { return null; }
+  state.kind2 = st;
+  const chip = document.getElementById("k2-chip");
+  chip.className = "k2-chip " + (st.ready ? "ok" : "missing");
+  chip.textContent = st.ready ? "✓ " + st.summary : "⚠ Kind 2 not set up";
+  if (document.getElementById("dlg-kind2").classList.contains("active")) kind2Fill(st);
+  return st;
+}
+
+function kind2Fill(st) {
+  const row = (k, v) => "<tr><td>" + k + "</td><td>" + v + "</td></tr>";
+  const where = (x, ver) => x
+    ? escapeHTML(ver || "does not run") + '<br><span class="build-note">' + escapeHTML(x.path) + " · via " + escapeHTML(x.via) + "</span>"
+    : '<span class="bad">not found</span>';
+  document.getElementById("k2-found").innerHTML =
+    row("Kind 2", where(st.kind2, st.kind2_version)) +
+    row("SMT solver", st.solver ? where(st.solver, st.solver_version) : '<span class="bad">not found</span>') +
+    row("tools folder", '<code class="inline">' + escapeHTML(st.tools_dir) + "</code>");
+  document.getElementById("k2-guidance").innerHTML = (st.guidance || []).map(g => "<li>" + escapeHTML(g) + "</li>").join("");
+  const inst = document.getElementById("k2-install");
+  inst.style.display = st.can_install && !st.ready ? "" : "none";
+  document.getElementById("k2-note").textContent = st.ready ? "✓ ready — " + st.summary : "";
+}
+
+async function openKind2() {
+  openDialog("dlg-kind2");
+  document.getElementById("k2-log").style.display = "none";
+  document.getElementById("k2-note").textContent = "checking…";
+  const st = await kind2Status(true);
+  if (st) kind2Fill(st);
+}
+
+async function kind2Install() {
+  const note = document.getElementById("k2-note");
+  const log = document.getElementById("k2-log");
+  const btn = document.getElementById("k2-install");
+  btn.disabled = true;
+  note.textContent = "downloading Kind 2 and Z3 — this takes a minute…";
+  let d;
+  try { d = await (await fetch("/api/kind2/install", { method: "POST" })).json(); }
+  catch (e) { d = { ok: false, message: String(e), log: [] }; }
+  btn.disabled = false;
+  log.textContent = (d.log || []).join("\n");
+  log.style.display = (d.log || []).length ? "" : "none";
+  note.textContent = (d.ok ? "✓ " : "✗ ") + (d.message || "");
+  if (d.status) { state.kind2 = null; await kind2Status(true); kind2Fill(d.status); note.textContent = (d.ok ? "✓ " : "✗ ") + (d.message || ""); }
+}
+
+/// Run Kind 2 on the root: `prove` (every property and the mode checks),
+/// `realizability`, or `modes` (mode coverage only).
+async function proveRun(mode) {
+  mode = mode || "prove";
   showDock("verify");
+  const st = await kind2Status(false);
   const t = document.getElementById("verify-timeout").value || "30";
-  document.getElementById("verify-status").textContent = "running kind2…";
-  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t), { method: "POST" });
+  const label = { prove: "proving", realizability: "checking realizability", modes: "checking mode coverage" }[mode];
+  document.getElementById("verify-status").textContent = label + " with " + (st && st.ready ? st.summary : "kind2") + "…";
+  const r = await fetch("/api/prove?timeout=" + encodeURIComponent(t) + "&mode=" + mode, { method: "POST" });
   const text = await r.text();
   let data;
   try { data = JSON.parse(text); } catch (_) { data = { error: text }; }
@@ -4412,29 +4503,64 @@ async function proveRun() {
   if (data.error || !data.kind2_found) {
     host.innerHTML = data.error
       ? '<div class="diag severity-Error">' + escapeHTML(data.error) + "</div>"
-      : '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") + "</div>";
+      : '<div class="diag severity-Warning">' + escapeHTML(data.hint || "kind2 not found") +
+        ' <button onclick="openKind2()">Set up Kind 2…</button></div>';
     verifyCexClose();
     return;
   }
   state.proveData = data;
   let html = "";
-  if (data.properties.length) {
-    html += "<table><thead><tr><th>property</th><th>status</th><th></th></tr></thead><tbody>";
-    data.properties.forEach((p, i) => {
-      const ok = (p.status || "").toLowerCase() === "valid";
+  for (const e of data.errors || []) html += '<div class="diag severity-Error">Kind 2: ' + escapeHTML(e) + "</div>";
+  if (mode === "realizability") {
+    // Assumptions first: a contract is only as realizable as its environment.
+    const rs = (data.realizability || []).slice().sort((a, b) => (a.context === "environment" ? 0 : 1) - (b.context === "environment" ? 0 : 1));
+    if (rs.length) {
+      html += '<table class="k2-table"><thead><tr><th>operator</th><th>check</th><th>result</th><th>conflicting clauses</th></tr></thead><tbody>';
+      for (const x of rs) {
+        const ok = x.result === "realizable", bad = x.result === "unrealizable";
+        html += "<tr><td>" + escapeHTML(x.node) + "</td><td>" +
+          (x.context === "environment" ? "assumptions can be met" : "guarantees can be met") + '</td><td class="k2-res ' +
+          (ok ? "ok" : bad ? "bad" : "unk") + '">' + (ok ? "✓ " : bad ? "✗ " : "? ") + escapeHTML(x.result) + "</td><td>" +
+          escapeHTML((x.conflicting || []).join(", ")) + "</td></tr>";
+      }
+      html += "</tbody></table>";
+    } else if (!(data.errors || []).length) {
+      html += "<p>Kind 2 reported no realizability result.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
+    }
+  } else if (data.properties.length) {
+    const ps = data.properties;
+    const n = o => ps.filter(p => p.outcome === o).length;
+    const [holds, fails, unk] = [n("Holds"), n("Fails"), n("Unknown")];
+    html += '<div class="k2-summary"><span class="' + (fails ? "bad" : "good") + '">' + holds + " of " + ps.length + " hold</span>" +
+      (fails ? ' · <span class="bad">✗ ' + fails + " failed</span>" : "") + (unk ? ' · <span class="unk">? ' + unk + " unknown</span>" : "") +
+      ' <span class="build-note">— ' + escapeHTML(data.toolchain || "") + "</span></div>";
+    html += '<table class="k2-table"><thead><tr><th>property</th><th>kind</th><th>clause</th><th>result</th><th></th></tr></thead><tbody>';
+    const row = (p, i) => {
+      const cls = p.outcome === "Holds" ? "ok" : p.outcome === "Fails" ? "bad" : "unk";
+      const icon = p.outcome === "Holds" ? "✓ " : p.outcome === "Fails" ? "✗ " : "? ";
       const cex = p.trace || p.waveform
         ? '<button class="verify-cex-btn" data-i="' + i + '" title="Show the counterexample, cycle by cycle">〰 counterexample</button>'
         : "";
-      html += "<tr><td>" + escapeHTML(p.name) + '</td><td class="' +
-        (ok ? "severity-Info" : "severity-Error") + '">' + escapeHTML(p.status) + "</td><td>" + cex + "</td></tr>";
-    });
+      return "<tr><td>" + escapeHTML(p.label || p.name) + "</td><td>" + escapeHTML(p.kind || "property") +
+        '</td><td class="clause"><code>' + escapeHTML(p.clause || "") + '</code></td><td class="k2-res ' + cls + '">' + icon +
+        escapeHTML(p.status) + "</td><td>" + cex + "</td></tr>";
+    };
+    const props = ps.map((p, i) => [p, i]).filter(([p]) => !p.mode_check);
+    const modes = ps.map((p, i) => [p, i]).filter(([p]) => p.mode_check);
+    if (props.length && modes.length) html += '<tr class="k2-group"><td colspan="5">Contract properties</td></tr>';
+    props.forEach(([p, i]) => html += row(p, i));
+    if (modes.length) html += '<tr class="k2-group"><td colspan="5">Mode coverage</td></tr>';
+    modes.forEach(([p, i]) => html += row(p, i));
     html += "</tbody></table>";
-  } else {
+    if ((data.notes || []).length) {
+      html += '<div class="k2-assume">The proof assumes: ' + data.notes.map(escapeHTML).join("; ") + ".</div>";
+    }
+  } else if (!(data.errors || []).length) {
     html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
   }
   host.innerHTML = html;
   host.querySelectorAll(".verify-cex-btn").forEach(b => b.onclick = () => verifyShowCex(Number(b.dataset.i)));
-  const first = data.properties.findIndex(p => p.trace || p.waveform);
+  const first = (data.properties || []).findIndex(p => p.trace || p.waveform);
   if (first >= 0) verifyShowCex(first); else verifyCexClose();
 }
 
@@ -4451,7 +4577,7 @@ function verifyShowCex(i) {
   const text = document.getElementById("verify-text");
   const t = p.trace;
   const falsified = "falsified at cycle " + (t ? t.cycles - 1 : "?");
-  head.innerHTML = "<b>" + escapeHTML(p.name) + "</b> · counterexample" +
+  head.innerHTML = "<b>" + escapeHTML(p.label || p.name) + "</b> · counterexample" +
     (t ? ", " + t.cycles + (t.cycles === 1 ? " cycle" : " cycles") + ' — <span class="bad">✖ ' + falsified + "</span>" : "") +
     (t ? ' <button id="verify-replay" title="Run the counterexample\'s inputs in the live simulator, then step through it on the diagram">▶ Replay in simulator</button>' : "") +
     (t && p.waveform ? ' <button id="verify-text-btn" title="The counterexample as a text table">Text</button>' : "") +
@@ -4492,7 +4618,7 @@ function verifyShowCex(i) {
       t.streams.filter(inMain).forEach(st => { if (st.values[k] !== "") o[st.name] = num(st.values[k]); });
       return o;
     });
-    simReplay(main, seq, "the counterexample to " + p.name);
+    simReplay(main, seq, "the counterexample to " + (p.label || p.name));
   };
   head.scrollIntoView({ block: "nearest" });
 }

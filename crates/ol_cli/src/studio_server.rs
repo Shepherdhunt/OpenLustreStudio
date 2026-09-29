@@ -2002,11 +2002,7 @@ fn prove_run(
             // The same counterexample as signals over cycles, for the
             // waveform viewer and for replay in the simulator.
             let trace = p.counterexample.as_ref().and_then(ol_kind2::counterexample_streams);
-            let clause = match p.source.as_deref() {
-                Some("OneModeActive") => Some("some mode is always active".to_string()),
-                Some("NonVacuityCheck") => Some(format!("mode {} is reachable", p.label.rsplit('.').next().unwrap_or(""))),
-                _ => p.line.and_then(|l| ol_kind2::clause_at(&combined, l)),
-            };
+            let (kind, clause) = p.describe(&combined);
             serde_json::json!({
                 "name": p.name,
                 "label": p.label,
@@ -2014,6 +2010,7 @@ fn prove_run(
                 "outcome": p.outcome(),
                 "source": p.source,
                 "mode_check": p.is_mode_check(),
+                "kind": kind,
                 "clause": clause,
                 "scope": p.scope,
                 "waveform": waveform,

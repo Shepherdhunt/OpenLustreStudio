@@ -157,6 +157,31 @@ HTML and JSON and exits non-zero on FAIL, so CI can gate on it.
 
 ![The Evidence Report dialog in OpenLustre Studio — PASS WITH GAPS for the Autopilot operator: static checks, contract, Kind 2 proof (3 of 3 properties valid), tests (2 of 2 scenarios), model ≡ generated code (24 cycles compared) and traceability (17 of 17 equations) pass; structural coverage shows gaps (if-decisions 4/6, MC/DC 7/9).](docs/screenshots/11-evidence.png)
 
+**Proving with Kind 2.** The Verify dock proves the root operator's
+contract with Kind 2: every guarantee and mode ensure, plus the mode checks
+(each mode reachable, some mode always active), each shown with its clause
+and result; **Realizability** asks whether any implementation could meet the
+guarantees, with the conflicting clauses when none can; **Mode coverage**
+runs the mode checks alone. A counterexample opens on the waveform viewer
+and replays in the simulator. What Kind 2 reads is a faithful view of the
+model, not a best effort: contracts are imported in node headers, clocked
+equations (and so activations) are rewritten onto the base clock with the
+same hold semantics the simulator and the C execute — checked against the
+clocked original cycle by cycle — and integer division, remainder and casts
+go through helpers that behave as in C (Kind 2's own are Euclidean and
+floor). The proof states what it assumes (unbounded integers, exact reals).
+
+Kind 2 and an SMT solver are found wherever they are — `OPENLUSTRE_KIND2` /
+`OPENLUSTRE_Z3`, the per-user tools folder, next to the `openlustre` binary
+(Linux and macOS release archives bundle both), or `PATH`.
+`openlustre kind2 doctor` says what it found and proves a sample property;
+`openlustre kind2 install` (or **Install** in the Studio's Kind 2 dialog)
+downloads the pinned Kind 2 v2.2.0 and Z3 4.13.4 on Linux and macOS. Kind 2
+has no Windows build: use WSL or Docker through `tools/kind2-wsl.cmd` or
+`tools/kind2-docker.sh`. CI installs the pair and proves every example.
+
+![The Verify dock in OpenLustre Studio — Kind 2 v2.2.0 with Z3 proves an Autopilot contract whose outputs come from a clocked activation: 7 of 8 properties hold, grouped as contract properties (guarantees, mode ensures) and mode coverage (both modes reachable), while "some mode is always active" is falsifiable, its two-cycle counterexample ready to replay in the simulator.](docs/screenshots/12-kind2.png)
+
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
 
@@ -225,8 +250,12 @@ openlustre test record model.json --scenarios scenarios/
 openlustre test run    model.json --scenarios scenarios/ --backend both
 # [PASS] nominal (ir)   [PASS] nominal (c)   ← byte-identical traces, CI-ready
 
-# 6. Prove properties with Kind 2 (counterexamples as per-cycle waveforms):
+# 6. Prove properties with Kind 2 (counterexamples as per-cycle waveforms;
+#    exits non-zero unless every property holds). Set Kind 2 up once:
+openlustre kind2 install      # Linux/macOS: Kind 2 + Z3 into ~/.openlustre/tools
+openlustre kind2 doctor       # what was found, and a sample proof
 openlustre prove model.json --timeout 30 --waveform
+openlustre prove model.json --mode realizability
 
 # 7. The evidence report for an operator — checks, contract, proof, tests
 #    and coverage, model ≡ C, traceability — as HTML + JSON; fails on FAIL:
@@ -255,16 +284,17 @@ crates/
   ol_contract_ir     CoCoSpec contract IR
   ol_typecheck       types, records/enums/arrays, no-implicit-narrowing
   ol_contract_check  contract well-formedness + vacuity/unreachability
-  ol_lustre_emit     Lustre emitter (Kind 2-compatible)
-  ol_cocospec_emit   contract emitter (modern con/noc + legacy)
+  ol_lustre_emit     Lustre emitter (readable projection)
+  ol_cocospec_emit   contract emitter + the Kind 2 view (one faithful file)
   ol_clite_emit      Directional C-Lite + monitors + drivers + Makefile
   ol_sim             cycle-accurate IR interpreter (full-trace stepping)
-  ol_kind2           Kind 2 adapter (timeout, property selection, waveforms)
+  ol_kind2           Kind 2 adapter (v2 JSON, realizability, waveforms)
   ol_stdlib          41-block library loader (logic/math/temporal/safety/
                      observer/bits/avionics/state-machine categories)
   ol_cli             the `openlustre` binary: every command + Studio server
 libraries/           the standard block library (YAML, contract-carrying)
 examples/            ReleaseLogic MVP with committed golden-trace scenarios
+tools/               prove-examples.sh (CI), Kind 2 WSL / Docker wrappers
 apps/studio_ui/      GUI architecture notes (browser SPA ships in the binary)
 ```
 

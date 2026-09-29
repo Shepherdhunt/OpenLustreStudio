@@ -203,7 +203,10 @@ fn find(stem: &str, env: &str) -> Option<Located> {
         return Some(l);
     }
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
-        if let Some(l) = in_dir(&dir.join("tools"), "bundled").or_else(|| in_dir(&dir, "bundled")) {
+        if let Some(l) = in_dir(&dir.join("tools").join("bin"), "bundled")
+            .or_else(|| in_dir(&dir.join("tools"), "bundled"))
+            .or_else(|| in_dir(&dir, "bundled"))
+        {
             return Some(l);
         }
     }
@@ -244,12 +247,20 @@ pub fn guidance(tc: &Toolchain) -> Vec<String> {
         return vec![];
     }
     let mut g = Vec::new();
+    if let (Some(k), None) = (&tc.kind2, &tc.kind2_version) {
+        g.push(format!(
+            "{} (via {}) does not run — fix that path{}.",
+            k.path.display(),
+            k.via,
+            if k.via.starts_with("OPENLUSTRE_") { format!(" or unset {}", k.via) } else { String::new() }
+        ));
+    }
     if install_assets().is_ok() {
         g.push(format!(
             "Run `openlustre kind2 install` (or Install in the Studio's Verify dock) to download Kind 2 {KIND2_VERSION} and Z3 {Z3_VERSION} into {}.",
             tools_dir().display()
         ));
-        if tc.kind2.is_some() && tc.solver.is_none() {
+        if tc.kind2_version.is_some() && tc.solver.is_none() {
             g.push("Or install an SMT solver yourself — Z3 (`apt install z3`, `brew install z3`) or cvc5 — and put it on PATH.".into());
         } else {
             g.push("Or install them yourself from https://github.com/kind2-mc/kind2/releases and put `kind2` and `z3` on PATH (or set OPENLUSTRE_KIND2 / OPENLUSTRE_Z3).".into());

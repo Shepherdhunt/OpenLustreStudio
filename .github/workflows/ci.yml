@@ -1,0 +1,53 @@
+# Continuous integration. `test` runs the whole suite; `prove` installs the
+# pinned Kind 2 + Z3, proves every example for real (the Kind 2 conformance
+# tests refuse to skip there), and keeps the evidence reports as artifacts.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  prove:
+    runs-on: ubuntu-latest
+    env:
+      OPENLUSTRE_TOOLS: ${{ github.workspace }}/.openlustre-tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build -p ol_cli
+
+      - name: Install Kind 2 and Z3
+        run: ./target/debug/openlustre kind2 install
+
+      - name: Check the prover
+        run: ./target/debug/openlustre kind2 doctor
+
+      - name: Kind 2 conformance (clock elimination, C semantics, real proofs)
+        env:
+          OPENLUSTRE_KIND2: ${{ env.OPENLUSTRE_TOOLS }}/bin/kind2
+          OPENLUSTRE_Z3: ${{ env.OPENLUSTRE_TOOLS }}/bin/z3
+          OPENLUSTRE_REQUIRE_KIND2: "1"
+        run: cargo test -p openlustre_integration_tests --test kind2_projection
+
+      - name: Prove the examples and build their evidence
+        run: tools/prove-examples.sh ./target/debug/openlustre evidence
+
+      - name: Keep the evidence reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence
+          path: evidence/

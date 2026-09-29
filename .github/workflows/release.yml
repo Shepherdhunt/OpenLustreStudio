@@ -49,18 +49,29 @@ jobs:
         shell: pwsh
         run: ./packaging/windows/build-installer.ps1 -Version "${{ steps.version.outputs.version }}"
 
-      - name: Package archive (unix)
+      # Linux and macOS archives carry the pinned Kind 2 + Z3 in tools/bin,
+      # where `openlustre` finds them next to itself — proving works out of
+      # the box. (Kind 2 has no Windows build: the Windows zip carries the
+      # WSL / Docker wrappers instead.)
+      - name: Package archive (unix, with Kind 2 + Z3)
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          mkdir -p dist
-          tar -C target/release -czf "dist/${{ matrix.artifact }}.tar.gz" openlustre
+          mkdir -p dist stage
+          cp target/release/openlustre stage/
+          ./target/release/openlustre kind2 install --dir stage/tools
+          cp tools/kind2-docker.sh stage/tools/
+          OPENLUSTRE_TOOLS=/nonexistent ./stage/openlustre kind2 doctor
+          tar -C stage -czf "dist/${{ matrix.artifact }}.tar.gz" openlustre tools/bin tools/kind2-docker.sh
       - name: Package archive (windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path target/release/openlustre.exe `
+          New-Item -ItemType Directory -Force stage/tools | Out-Null
+          Copy-Item target/release/openlustre.exe stage/
+          Copy-Item tools/kind2-wsl.cmd, tools/kind2-docker.sh stage/tools/
+          Compress-Archive -Path stage/* `
             -DestinationPath "dist/${{ matrix.artifact }}.zip"
           Copy-Item packaging/windows/dist/*.exe dist/
 

@@ -93,7 +93,8 @@ enum Cmd {
         node: Option<String>,
         #[arg(long, value_enum, default_value_t = ProveMode::BmcInd)]
         mode: ProveMode,
-        /// Path to the kind2 binary; defaults to `kind2` on PATH.
+        /// Path to the kind2 binary; defaults to the one `openlustre kind2
+        /// doctor` finds (env, tools folder, bundled, PATH).
         #[arg(long, default_value = "kind2")]
         kind2: String,
         /// Directory to keep generated artifacts in.
@@ -1014,16 +1015,29 @@ fn cmd_prove(
         let conflict = if r.conflicting.is_empty() { String::new() } else { format!(" — conflicting: {}", r.conflicting.join(", ")) };
         println!("  realizability of {} ({}): {}{conflict}", r.node, r.context, r.result);
     }
-    if result.properties.is_empty() && !result.realizability.is_empty() {
-        return Ok(());
+    if result.exit_code == -1 && result.properties.is_empty() {
+        anyhow::bail!("Kind 2 did not run: {}", result.stderr.trim());
+    }
+    if !result.errors.is_empty() {
+        anyhow::bail!("Kind 2 could not analyse the model ({} error(s))", result.errors.len());
+    }
+    if !result.realizability.is_empty() {
+        if let Some(r) = result.realizability.iter().find(|r| r.result != "realizable") {
+            anyhow::bail!("the contract of {} is {} ({})", r.node, r.result, r.context);
+        }
+        if result.properties.is_empty() {
+            return Ok(());
+        }
     }
     if result.properties.is_empty() {
         println!("(no parseable property results — raw stdout follows)");
         println!("{}", result.stdout);
+        anyhow::bail!("Kind 2 reported no properties");
     } else {
         let text = std::fs::read_to_string(&lus_path).unwrap_or_default();
         for p in &result.properties {
-            let clause = p.line.and_then(|l| ol_kind2::clause_at(&text, l)).map(|c| format!("   [{c}]")).unwrap_or_default();
+            let (kind, clause) = p.describe(&text);
+            let clause = format!("   [{}]", if clause.is_empty() { kind.to_string() } else { clause });
             println!("  {}: {}{clause}", p.label, p.status);
             if let Some(cex) = &p.counterexample {
                 if waveform {
@@ -1041,6 +1055,14 @@ fn cmd_prove(
                 );
             }
         }
+    }
+    // A gate for scripts and CI: every property must hold.
+    let count = |o| result.properties.iter().filter(|p| p.outcome() == o).count();
+    let (holds, fails, unknown) =
+        (count(ol_kind2::Outcome::Holds), count(ol_kind2::Outcome::Fails), count(ol_kind2::Outcome::Unknown));
+    println!("prove: {holds} of {} hold, {fails} failed, {unknown} unknown", result.properties.len());
+    if fails > 0 || unknown > 0 {
+        anyhow::bail!("not every property holds");
     }
     Ok(())
 }

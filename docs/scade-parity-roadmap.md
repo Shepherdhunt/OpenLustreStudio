@@ -186,9 +186,20 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ### P3 — evidence and tooling
 
-12. **Provision Kind 2 (S–M).** Detect and guide installation (WSL/Docker on
-    Windows), bundle on Linux/macOS releases, add a CI job that proves the
-    examples; expose realizability and mode-coverage in the Verify dock.
+12. ✅ **Provision Kind 2 — done.** `openlustre kind2 doctor` finds Kind 2
+    and a solver (explicit path, env, tools folder, bundled, `PATH`) and
+    proves a sample property; `openlustre kind2 install` fetches the pinned
+    Kind 2 v2.2.0 + Z3 4.13.4 on Linux/macOS; release archives bundle them;
+    Windows gets WSL / Docker wrappers and guidance. CI installs the pair,
+    runs the Kind 2 conformance tests and proves every example. The Verify
+    dock shows the toolchain, proves with clause-level results, and runs
+    realizability and mode coverage. Running the real prover found that the
+    Lustre handed to Kind 2 had never parsed, and that Kind 2 cannot read
+    clocked locals and disagrees with C on `/`, `mod` and `int()`: the
+    prover now reads a dedicated Kind 2 view (contracts in node headers,
+    clock elimination checked against the clocked original, C-faithful
+    integer helpers). It also found a real gap in the example — its mode
+    table was not exhaustive — now fixed.
 13. ✅ **Evidence report — done.** One document per operator — the plan's
     "evidence layer": identification (interface, contract, model files'
     SHA-256, a layout-independent fingerprint of the operator's slice),
@@ -210,14 +221,12 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-Item 13 is done: an operator's checks, contract, proof, tests and coverage,
-model ≡ code, and traceability now come out as one fingerprinted document,
-and CI can gate on its verdict.
+Item 12 is done: proofs run for real — locally in one command, in the
+Studio, and in CI on every example — against a Kind 2 view whose meaning
+matches the simulator and the generated C.
 
-The most valuable next step is item **12** (provisioning Kind 2): the
-evidence report's proof section is "not run" wherever Kind 2 is missing —
-which is most machines, and this one — and the clocked Lustre the
-activations now lower to has not yet been proved in CI. After it, item **7**
-(target integration: cross-compilation, cyclic-task wrappers) is the last P1
-item, and item **9** (drawing states and branches directly on the charts)
-the biggest remaining graphical gap with SCADE.
+Item **7** (target integration: cross-compilation, cyclic-task wrappers) is
+the last P1 item, and item **9** (drawing states and branches directly on the
+charts) the biggest remaining graphical gap with SCADE. A smaller follow-up
+to item 12: prove over machine integers (Kind 2's `int8`…`uint64`) so the
+"no overflow" assumption the proof states becomes something it checks.
