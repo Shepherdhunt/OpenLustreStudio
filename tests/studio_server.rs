@@ -217,4 +217,8 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("function ctFromText"), "CoCoSpec text view missing");
     assert!(html.contains("mi-insert-contract") && html.contains("mi-project-contracts"),
         "contract menu entries missing");
+    // Live simulation: the session client and the canvas overlay.
+    assert!(html.contains("/api/sim/step") && html.contains("function simAdvance"), "sim session client missing");
+    assert!(html.contains("id=\"sim-break\"") && html.contains("id=\"sim-stop-viol\""), "run controls missing");
+    assert!(html.contains("function liveValues"), "live diagram overlay missing");
 }

@@ -240,6 +240,30 @@
   /* Decorative strokes on operator glyphs: the XOR input arc, the memory
      block's state bar. Stroked like the block outline, never filled. */
   svg .glyph-line { fill: none; stroke: #2b579a; stroke-width: 1.1; pointer-events: none; }
+  /* --- Live simulation ------------------------------------------------- */
+  .sim-bar { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: center; margin: 2px 0 4px; }
+  .sim-bar button { margin: 0; }
+  .sim-bar label { color: #3c3c3c; }
+  .sim-cols { display: flex; gap: 16px; align-items: flex-start; }
+  .sim-cols .sim-right { flex: 1 1 auto; min-width: 0; }
+  #sim-note.ok { color: #107c10; } #sim-note.warn { color: #9d5d00; } #sim-note.err { color: #c42b1c; }
+  #sim-monitor { margin: 2px 0 4px; }
+  #sim-monitor .err { color: #c42b1c; font-weight: 600; }
+  .watch-internal td { color: #8a8a8a; font-size: 11px; }
+  #step-trace { max-height: 118px; overflow: auto; }
+  #step-trace table { width: auto; }
+  #step-trace th, #step-trace td { font-family: Consolas, monospace; font-size: 11px; padding: 1px 6px; }
+  #step-trace tr.viol td { background: #fdeeee; }
+  svg text.wire-label.live { fill: #1d6b2f; font-weight: 600; }
+  svg text.live-val { font-size: 11px; font-weight: 700; font-family: Consolas, monospace; }
+  svg text.live-val.t { fill: #107c10; }
+  svg text.live-val.f { fill: #8a8a8a; }
+  svg text.live-val.n { fill: #2b579a; }
+  svg rect.live-line { fill: #fff0a8; pointer-events: none; }
+  svg .box.live-state { fill: #fff0a8; stroke-width: 2.6; }
+  svg .box.live-branch { fill: #fff0a8; stroke-width: 2; }
+  .chip.live { background: #e6f4ea; border-color: #6fb07f; color: #107c10; }
+  .chip.bad { background: #fdeeee; border-color: #d11a1a; color: #c42b1c; }
   /* --- Contract editor ------------------------------------------------- */
   .ct-tabs { display: flex; gap: 2px; border-bottom: 1px solid #c5c5c5; margin: 8px 0 6px; }
   .ct-tabs span { padding: 3px 12px; cursor: pointer; border: 1px solid transparent;
@@ -439,6 +463,7 @@
   <div style="display:flex; align-items:center; gap:10px; margin:2px 0 6px">
     <strong id="diagram-node-name">…</strong>
     <span id="diagram-contract"></span>
+    <span id="diagram-sim"></span>
     <div id="diagram-crumbs"></div>
   </div>
   <div id="diagram-problems"></div>
@@ -472,17 +497,29 @@
   <div class="dock-body">
     <div class="dock-pane" id="dock-messages"><div id="diagnostics"></div></div>
     <div class="dock-pane" id="dock-simulation" style="display:none">
-      <p style="margin:4px 0">Stepping <strong id="step-entry-name">main</strong> — type input values (they stay until you change them), then <code class="inline">Simulation &gt; Step</code>. Outputs and locals are computed each cycle.</p>
-      <table id="sim-watch" class="watch-table">
-        <thead><tr><th>name : type</th><th>value</th></tr></thead>
-        <tbody id="sim-watch-body"></tbody>
-      </table>
-      <div style="margin-top:6px">
-        <button class="primary" onclick="simStep()">Step</button>
-        <button onclick="simStop()">Stop / Reset</button>
-        <span class="build-note">cycle <span id="step-cycle">0</span></span>
+      <div class="sim-bar">
+        <strong id="step-entry-name">—</strong>
+        <span class="build-note">cycle <strong id="step-cycle">0</strong></span>
+        <button class="primary" onclick="simStep()" title="Run one cycle with the inputs below">Step</button>
+        <label>run <input id="sim-count" type="number" value="10" min="1" max="10000" style="width:64px"> cycles</label>
+        <button onclick="simRunN()" title="Run that many cycles, stopping early at the breakpoint or a violation">Run</button>
+        <label>break when <input id="sim-break" placeholder="e.g. cmd > 100" style="width:170px" spellcheck="false"></label>
+        <label><input type="checkbox" id="sim-stop-viol" checked> stop on contract violation</label>
+        <button onclick="simRestart()" title="Back to cycle 0 (inputs are kept)">Reset</button>
+        <button onclick="simStop()">Stop</button>
+        <label><input type="checkbox" id="sim-live" checked onchange="renderDiagram()"> live values on the diagram</label>
       </div>
-      <details style="margin-top:6px"><summary class="build-note">trace history</summary><div id="step-trace"></div></details>
+      <div id="sim-note" class="build-note">Build an operator, then Simulate (Build dock ▸ 2, or Simulation ▸ Run). Inputs hold their values until you change them.</div>
+      <div class="sim-cols">
+        <table id="sim-watch" class="watch-table">
+          <thead><tr><th>name : type</th><th>value</th></tr></thead>
+          <tbody id="sim-watch-body"></tbody>
+        </table>
+        <div class="sim-right">
+          <div id="sim-monitor"></div>
+          <div id="step-trace"></div>
+        </div>
+      </div>
     </div>
     <div class="dock-pane" id="dock-tests" style="display:none">
       <div>
@@ -849,7 +886,7 @@
 "use strict";
 
 const state = {
-  inspect: null, selectedNode: null, stepHistory: "",
+  inspect: null, selectedNode: null,
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
   // Canvas view: zoom factor (viewBox scaling), plus the transient middle-drag
@@ -858,7 +895,10 @@ const state = {
   // The diagram clipboard: a copied selection (equations + variable boxes),
   // pasteable into any operator's canvas.
   clipboard: null,
-  sim: { built: false, running: false, values: {} },
+  // The live simulation: `session` is the server session ({root, signals,
+  // monitored, cycle}), `last` the latest cycle ({cycle, values, modes,
+  // violations}), `values` the sticky input texts of the watch table.
+  sim: { built: false, running: false, values: {}, session: null, last: null, violatedCycles: 0 },
   // The SCADE-style pipeline: Build (validity + .lus) gates Simulate and
   // Generate; Generate gates Compile&Run. Edits invalidate the build.
   pipeline: { built: false, generated: false, lustre: "", sig: "" },
@@ -1454,9 +1494,10 @@ async function refresh() {
     document.getElementById("pipe-sim-status").textContent = "build the model first";
     document.getElementById("pipe-gen-status").textContent = "build the model first";
   }
-  // Don't rebuild the watch table mid-run (the 5 s inspect poll calls
-  // refresh) — it would wipe the live computed values. simRun builds it.
-  if (!state.sim.running) buildWatchTable();
+  // Don't rebuild the watch table mid-session (the 5 s inspect poll calls
+  // refresh) — it would wipe the live values. simStart builds it from the
+  // session's signals.
+  if (!state.sim.session) buildWatchTable();
   populateEditSelectors();
   loadTypes();
   refreshSideText();
@@ -1591,37 +1632,34 @@ function simRun() {
     setSimStatus("build first (Simulation > Build)");
     return;
   }
-  state.sim.running = true;
-  state.stepHistory = "";
-  document.getElementById("step-trace").innerHTML = "";
-  document.getElementById("step-cycle").textContent = "0";
-  buildWatchTable();
-  setMenuEnabled("mi-sim-step", true);
-  setMenuEnabled("mi-sim-stop", true);
-  setSimStatus("SIMULATION RUNNING — cycle 0");
-  showDock("simulation");
+  simStart();
 }
 
-function simStep() {
-  if (!state.sim.running) {
-    setSimStatus("not running (Simulation > Run)");
-    return;
-  }
-  stepOnce().then(() => {
-    setSimStatus("SIMULATION RUNNING — cycle " + document.getElementById("step-cycle").textContent);
-  });
+// Step = one cycle; Run = N cycles (breakpoint / violation stop early).
+function simStep() { simAdvance(1, false); }
+
+function simRunN() {
+  const n = Math.max(1, Math.min(10000, parseInt(document.getElementById("sim-count").value, 10) || 1));
+  simAdvance(n, true);
 }
 
-function simStop() {
+function simRestart() { simStart(); }
+
+async function simStop() {
+  try { await fetch("/api/sim/stop", { method: "POST", body: "{}" }); } catch (_) {}
   state.sim.running = false;
-  state.stepHistory = "";
-  document.getElementById("step-trace").innerHTML = "";
+  state.sim.session = null;
+  state.sim.last = null;
   document.getElementById("step-cycle").textContent = "0";
+  document.getElementById("sim-monitor").innerHTML = "";
   // Reset the computed cells; keep the sticky input values for the next run.
   document.querySelectorAll(".watch-computed").forEach(c => c.textContent = "—");
   setMenuEnabled("mi-sim-step", false);
   setMenuEnabled("mi-sim-stop", false);
   setSimStatus("");
+  setSimNote("", "simulation stopped");
+  renderSimChip();
+  if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
 }
 
 async function runSim(full) {
@@ -1886,6 +1924,7 @@ async function loadDiagram(nodeName, push) {
   document.getElementById("diagram-node-name").textContent = d.node + " (" + d.kind + ")";
   renderContractChip(d.node);
   state.diagramData = d;
+  renderSimChip();
   // The model file's grid wins — the diagram opens with the grid it was drawn on.
   if (d.grid) document.getElementById("grid-size").value = String(d.grid);
   document.getElementById("status-grid").textContent = "grid: " + gridPitch() + " px";
@@ -2250,8 +2289,13 @@ function shapeSvg(it, p, cls) {
         '<text class="construct-name" x="' + (x + 27) + '" y="' + (y + 13) + '">' + escapeHTML(it.label) + "</text>";
       lines.forEach((ln, k) => {
         const t = ln.length > maxChars ? ln.slice(0, maxChars - 1) + "…" : ln;
-        s += '<text class="construct-line" x="' + (x + 9) + '" y="' + (y + 32 + k * 12) + '">' +
-          escapeHTML(t) + "</text>";
+        // While simulating, the active state / selected branch is marked.
+        if (it.liveLine === k) {
+          s += '<rect class="live-line" x="' + (x + 3) + '" y="' + (y + 22 + k * 12) + '" width="' + (w - 6) +
+            '" height="13" rx="2"/>';
+        }
+        s += '<text class="construct-line" x="' + (x + 9) + '" y="' + (y + 32 + k * 12) + '"' +
+          (it.liveLine === k ? ' font-weight="700"' : "") + ">" + escapeHTML(t) + "</text>";
       });
       return s;
     }
@@ -2286,9 +2330,11 @@ function renderDiagram() {
   const pos = state.diagPos;
   const pinGhosts = operandGhostSet(d);
   const collapsed = collapsedLocals(d);
+  // The latest simulated cycle, when this is the simulated operator.
+  const live = liveValues();
   const items = [];
   d.inputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "in" }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "in", liveVar: p.name }));
   (d.ghosts || []).forEach(g => {
     if (pinGhosts.has(g.name)) return; // shown as a red pin on its gate
     items.push({ id: g.name, label: g.name + " : ?", cls: "box ghost", reason: g.reason, h0: DIAG.BOXH });
@@ -2311,6 +2357,7 @@ function renderDiagram() {
   }));
   (d.constructs || []).forEach(c => items.push({
     id: c.id, label: c.name, shape: c.kind, detail: c.detail, construct: c.kind,
+    liveLine: liveConstructLine(c, live),
     cls: "box construct" + (c.invalid ? " invalid" : ""),
     reason: (c.invalid ? c.reason + " — " : "") +
       (c.kind === "sm" ? "state machine " : "activation ") + c.name +
@@ -2318,11 +2365,11 @@ function renderDiagram() {
     inputs: c.inputs || [], h0: constructHeight(c),
   }));
   d.outputs.forEach(p => items.push({ id: p.name, label: p.name + " : " + typeName(p.type),
-    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "out" }));
+    cls: boxCls("box", p), reason: p.reason, h0: DIAG.BOXH, shape: "out", liveVar: p.name }));
   d.locals.forEach(l => {
     if (collapsed.has(l.name)) return; // lives on its gate, not its own box
     items.push({ id: l.name, label: l.name + " : " + typeName(l.type) + " (local)",
-      cls: boxCls("box", l), reason: l.reason, h0: DIAG.BOXH });
+      cls: boxCls("box", l), reason: l.reason, h0: DIAG.BOXH, liveVar: l.name });
   });
 
   // Text-wrap auto-grow: a wrapped box with no user-set height grows to fit its
@@ -2392,18 +2439,21 @@ function renderDiagram() {
     const cls = w.invalid ? "wire invalid" : "wire";
     svg += '<path class="' + cls + '" d="' + wirePathD(x1, y1, x2, y2, entry) + '">' +
       (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
-    if (showLabels) {
+    if (showLabels || live) {
       // The SCADE wire annotation: the carried variable and its type, seated
       // just past the source pin (so parallel wires keep their labels apart —
       // two wires from one source carrying the same variable overprint the
       // same text harmlessly). A block driving several variables labels each
-      // wire at its destination end instead.
+      // wire at its destination end instead. While simulating, the label is
+      // the variable's current value.
       const fromBlock = /^eq\d+$/.test(w.from) || isConstructId(w.from);
       const v = fromBlock ? w.to : w.from;
       const t = typeOf[v] || "?";
       const atDest = fromBlock && fanOut[fromId] && fanOut[fromId].size > 1;
-      svg += '<text class="wire-label" x="' + (atDest ? x2 - 8 : x1 + 8) + '" y="' + ((atDest ? y2 : y1) - 5) + '"' +
-        (atDest ? ' text-anchor="end"' : "") + '>' + escapeHTML(v + ": " + t) + '</text>';
+      const text = live ? v + " = " + (live[v] != null ? live[v] : "?") : v + ": " + t;
+      svg += '<text class="wire-label' + (live ? " live" : "") + '" x="' + (atDest ? x2 - 8 : x1 + 8) +
+        '" y="' + ((atDest ? y2 : y1) - 5) + '"' + (atDest ? ' text-anchor="end"' : "") + '>' +
+        escapeHTML(text) + (live ? "<title>" + escapeHTML(v + ": " + t) + "</title>" : "") + '</text>';
     }
   }
   for (const it of items) {
@@ -2433,6 +2483,15 @@ function renderDiagram() {
     }
     if (divable) {
       svg += '<text class="label" x="' + (p.x + p.w - 12) + '" y="' + (p.y + 10) + '">▸</text>';
+    }
+    // Live value of an input / output / local, right-aligned inside its box
+    // (clear of the pennant point / pins): green true, grey false.
+    if (live && it.liveVar && live[it.liveVar] != null) {
+      const val = live[it.liveVar];
+      const tone = val === "true" ? "t" : val === "false" ? "f" : "n";
+      const inset = it.shape === "in" ? 16 : 12;
+      svg += '<text class="live-val ' + tone + '" x="' + (p.x + p.w - inset) + '" y="' + (p.y + h / 2 + 4) +
+        '" text-anchor="end">' + escapeHTML(val.length > 14 ? val.slice(0, 13) + "…" : val) + "</text>";
     }
     // Bottom-right resize grip (skipped on transient ghost boxes).
     if (it.cls.indexOf("ghost") < 0) {
@@ -4234,11 +4293,16 @@ function fsmDraw() {
     svg += '<path class="wire" marker-end="url(#arr)" d="M ' + (ip.x - 62) + ' ' + (ip.y - 62) +
            ' L ' + (ip.x - 25) + ' ' + (ip.y - 25) + '"/>';
   }
+  // While its operator is simulated, the current state is lit.
+  const sim = state.sim;
+  const liveState = sim.session && sim.last && m.owner === sim.session.root
+    ? sim.last.values["__sm_state"] : null;
   for (const st of m.states) {
     const p = pos[st.name];
     const initial = st.name === m.initial_state;
     svg += '<g class="fsm-state" data-state="' + escapeAttr(st.name) + '" style="cursor:move">';
-    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="' + FSM_R + '" class="box"' +
+    svg += '<circle cx="' + p.x + '" cy="' + p.y + '" r="' + FSM_R + '" class="box' +
+      (st.name === liveState ? " live-state" : "") + '"' +
       (initial ? ' stroke="#107c10" stroke-width="2.4"' : '') + '/>';
     svg += '<text x="' + p.x + '" y="' + (p.y + 4) + '" text-anchor="middle">' + escapeHTML(st.name) + '</text>';
     const eqs = st.equations.map(e => e.lhs + " = " + e.body).join("; ");
@@ -4660,6 +4724,14 @@ function renderActTree(a) {
   svg += '<svg width="' + W + '" height="' + H + '" xmlns="http://www.w3.org/2000/svg">' +
     '<defs><marker id="act-arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">' +
     '<path d="M0,0 L7,3 L0,6 z" fill="#4a4a4a"/></marker></defs>';
+  // While its operator is simulated, the selected branch is lit (the else
+  // row when none of the conditions held).
+  const sim = state.sim;
+  let liveRow = null;
+  if (sim.session && sim.last && (a.owner || a.operator) === sim.session.root) {
+    const flags = (a.branches || []).map((_, i) => sim.last.values["__act_" + a.name + "_b" + (i + 1)]);
+    if (!flags.some(f => f === undefined)) liveRow = flags.indexOf("true") >= 0 ? flags.indexOf("true") : flags.length;
+  }
   layout.forEach((L, i) => {
     const { r, cy, bh } = L;
     const next = layout[i + 1];
@@ -4689,7 +4761,8 @@ function renderActTree(a) {
     // The branch scope: its name, then the equations it applies.
     const by = cy - bh / 2;
     const label = r.kind === "else" ? "else" : (r.b.name || "branch " + (i + 1));
-    svg += '<rect class="box eq" x="' + BX + '" y="' + by + '" width="' + BW + '" height="' + bh + '" rx="3"/>' +
+    svg += '<rect class="box eq' + (liveRow === i ? " live-branch" : "") + '" x="' + BX + '" y="' + by +
+      '" width="' + BW + '" height="' + bh + '" rx="3"/>' +
       '<text class="construct-name" x="' + (BX + 8) + '" y="' + (by + 15) + '">' + escapeHTML(label) + "</text>";
     (r.b.equations.length ? r.b.equations : [{ lhs: "—", body: "(assigns nothing)" }]).forEach((e, k) => {
       svg += '<text class="construct-line" x="' + (BX + 10) + '" y="' + (by + 30 + k * 14) + '">' +
@@ -5330,6 +5403,15 @@ function renderContractChip(nodeName) {
   chip.className = "chip";
   chip.textContent = n.contract ? "contract: " + n.contract : "＋ contract";
   chip.title = n.contract ? "Edit the contract (assume / guarantee / modes)" : "Add a contract to " + nodeName;
+  // While this operator is simulated, the chip carries the monitor's verdict
+  // for the latest cycle: the active mode(s), and any violated clause.
+  const s = state.sim;
+  if (n.contract && s.session && s.session.root === nodeName && s.session.monitored && s.last) {
+    const viol = s.last.violations;
+    chip.textContent += " · " + (s.last.modes.length ? "mode " + s.last.modes.join(", ") : "no mode") +
+      (viol.length ? " · ✖ " + viol.join(", ") : " · ✓");
+    chip.classList.add(viol.length ? "bad" : "live");
+  }
   chip.onclick = () => openContractEditor(n.contract || null, nodeName);
   host.appendChild(chip);
 }
@@ -5548,54 +5630,247 @@ function buildWatchTable() {
   e.outputs.forEach(p => row(p.name, p.type, " (out)", false));
 }
 
-/// Fill the computed cells (locals, outputs) from the latest trace row.
-function updateWatchComputed(csv) {
-  const lines = csv.trim().split("\n");
-  if (lines.length < 2) return;
-  const hdr = lines[0].split(",");
-  const last = lines[lines.length - 1].split(",");
-  hdr.forEach((h, i) => {
-    const cell = document.getElementById("watch-out-" + h);
-    if (cell) cell.textContent = last[i];
-  });
+// --- Live simulation session -------------------------------------------------
+//
+// One simulator lives on the server for the whole session: Step runs one
+// cycle, Run runs N (stopping early at the breakpoint or a contract
+// violation), and each cycle's values come back once — nothing is replayed.
+// The latest cycle is drawn onto the diagram while the simulated operator is
+// open: values on the wires and ports, the active state / branch on
+// state-machine and activation blocks, the contract's mode and verdict.
+
+const SIM_TRACE_ROWS = 500; // trace rows kept on screen (the newest)
+
+/// The watch-table validation kind for a type as the server spells it.
+function kindOfTypeStr(t) {
+  return {
+    bool: "Bool", int8: "Int8", int16: "Int16", int32: "Int32", int64: "Int64",
+    uint8: "Uint8", uint16: "Uint16", uint32: "Uint32", uint64: "Uint64",
+    float32: "Float32", float64: "Float64",
+  }[t] || "Other";
 }
 
-async function stepOnce() {
-  const e = entryNode();
-  if (!e) return;
-  // Build the input row from the sticky values, validating each first.
-  const cells = [];
-  for (const p of e.inputs) {
-    const v = validateValue(typeKind(p.type), state.sim.values[p.name]);
-    if (!v.ok) {
-      setSimStatus("invalid value for " + p.name + ": " + v.msg);
-      showDock("simulation");
-      return;
+function simSignals() { return state.sim.session ? state.sim.session.signals : []; }
+
+function setSimNote(kind, msg) {
+  const el = document.getElementById("sim-note");
+  el.className = "build-note " + (kind || "");
+  el.textContent = msg || "";
+}
+
+/// name → value text for the latest cycle, when the diagram shows the
+/// simulated operator and live values are on; otherwise null.
+function liveValues() {
+  const s = state.sim;
+  if (!s.session || !s.last || !state.diagramData || state.diagramData.node !== s.session.root) return null;
+  const on = document.getElementById("sim-live");
+  return on && !on.checked ? null : s.last.values;
+}
+
+/// Start (or restart at cycle 0) a session on the build target / root.
+async function simStart() {
+  const node = state.buildTarget || state.inspect?.project?.main;
+  showDock("simulation");
+  let r, d;
+  try {
+    r = await fetch("/api/sim/start", { method: "POST", body: JSON.stringify(node ? { node } : {}) });
+    d = await r.json();
+  } catch (e) { setSimNote("err", "could not start the simulation"); return false; }
+  if (!r.ok) {
+    setSimNote("err", d.error || "could not start the simulation");
+    setSimStatus("simulation not started");
+    return false;
+  }
+  Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0 });
+  simBuildWatchTable();
+  simBuildTraceHeader();
+  document.getElementById("step-cycle").textContent = "0";
+  document.getElementById("sim-monitor").innerHTML = d.monitored
+    ? '<span class="build-note">contract monitor on — its mode and verdict appear after the first cycle</span>' : "";
+  setMenuEnabled("mi-sim-step", true);
+  setMenuEnabled("mi-sim-stop", true);
+  setSimStatus("SIMULATING " + d.root + " — cycle 0");
+  setSimNote("ok", "session on " + d.root + " at cycle 0 — set the inputs, then Step or Run");
+  renderSimChip();
+  if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
+  return true;
+}
+
+/// Run `count` cycles with the held inputs (the breakpoint applies to Run).
+async function simAdvance(count, withBreak) {
+  if (!state.sim.session && !(await simStart())) return;
+  const inputs = {};
+  for (const s of simSignals().filter(s => s.kind === "input")) {
+    const v = validateValue(kindOfTypeStr(s.type), state.sim.values[s.name]);
+    if (!v.ok) { setSimNote("err", "input " + s.name + ": " + v.msg); return; }
+    inputs[s.name] = v.norm;
+  }
+  const req = { inputs, count, stop_on_violation: document.getElementById("sim-stop-viol").checked };
+  const brk = document.getElementById("sim-break").value.trim();
+  if (withBreak && brk) req.break = brk;
+  let r, d;
+  try {
+    r = await fetch("/api/sim/step", { method: "POST", body: JSON.stringify(req) });
+    d = await r.json();
+  } catch (e) { setSimNote("err", "the step request failed"); return; }
+  if (r.status === 409) {
+    const why = d.stale ? "the model changed, so the simulation restarted at cycle 0"
+      : "the session had ended, so it restarted at cycle 0";
+    if (await simStart()) setSimNote("warn", why + " — press Step / Run again");
+    return;
+  }
+  if (!r.ok) { setSimNote("err", d.error || "the step failed"); return; }
+  simTake(d, req);
+}
+
+/// Fold a step / run response into the session view.
+function simTake(d, req) {
+  const sigs = simSignals();
+  const rows = d.rows || [];
+  rows.slice(-SIM_TRACE_ROWS).forEach(simAppendTraceRow);
+  state.sim.violatedCycles += rows.filter(r => r.violations.length).length;
+  if (rows.length) {
+    const last = rows[rows.length - 1];
+    const values = {};
+    sigs.forEach((s, i) => values[s.name] = last.values[i]);
+    state.sim.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [] };
+  }
+  state.sim.session.cycle = d.cycle;
+  document.getElementById("step-cycle").textContent = d.cycle;
+  simUpdateWatch();
+  simUpdateMonitor();
+  const last = state.sim.last;
+  if (d.stopped === "break") setSimNote("warn", "⏸ stopped after cycle " + last.cycle + ": " + req.break + " holds");
+  else if (d.stopped === "violation") setSimNote("err", "⏸ stopped after cycle " + last.cycle + ": violated " + last.violations.join(", "));
+  else if (d.stopped === "error") setSimNote("err", d.error || "evaluation error");
+  else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
+  setSimStatus("SIMULATING " + state.sim.session.root + " — cycle " + d.cycle);
+  renderSimChip();
+  if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
+  // An open state chart / decision tree of the simulated operator follows too.
+  if (document.getElementById("dlg-fsm").classList.contains("active") && fsmChart) fsmDraw();
+  if (document.getElementById("dlg-act").classList.contains("active")) actPreview();
+}
+
+/// The watch table for a session: every signal the session reports, inputs
+/// editable (sticky), the rest computed. Generated state-machine / activation
+/// internals are listed last, dimmed — they show which state / branch is live.
+function simBuildWatchTable() {
+  const body = document.getElementById("sim-watch-body");
+  body.innerHTML = "";
+  document.getElementById("step-entry-name").textContent = state.sim.session.root;
+  const sigs = simSignals();
+  const ordered = sigs.filter(s => !s.name.startsWith("__")).concat(sigs.filter(s => s.name.startsWith("__")));
+  for (const s of ordered) {
+    const tr = document.createElement("tr");
+    if (s.name.startsWith("__")) {
+      tr.className = "watch-internal";
+      tr.title = "generated by a state machine / activation";
     }
-    cells.push(v.norm);
+    const c1 = document.createElement("td");
+    c1.textContent = s.name + " : " + s.type + (s.kind === "local" ? " (local)" : s.kind === "output" ? " (out)" : "");
+    tr.appendChild(c1);
+    const c2 = document.createElement("td");
+    if (s.kind === "input") {
+      const tk = kindOfTypeStr(s.type);
+      const inp = document.createElement("input");
+      inp.className = "watch-val";
+      inp.dataset.port = s.name; inp.dataset.tk = tk;
+      inp.value = state.sim.values[s.name] != null ? state.sim.values[s.name] : defaultForKind(tk);
+      state.sim.values[s.name] = inp.value;
+      inp.addEventListener("input", () => onWatchInput(inp));
+      // Enter in an input steps — the fastest way to drive a model by hand.
+      inp.addEventListener("keydown", ev => { if (ev.key === "Enter") { ev.preventDefault(); simStep(); } });
+      onWatchInput(inp);
+      c2.appendChild(inp);
+    } else {
+      c2.id = "watch-out-" + s.name;
+      c2.className = "watch-computed";
+      c2.textContent = "—";
+    }
+    tr.appendChild(c2);
+    body.appendChild(tr);
   }
-  if (!state.stepHistory) {
-    state.stepHistory = e.inputs.map(p => p.name).join(",") + "\n";
-  }
-  state.stepHistory += cells.join(",") + "\n";
-  const r = await fetch("/api/simulate?full=1", { method: "POST", body: state.stepHistory });
-  const trace = await r.text();
-  updateWatchComputed(trace);
-  renderStepTrace(trace);
 }
 
-function renderStepTrace(csv) {
-  const lines = csv.trim().split("\n");
-  if (!lines.length) return;
-  const hdr = lines[0].split(",");
-  const rows = lines.slice(1).map(l => l.split(","));
-  document.getElementById("step-cycle").textContent = rows.length;
-  let html = "<table><thead><tr>" + hdr.map(h => "<th>" + h + "</th>").join("") + "</tr></thead><tbody>";
-  for (const r of rows) {
-    html += "<tr>" + r.map(c => "<td>" + escapeHTML(c) + "</td>").join("") + "</tr>";
+function simUpdateWatch() {
+  const v = state.sim.last ? state.sim.last.values : {};
+  for (const s of simSignals()) {
+    const c = document.getElementById("watch-out-" + s.name);
+    if (c) c.textContent = v[s.name] != null ? v[s.name] : "—";
   }
-  html += "</tbody></table>";
-  document.getElementById("step-trace").innerHTML = html;
+}
+
+/// The contract monitor's reading of the latest cycle.
+function simUpdateMonitor() {
+  const s = state.sim;
+  if (!s.session.monitored || !s.last) return;
+  const v = s.last.violations;
+  document.getElementById("sim-monitor").innerHTML = "<b>contract</b> — mode: " +
+    escapeHTML(s.last.modes.join(", ") || "none") + " · this cycle: " +
+    (v.length ? '<span class="err">✖ violated ' + escapeHTML(v.join(", ")) + "</span>" : "✓ holds") +
+    ' · <span class="build-note">cycles with a violation so far: ' + s.violatedCycles + "</span>";
+}
+
+function simBuildTraceHeader() {
+  const sigs = simSignals();
+  document.getElementById("step-trace").innerHTML = "<table><thead><tr><th>cycle</th>" +
+    sigs.map(s => "<th>" + escapeHTML(s.name) + "</th>").join("") +
+    (state.sim.session.monitored ? "<th>mode</th><th>violations</th>" : "") +
+    '</tr></thead><tbody id="sim-trace-body"></tbody></table>';
+}
+
+function simAppendTraceRow(row) {
+  const tb = document.getElementById("sim-trace-body");
+  if (!tb) return;
+  const tr = document.createElement("tr");
+  if (row.violations && row.violations.length) tr.className = "viol";
+  let h = "<td>" + row.cycle + "</td>" + row.values.map(v => "<td>" + escapeHTML(v) + "</td>").join("");
+  if (state.sim.session.monitored) {
+    h += "<td>" + escapeHTML(row.modes.join("|") || "—") + "</td><td>" +
+      escapeHTML(row.violations.join("|") || "—") + "</td>";
+  }
+  tr.innerHTML = h;
+  tb.appendChild(tr);
+  while (tb.children.length > SIM_TRACE_ROWS) tb.removeChild(tb.firstChild);
+  const box = document.getElementById("step-trace");
+  box.scrollTop = box.scrollHeight;
+}
+
+/// The chip beside the diagram's operator name while a session runs: the
+/// cycle when this is the simulated operator, else a link to it.
+function renderSimChip() {
+  const host = document.getElementById("diagram-sim");
+  host.innerHTML = "";
+  const s = state.sim.session;
+  if (!s || !state.diagramData) return;
+  const chip = document.createElement("span");
+  chip.className = "chip live";
+  if (state.diagramData.node === s.root) {
+    chip.textContent = "▶ simulating — cycle " + s.cycle;
+    chip.title = "Simulation dock ▸ Step / Run";
+    chip.onclick = () => showDock("simulation");
+  } else {
+    chip.textContent = "▶ simulating " + s.root + " — open it to see live values";
+    chip.onclick = () => loadDiagram(s.root, true);
+  }
+  host.appendChild(chip);
+}
+
+/// The live state of an owned construct block: the index of its active line
+/// (a state machine's current top-level state, an activation's selected
+/// branch — `else` when none fired), or null.
+function liveConstructLine(c, live) {
+  if (!live) return null;
+  if (c.kind === "sm") {
+    const cur = live["__sm_state"];
+    const i = (c.detail || []).findIndex(l => l.replace(/^▸ /, "") === cur);
+    return i >= 0 ? i : null;
+  }
+  const flags = (c.detail || []).slice(0, -1).map((_, i) => live["__act_" + c.name + "_b" + (i + 1)]);
+  if (flags.some(f => f === undefined)) return null;
+  const i = flags.indexOf("true");
+  return i >= 0 ? i : (c.detail || []).length - 1;
 }
 
 function escapeHTML(s) {
