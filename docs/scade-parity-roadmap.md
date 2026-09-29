@@ -71,18 +71,18 @@ were silent):
   200 + 100 stayed 300; the C stores 44) — it now converts on store exactly
   as C does; and it rejected enum-typed inputs outright — they now parse by
   variant name.
+- Also found by it: `float32` was simulated in double precision, and a real
+  literal with an integral value (`0.0`) was emitted as a C *int* literal,
+  which silently kept neighbouring arithmetic in `float`. The simulator now
+  computes `float32` in single precision with C's promotion rules, real
+  literals are always C double literals, and both sides print reals with
+  one shortest round-trip algorithm (item 6b).
 
 **Known semantic gap (documented):** activations are stage 1 — branches are
 *selected*, not *clocked*. `pre` inside a branch reads the previous cycle
 (like SCADE `last`), not the branch's previous activation. Models that rely
 on frozen inactive branches will behave differently than in SCADE.
 
-**Known fidelity gap (found by C in the loop):** the simulator carries
-`float32` values in double precision, while the generated C computes in
-`float`. An integrator (`pos = (0.0 -> pre pos) + v * 0.01` with `v = 1.3`)
-drifts past the comparison's six significant digits after ~950 cycles
-(model 12.376, C 12.3758). The batch harness compares traces as text, so it
-would also flag float values whose `%g` and Rust spellings differ.
 
 ## Recommendations
 
@@ -141,16 +141,24 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
    the simulated operator (reusing the build while the model is unchanged)
    and runs its CSV driver as a child process, fed the same inputs each
    cycle. Outputs and contract-monitor columns are compared every cycle
-   (enums by name, floats within `%g` precision); the waveform draws the C
+   (enums by name, reals exactly — see 6b); the waveform draws the C
    as each lane's reference, the watch table gains a C column, the diagram
    shows "≠ C value" under a disagreeing output, and a Run stops at the
    first divergence. Attaching mid-session replays the history first. It
    found two simulator bugs on its first runs (above) and one open gap
    (`float32`, above).
-6b. **Float32 fidelity (S–M).** Round `float32` values to single precision
-   on store in the simulator (as it now does for sized integers), print them
-   by their `f32` spelling, and compare float columns numerically in the
-   batch harness as the Studio's lockstep comparison already does.
+6b. ✅ **Float32 fidelity — done.** The simulator has a single-precision
+   real: `float op float` computes in `float`; a `float64` operand or a real
+   literal promotes to `double` (C's usual arithmetic conversions); `if` /
+   `->` / `merge` take their branches' common type like `?:`; storing,
+   passing arguments, reading inputs and evaluating constants convert to
+   the declared type. The C emitter writes real literals as C double
+   literals (`0.0` used to come out as the int `0`), the CSV driver reads
+   `float32` inputs with `strtof`, and both sides print reals with one
+   shortest round-trip positional algorithm — so traces stay byte-identical
+   and C in the loop compares reals exactly. The integrator that drifted
+   now runs 10 000 cycles in lockstep; a filter / all-float / float64 /
+   cast / call mix matches over 3000 cycles (`tests/float_fidelity.rs`).
 7. **Target integration (M).** Cross-compilation toolchains (the Compile
    dialog's disabled option), cyclic-task wrapper templates (bare-metal loop,
    RTOS task), configurable symbol prefixes.
@@ -185,12 +193,12 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-The P0 items are done, and so is item 6: the compiled C now runs in
-lockstep with the simulator in the Simulation dock, so model-vs-code
-divergence shows on the cycle it happens rather than only in batch tests.
+The P0 items and items 6 / 6b are done: the compiled C runs in lockstep with
+the simulator, and every difference it found between model and code —
+integer wrap, enum inputs, `float32` precision, an int-typed real literal —
+is fixed, with the simulator now following C's arithmetic exactly.
 
-Next is item **6b** (float32 fidelity): it is small, and it closes the one
-model-vs-code gap C in the loop surfaced that is still open — which matters
-directly for the project's claim that the generated C is equivalent to the
-simulated model. After it, item **4** (clocked activation) closes the known
-semantic gap with SCADE's activate-if.
+Next is item **4** (clocked activation): the one remaining known semantic
+gap with SCADE. Inactive activation branches should freeze their state, and
+the lockstep and byte-identical trace checks are now strong enough to gate
+that change cycle by cycle.

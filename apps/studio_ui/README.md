@@ -96,7 +96,8 @@ answer is `{attached, reused_build, columns, rows: [{cycle, c, c_diff}],
 diverged_at}` — the session's history replayed through the C. From then on
 each step row carries `c` (the C's outputs and `active_mode` /
 `violations`, enums by name) and `c_diff` (the columns that disagree:
-floats within the driver's `%g` precision, everything else as text), and
+reals compared as numbers — both sides print them with the same shortest
+round-trip algorithm, so equal means identical — everything else as text), and
 `"stop_on_divergence": true` ends a run on the first disagreeing cycle. A C
 program that exits, hangs (5 s) or prints something unexpected is detached
 and reported in `c_error`. `{"on": false}` detaches it.

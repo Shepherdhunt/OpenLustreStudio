@@ -101,12 +101,22 @@ compared as they come. The compiled C's values are drawn as the waveform's
 reference lanes, the watch table gets a C column, a disagreeing output shows
 "≠ C value" on the diagram, and a Run stops at the first cycle where model
 and code part. Attaching mid-run replays the session so far through the C
-first. On its first runs it caught two simulator bugs, both since fixed
-(sized integers didn't wrap on assignment; enum inputs were rejected). It
-also caught a gap that is still open: `float32` is simulated in double
-precision, so a long-running integrator drifts from the C.
+first. On its first runs it caught three real model-vs-code differences,
+all since fixed: sized integers didn't wrap on assignment, enum inputs were
+rejected, and `float32` was simulated in double precision (a long-running
+integrator drifted from the C after ~950 cycles).
 
-![C in the loop in OpenLustre Studio — a float32 integrator stopped at cycle 951, where the compiled C (12.3758) first departs from the model (12.376): the chip reads "C ≠ from cycle 951", the watch table's C column is red, the diagram shows "≠ C 12.3758" under the output, and the waveform marks the divergence.](docs/screenshots/09-c-in-the-loop.png)
+**Reals behave as in the generated C.** `float32` computes in single
+precision (`float op float` stays `float`), a `float64` operand or a real
+literal (always emitted as a C double literal) promotes to `double`, a
+conditional takes its branches' common type as C's `?:` does, and storing,
+passing an argument or reading an input converts to the declared type.
+Model and C traces print reals with the same shortest round-trip algorithm,
+so they match byte for byte — the integrator above now runs 10 000 cycles
+in lockstep and reads 130.004 on both sides (single-precision drift,
+modelled rather than hidden).
+
+![C in the loop in OpenLustre Studio — a float32 integrator after 10 000 cycles with the compiled C in lockstep: the chip reads "C ✓ in lockstep", the watch table's C column matches the model (pos = 130.004), and the waveform shows no differing cycles.](docs/screenshots/09-c-in-the-loop.png)
 
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).
