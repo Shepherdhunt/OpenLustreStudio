@@ -207,4 +207,8 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("mm-show"), "minimap toggle missing");
     assert!(html.contains("function copySelection"), "diagram clipboard missing");
     assert!(html.contains("function fsmDraw"), "draggable state chart missing");
+    assert!(html.contains("id=\"dlg-act\""), "activation editor dialog missing");
+    assert!(html.contains("mi-insert-act"), "Insert > Activation missing");
+    assert!(html.contains("function renderActTree"), "decision-tree chart missing");
+    assert!(html.contains("function isConstructId"), "construct canvas blocks missing");
 }

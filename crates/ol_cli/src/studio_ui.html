@@ -2274,6 +2274,14 @@ function renderDiagram() {
     svg += '<rect width="' + W + '" height="' + H + '" fill="url(#grid-major)" pointer-events="none"/>';
   }
   const showLabels = document.getElementById("wire-labels").checked;
+  // Sources that fan out to several different variables (a multi-output block
+  // or construct): their labels name different signals, so they go at the
+  // destination end instead of stacking on the one source pin.
+  const fanOut = {};
+  for (const w of d.wires) {
+    const f = collapsed.has(w.from) ? collapsed.get(w.from) : w.from;
+    (fanOut[f] = fanOut[f] || new Set()).add(w.to);
+  }
   for (const w of d.wires) {
     // A collapsed result local has no box; its outgoing wires start at the gate
     // that produces it (the gate→own-local wire is dropped — pos[local] is gone).
@@ -2294,11 +2302,15 @@ function renderDiagram() {
     if (showLabels) {
       // The SCADE wire annotation: the carried variable and its type, seated
       // just past the source pin (so parallel wires keep their labels apart —
-      // two wires from one source overprint the same text harmlessly).
-      const v = (/^eq\d+$/.test(w.from) || isConstructId(w.from)) ? w.to : w.from;
+      // two wires from one source carrying the same variable overprint the
+      // same text harmlessly). A block driving several variables labels each
+      // wire at its destination end instead.
+      const fromBlock = /^eq\d+$/.test(w.from) || isConstructId(w.from);
+      const v = fromBlock ? w.to : w.from;
       const t = typeOf[v] || "?";
-      svg += '<text class="wire-label" x="' + (x1 + 8) + '" y="' + (y1 - 5) + '">' +
-        escapeHTML(v + ": " + t) + '</text>';
+      const atDest = fromBlock && fanOut[fromId] && fanOut[fromId].size > 1;
+      svg += '<text class="wire-label" x="' + (atDest ? x2 - 8 : x1 + 8) + '" y="' + ((atDest ? y2 : y1) - 5) + '"' +
+        (atDest ? ' text-anchor="end"' : "") + '>' + escapeHTML(v + ": " + t) + '</text>';
     }
   }
   for (const it of items) {
@@ -2409,11 +2421,6 @@ function renderDiagram() {
   svgEl.addEventListener("pointermove", diagPointerMove);
   svgEl.addEventListener("pointerup", diagPointerUp);
   svgEl.addEventListener("contextmenu", diagContextMenu);
-  // Double-click a state-machine / activation block to open its editor.
-  svgEl.addEventListener("dblclick", ev => {
-    const g = ev.target.closest && ev.target.closest("g.diag-item[data-construct]");
-    if (g) openConstructEditor(g.dataset.id);
-  });
   const mmEl = document.getElementById("minimap");
   if (mmEl) {
     mmEl.addEventListener("pointerdown", minimapJump);
@@ -2618,6 +2625,17 @@ async function diagPointerUp(ev) {
   state.drag = null;
   if (!drag) return;
   if (!drag.moved) {
+    // A second click on the same state-machine / activation block opens its
+    // editor. Tracked by hand: the first click re-renders the SVG, so the
+    // browser's own dblclick never reaches the block.
+    const now = Date.now();
+    const last = state.lastClick;
+    state.lastClick = { id: drag.id, t: now };
+    if (isConstructId(drag.id) && last && last.id === drag.id && now - last.t < 450) {
+      state.lastClick = null;
+      openConstructEditor(drag.id);
+      return;
+    }
     // Ctrl/shift-click toggles a multi-selection; a plain click on a calling
     // equation dives into the callee; otherwise it just selects.
     if (drag.additive) { setSelection(drag.id, true); return; }
