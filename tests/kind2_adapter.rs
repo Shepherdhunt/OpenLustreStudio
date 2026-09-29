@@ -24,8 +24,58 @@ fn timeout_and_property_selection_flow_into_kind2_invocation() {
     // built argument list, which is what we want to check.
     let inv = result.invocation.join(" ");
     assert!(inv.contains("--timeout_wall 30"), "got `{inv}`");
-    assert!(inv.contains("--lus_props g1,g2"), "got `{inv}`");
+    // Kind 2 v2 has no per-property flag: everything is proved and the
+    // results are filtered to the selection.
+    assert!(!inv.contains("--lus_props"), "got `{inv}`");
     assert!(inv.contains("--lus_main ReleaseLogic"), "got `{inv}`");
+}
+
+/// Kind 2 v2.2 `-json` output, abridged from a real run: the same property
+/// reported by two engines, mode checks, and two `ensure`s of one mode.
+const V22: &str = r#"[
+{"objectType": "log", "level": "info", "source": "parse", "value": "kind2 v2.2.0"},
+{"objectType": "property", "name": "C[l2c13].Big[l16c3]", "scope": "Top", "line": 16, "source": "NonVacuityCheck", "answer": {"source": "bmc", "value": "reachable"}, "witness": []},
+{"objectType": "property", "name": "C._one_mode_active", "scope": "Top", "line": 16, "source": "OneModeActive", "answer": {"source": "ic3ia", "value": "valid"}},
+{"objectType": "property", "name": "C[l2c13].Big[l16c3]", "scope": "Top", "line": 16, "source": "NonVacuityCheck", "answer": {"source": "ic3qe", "value": "reachable"}, "witness": []},
+{"objectType": "property", "name": "C[l2c13].Big.ensure[l16c30]", "scope": "Top", "line": 17, "source": "Ensure", "answer": {"source": "ic3qe", "value": "valid"}},
+{"objectType": "property", "name": "C[l2c13].Big.ensure[l16c40]", "scope": "Top", "line": 18, "source": "Ensure", "answer": {"source": "ic3qe", "value": "falsifiable"}, "counterExample": []},
+{"objectType": "property", "name": "C[l2c13].pos", "scope": "Top", "line": 14, "source": "Guarantee", "answer": {"source": "ind", "value": "valid"}}
+]"#;
+
+#[test]
+fn kind2_v2_results_are_deduplicated_labeled_and_classified() {
+    use ol_kind2::{clause_at, parse_kind2_json, Outcome};
+    let props = parse_kind2_json(V22);
+    assert_eq!(props.len(), 5, "one result per property: {props:?}");
+    let labels: Vec<&str> = props.iter().map(|p| p.label.as_str()).collect();
+    assert_eq!(labels, ["C.Big", "C._one_mode_active", "C.Big.ensure #1", "C.Big.ensure #2", "C.pos"]);
+    // A reachable mode and a valid guarantee both hold; a falsified ensure fails.
+    assert_eq!(props[0].outcome(), Outcome::Holds);
+    assert!(props[0].is_mode_check() && props[1].is_mode_check() && !props[4].is_mode_check());
+    assert_eq!(props[3].outcome(), Outcome::Fails);
+    assert!(props[3].counterexample.is_some());
+    // The clause text comes from the input file by line.
+    let input = "a\nb\n  guarantee \"pos\" y >= 0;\n";
+    assert_eq!(clause_at(input, 3).as_deref(), Some("guarantee \"pos\" y >= 0"));
+    assert_eq!(clause_at(input, 9), None);
+}
+
+#[test]
+fn kind2_errors_and_realizability_are_parsed() {
+    let (errors, real) = ol_kind2::parse_kind2_log(
+        r#"[
+{"objectType": "log", "level": "error", "source": "parse", "file": "m.lus", "line": 13, "column": 4, "value": "Syntax Error!\n"},
+{"objectType": "log", "level": "fatal", "source": "parse", "value": "No SMT Solver found."},
+{"objectType": "analysisStart", "top": "Top", "context": "environment"},
+{"objectType": "realizabilityCheck", "result": "realizable"},
+{"objectType": "analysisStart", "top": "Top", "context": "contract"},
+{"objectType": "realizabilityCheck", "result": "unrealizable", "conflictingSet": {"nodes": [{"name": "Top", "elements": [{"category": "guarantee", "name": "bad"}]}]}}
+]"#,
+    );
+    assert_eq!(errors, ["line 13, column 4: Syntax Error!", "No SMT Solver found."]);
+    assert_eq!(real.len(), 2);
+    assert_eq!((real[1].node.as_str(), real[1].context.as_str(), real[1].result.as_str()), ("Top", "contract", "unrealizable"));
+    assert_eq!(real[1].conflicting, ["guarantee bad"]);
 }
 
 #[test]

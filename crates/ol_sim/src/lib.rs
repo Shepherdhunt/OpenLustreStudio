@@ -1072,6 +1072,33 @@ fn eval(
             let v = eval(arg, env, state, call_states, project, site_clocks, cov)?;
             cast_value(to, v)
         }
+        // Conditional activation, as produced by clock elimination
+        // (`ol_ir::declock`): step the wrapped call only when the clock
+        // holds; otherwise repeat its last outputs (the defaults at first).
+        Expr::Call { node, args }
+            if node == ol_ir::declock::CONDACT && project.find_node(node).is_none() =>
+        {
+            let [clock, call, defaults @ ..] = args.as_slice() else {
+                return Err(SimError::EvalError("condact needs a clock and a call".into()));
+            };
+            let key = expr as *const Expr as usize;
+            let on = eval(clock, env, state, call_states, project, site_clocks, cov)?
+                .as_bool()
+                .ok_or_else(|| SimError::EvalError("condact clock is not a bool".into()))?;
+            if on {
+                let v = eval(call, env, state, call_states, project, site_clocks, cov)?;
+                call_states.entry(key).or_default().prev.insert(String::new(), v.clone());
+                Ok(v)
+            } else if let Some(v) = call_states.get(&key).and_then(|s| s.prev.get("")) {
+                Ok(v.clone())
+            } else {
+                let mut ds = Vec::with_capacity(defaults.len());
+                for d in defaults {
+                    ds.push(eval(d, env, state, call_states, project, site_clocks, cov)?);
+                }
+                Ok(if ds.len() == 1 { ds.pop().expect("one default") } else { Value::Tuple(ds) })
+            }
+        }
         Expr::Call { node, args } => eval_call(expr, node, args, env, state, call_states, project, site_clocks, cov),
         Expr::Field { base, field } => {
             let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;

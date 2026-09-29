@@ -3,6 +3,7 @@
 
 node ReleaseLogic(master_arm: bool; station_selected: bool; consent: bool; fault_present: bool; release_request: bool) returns (release_cmd: bool; inhibit: bool);
 let
+  --%MAIN;
   release_cmd = master_arm and station_selected and consent and not fault_present and release_request;
   inhibit = release_request and not release_cmd;
 tel
@@ -12,4 +13,3 @@ let
   armed_consented = master_arm and consent;
 tel
 
---%MAIN ; entry: ReleaseLogic

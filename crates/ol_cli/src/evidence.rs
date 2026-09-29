@@ -94,7 +94,30 @@ pub struct ContractInfo {
 #[derive(Debug, Clone, Serialize)]
 pub struct ProofInfo {
     pub note: String,
-    pub properties: Vec<(String, String)>,
+    pub properties: Vec<ProofRow>,
+    /// The prover and solver that answered, e.g. `Kind 2 v2.2.0 · Z3 4.13.4`.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub toolchain: String,
+    /// What the proof assumes about the model (unbounded integers, exact
+    /// reals, …), from the Kind 2 view.
+    pub assumptions: Vec<String>,
+    /// Contract realizability: `realizable`, `unrealizable (…)`, or empty
+    /// when not concluded.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub realizability: String,
+}
+
+/// One property Kind 2 answered.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProofRow {
+    pub name: String,
+    /// `guarantee`, `mode ensure`, `mode reachable`, `modes exhaustive`,
+    /// `assumption`, `property`.
+    pub kind: String,
+    /// The clause as written in the Kind 2 input.
+    pub clause: String,
+    pub status: String,
+    pub holds: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -443,66 +466,129 @@ fn contract_block(text: &str, name: &str) -> String {
     out.join("\n")
 }
 
-/// Run Kind 2 on the slice's Lustre + CoCoSpec, when asked and possible.
+/// Run Kind 2 on the slice's Kind 2 view, when asked and possible: prove
+/// every property (guarantees, mode ensures, mode reachability and
+/// exhaustiveness), then check the contract is realizable.
 fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) -> (Status, ProofInfo) {
-    let info = |note: &str| ProofInfo { note: note.into(), properties: vec![] };
+    let info = |note: &str| ProofInfo {
+        note: note.into(),
+        properties: vec![],
+        toolchain: String::new(),
+        assumptions: vec![],
+        realizability: String::new(),
+    };
     let Some(opts) = opts else {
         return (Status::NotRun, info("not requested (run with proving enabled to include Kind 2 results)"));
     };
     if !has_contract {
         return (Status::NotRun, info("no contract to prove"));
     }
-    let lus = ol_lustre_emit::emit_project(slice);
-    let con = ol_cocospec_emit::emit_project(slice, ol_cocospec_emit::Target::Modern);
+    let input = match ol_cocospec_emit::kind2::emit(slice) {
+        Ok(i) => i,
+        Err(errs) => return (Status::Gaps, info(&format!("the model cannot be handed to Kind 2: {}", errs.join("; ")))),
+    };
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
     let work = std::env::temp_dir().join(format!("openlustre_evidence_{stamp}"));
     if std::fs::create_dir_all(&work).is_err() {
         return (Status::NotRun, info("could not create a working directory for Kind 2"));
     }
     let lus_path = work.join("model_with_contracts.lus");
-    let _ = std::fs::write(&lus_path, format!("{lus}\n{con}"));
-    let result = ol_kind2::run_kind2(
-        &lus_path,
-        &ol_kind2::Kind2Options {
-            kind2_binary: opts.binary.clone(),
-            mode: ol_kind2::SerMode::BmcInd,
-            main_node: Some(root.to_string()),
-            extra_args: vec![],
-            timeout_seconds: opts.timeout,
-            properties: vec![],
-        },
-    );
+    let _ = std::fs::write(&lus_path, &input.text);
+    let toolchain = crate::prover::Toolchain::detect(Some(&opts.binary));
+    let run = |mode| {
+        ol_kind2::run_kind2(
+            &lus_path,
+            &toolchain.apply(ol_kind2::Kind2Options {
+                mode,
+                main_node: Some(root.to_string()),
+                timeout_seconds: opts.timeout,
+                ..Default::default()
+            }),
+        )
+    };
+    let result = run(ol_kind2::SerMode::BmcInd);
+    let realizability = match &result {
+        Ok(r) if r.exit_code != -1 && r.errors.is_empty() => run(ol_kind2::SerMode::Realizability).ok(),
+        _ => None,
+    };
     let _ = std::fs::remove_dir_all(&work);
     let result = match result {
         Ok(r) => r,
         Err(e) => return (Status::NotRun, info(&format!("Kind 2 could not run: {e}"))),
     };
     if result.exit_code == -1 && result.stderr.contains("could not launch") {
-        return (Status::NotRun, info(&format!("Kind 2 not found (`{}`) — install it to include proofs", opts.binary)));
+        let hint = crate::prover::guidance(&toolchain).into_iter().next().unwrap_or_default();
+        return (Status::NotRun, info(&format!("Kind 2 not found (`{}`) — {hint}", toolchain.binary())));
     }
-    let properties: Vec<(String, String)> = result.properties.iter().map(|p| (p.name.clone(), p.status.clone())).collect();
-    if properties.is_empty() {
-        return (Status::Gaps, ProofInfo { note: "Kind 2 ran but reported no properties".into(), properties });
+    if let Some(e) = result.errors.first() {
+        return (Status::Gaps, info(&format!("Kind 2 could not analyse the model: {e}")));
     }
-    let valid = properties.iter().filter(|(_, s)| s.eq_ignore_ascii_case("valid")).count();
-    let falsified = properties
+    let properties: Vec<ProofRow> = result
+        .properties
         .iter()
-        .filter(|(_, s)| s.eq_ignore_ascii_case("falsifiable") || s.eq_ignore_ascii_case("invalid"))
-        .count();
-    let status = if falsified > 0 {
+        .map(|p| {
+            let (kind, clause) = match p.source.as_deref() {
+                Some("OneModeActive") => ("modes exhaustive", "some mode is always active".to_string()),
+                Some("NonVacuityCheck") => {
+                    ("mode reachable", format!("mode {} can be active", p.label.rsplit('.').next().unwrap_or("")))
+                }
+                other => (
+                    match other {
+                        Some("Guarantee") => "guarantee",
+                        Some("Ensure") => "mode ensure",
+                        Some("Assumption") => "assumption",
+                        _ => "property",
+                    },
+                    p.line.and_then(|l| ol_kind2::clause_at(&input.text, l)).unwrap_or_default(),
+                ),
+            };
+            ProofRow {
+                name: p.label.clone(),
+                kind: kind.into(),
+                clause,
+                status: p.status.clone(),
+                holds: p.outcome() == ol_kind2::Outcome::Holds,
+            }
+        })
+        .collect();
+    let realizability = realizability
+        .map(|r| {
+            let contract = r.realizability.iter().find(|x| x.context == "contract");
+            match contract {
+                Some(x) if x.conflicting.is_empty() => x.result.clone(),
+                Some(x) => format!("{} (conflicting: {})", x.result, x.conflicting.join(", ")),
+                None => String::new(),
+            }
+        })
+        .unwrap_or_default();
+    let mut info = ProofInfo {
+        note: String::new(),
+        properties,
+        toolchain: toolchain.summary(),
+        assumptions: input.notes,
+        realizability,
+    };
+    if info.properties.is_empty() {
+        info.note = "Kind 2 ran but reported no properties".into();
+        return (Status::Gaps, info);
+    }
+    let fails = result.properties.iter().filter(|p| p.outcome() == ol_kind2::Outcome::Fails).count();
+    let holds = info.properties.iter().filter(|p| p.holds).count();
+    let n = info.properties.len();
+    let status = if fails > 0 {
         Status::Fail
-    } else if valid < properties.len() {
+    } else if holds < n || info.realizability.starts_with("unrealizable") {
         Status::Gaps
     } else {
         Status::Pass
     };
-    let note = format!(
-        "{valid} of {} {} valid{}",
-        properties.len(),
-        if properties.len() == 1 { "property" } else { "properties" },
-        if falsified > 0 { format!(", {falsified} falsified") } else { String::new() }
+    info.note = format!(
+        "{holds} of {n} {} hold{}{}",
+        if n == 1 { "property" } else { "properties" },
+        if fails > 0 { format!(", {fails} falsified") } else { String::new() },
+        if info.realizability.is_empty() { String::new() } else { format!("; contract {}", info.realizability) },
     );
-    (status, ProofInfo { note, properties })
+    (status, info)
 }
 
 /// The current time as ISO 8601 UTC (`2026-09-29T14:03:00Z`).
@@ -625,12 +711,29 @@ impl Evidence {
         // 3. Proof.
         h.push_str(&section_head("proof", "Formal proof (Kind 2)", sec_status("proof")));
         h.push_str(&format!("<p>{}</p>", esc(&self.proof.note)));
+        if !self.proof.toolchain.is_empty() {
+            h.push_str(&format!("<p class=\"muted\">Prover: {}</p>", esc(&self.proof.toolchain)));
+        }
         if !self.proof.properties.is_empty() {
-            h.push_str("<table><thead><tr><th>property</th><th>result</th></tr></thead><tbody>");
-            for (n, s) in &self.proof.properties {
-                h.push_str(&format!("<tr><td>{}</td><td>{}</td></tr>", esc(n), esc(s)));
+            h.push_str("<table><thead><tr><th>property</th><th>kind</th><th>clause</th><th>result</th></tr></thead><tbody>");
+            for p in &self.proof.properties {
+                let (cls, icon) = if p.holds { ("st-pass", "✓") } else { ("st-fail", "✗") };
+                h.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td><code>{}</code></td><td class=\"{cls}\">{icon} {}</td></tr>",
+                    esc(&p.name),
+                    esc(&p.kind),
+                    esc(&p.clause),
+                    esc(&p.status)
+                ));
             }
             h.push_str("</tbody></table>");
+        }
+        if !self.proof.assumptions.is_empty() {
+            h.push_str("<p><strong>The proof assumes</strong></p><ul>");
+            for a in &self.proof.assumptions {
+                h.push_str(&format!("<li>{}</li>", esc(a)));
+            }
+            h.push_str("</ul>");
         }
 
         // 4. Tests.
@@ -774,6 +877,9 @@ code, pre { font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; 
 pre { background: #f7f7f8; border: 1px solid var(--line); padding: 8px 10px; white-space: pre-wrap; }
 a { color: var(--accent); }
 .note { color: var(--muted); font-size: 11px; }
+.muted { color: var(--muted); }
+td.st-pass { color: var(--pass); font-weight: 600; white-space: nowrap; }
+td.st-fail { color: var(--fail); font-weight: 600; white-space: nowrap; }
 footer { margin-top: 28px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
 @media print {
   main { max-width: none; padding: 0; }

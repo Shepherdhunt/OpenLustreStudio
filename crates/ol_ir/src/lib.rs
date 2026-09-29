@@ -25,6 +25,7 @@ pub mod activation;
 pub mod diag;
 pub mod loader;
 pub mod clocks;
+pub mod declock;
 
 pub use activation::{
     branch_flag, lower as lower_activation, ActLowerError, ActivationBranch, ActivationDef,
@@ -32,6 +33,7 @@ pub use activation::{
 };
 
 pub use clocks::{infer_clocks, node_uses_clocks, Clock, ClockError, ClockInfo};
+pub use declock::{declock_node, declock_project, default_expr, DeclockError};
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, FieldInit, IterKind, Literal, UnaryOp};
 pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe};

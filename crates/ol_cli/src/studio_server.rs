@@ -312,6 +312,28 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
         ("POST", "/api/evidence") => json_response(evidence_response(ctx, body)),
+        ("GET", "/api/kind2/status") => {
+            let v = crate::prover::Toolchain::detect(None).to_json();
+            (200, "application/json", v.to_string().into_bytes())
+        }
+        ("POST", "/api/kind2/install") => {
+            let mut log = Vec::new();
+            let v = match crate::prover::install(&crate::prover::tools_dir(), &mut |l| log.push(l)) {
+                Ok(tc) => {
+                    let smoke = crate::prover::smoke_test(&tc);
+                    serde_json::json!({
+                        "ok": smoke.is_ok(), "log": log,
+                        "message": match &smoke { Ok(v) => format!("installed {} — sample proof {v}", tc.summary()), Err(e) => format!("installed, but the sample proof failed: {e}") },
+                        "status": crate::prover::Toolchain::detect(None).to_json(),
+                    })
+                }
+                Err(e) => serde_json::json!({
+                    "ok": false, "log": log, "message": e,
+                    "status": crate::prover::Toolchain::detect(None).to_json(),
+                }),
+            };
+            (200, "application/json", v.to_string().into_bytes())
+        }
         ("POST", "/api/prove") => match prove_run(ctx, &parse_query(query)) {
             Ok(b) => (200, "application/json", b.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -610,9 +632,25 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
 
 fn build_lustre(ctx: &ServerCtx) -> Result<String, String> {
     let project = load(ctx)?;
-    let lus = ol_lustre_emit::emit_project(&project);
-    let con = ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern);
-    Ok(format!("{lus}\n{con}"))
+    Ok(lustre_with_contracts(&project))
+}
+
+/// One Lustre file for the project: the Kind 2 view (contracts imported in
+/// node headers, clocks eliminated, C integer semantics) — the exact text
+/// the prover reads. When the model cannot be handed to Kind 2 the plain
+/// Lustre projection is returned with the reasons as comments.
+pub(crate) fn lustre_with_contracts(project: &ol_ir::Project) -> String {
+    match ol_cocospec_emit::kind2::emit(project) {
+        Ok(input) => input.text,
+        Err(errs) => {
+            let mut out = String::new();
+            for e in &errs {
+                out.push_str(&format!("-- not provable as is: {e}\n"));
+            }
+            out.push_str(&ol_lustre_emit::emit_project(project));
+            out
+        }
+    }
 }
 
 /// The `.lus` projection file for one operator, written next to the model.
@@ -700,9 +738,7 @@ fn build_model_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
         return (200, "application/json", v.to_string().into_bytes());
     }
 
-    let lus = ol_lustre_emit::emit_project(&sliced);
-    let con = ol_cocospec_emit::emit_project(&sliced, ol_cocospec_emit::Target::Modern);
-    let full = format!("{lus}\n{con}");
+    let full = lustre_with_contracts(&sliced);
     let path = operator_lus_path(ctx, &main);
     if let Err(e) = std::fs::write(&path, &full) {
         return (
@@ -1913,9 +1949,21 @@ fn prove_run(
 ) -> Result<String, String> {
     let project = sliced_for_main(ctx)?;
     let main = project.main.clone();
-    let lus = ol_lustre_emit::emit_project(&project);
-    let con = ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern);
-    let combined = format!("{lus}\n{con}");
+    let input = match ol_cocospec_emit::kind2::emit(&project) {
+        Ok(i) => i,
+        Err(errs) => {
+            let value = serde_json::json!({
+                "schema_version": 1,
+                "kind2_found": true,
+                "main": main,
+                "properties": [],
+                "errors": errs,
+                "hint": "the model cannot be handed to Kind 2 — see the errors",
+            });
+            return Ok(value.to_string());
+        }
+    };
+    let combined = input.text.clone();
 
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1927,11 +1975,18 @@ fn prove_run(
     std::fs::write(&lus_path, &combined).map_err(|e| e.to_string())?;
 
     let timeout = query.get("timeout").and_then(|t| t.parse::<u32>().ok());
-    let opts = ol_kind2::Kind2Options {
-        main_node: main,
+    let mode = match query.get("mode").map(String::as_str) {
+        Some("realizability") => ol_kind2::SerMode::Realizability,
+        Some("modes") => ol_kind2::SerMode::ModeCoverage,
+        _ => ol_kind2::SerMode::BmcInd,
+    };
+    let toolchain = crate::prover::Toolchain::detect(None);
+    let opts = toolchain.apply(ol_kind2::Kind2Options {
+        main_node: main.clone(),
+        mode,
         timeout_seconds: timeout,
         ..Default::default()
-    };
+    });
     let result = ol_kind2::run_kind2(&lus_path, &opts).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&work);
 
@@ -1947,9 +2002,19 @@ fn prove_run(
             // The same counterexample as signals over cycles, for the
             // waveform viewer and for replay in the simulator.
             let trace = p.counterexample.as_ref().and_then(ol_kind2::counterexample_streams);
+            let clause = match p.source.as_deref() {
+                Some("OneModeActive") => Some("some mode is always active".to_string()),
+                Some("NonVacuityCheck") => Some(format!("mode {} is reachable", p.label.rsplit('.').next().unwrap_or(""))),
+                _ => p.line.and_then(|l| ol_kind2::clause_at(&combined, l)),
+            };
             serde_json::json!({
                 "name": p.name,
+                "label": p.label,
                 "status": p.status,
+                "outcome": p.outcome(),
+                "source": p.source,
+                "mode_check": p.is_mode_check(),
+                "clause": clause,
                 "scope": p.scope,
                 "waveform": waveform,
                 "trace": trace,
@@ -1966,19 +2031,26 @@ fn prove_run(
         .rev()
         .collect::<Vec<_>>()
         .join("\n");
+    let guidance = crate::prover::guidance(&toolchain);
     let value = serde_json::json!({
         "schema_version": 1,
         "kind2_found": kind2_found,
+        "toolchain": toolchain.summary(),
         "main": project.main,
+        "mode": match mode { ol_kind2::SerMode::Realizability => "realizability", ol_kind2::SerMode::ModeCoverage => "modes", _ => "prove" },
         "invocation": result.invocation,
         "exit_code": result.exit_code,
         "properties": properties,
+        "realizability": result.realizability,
+        "errors": result.errors,
+        "notes": input.notes,
         "stdout_tail": stdout_tail,
-        "hint": if kind2_found { serde_json::Value::Null } else {
-            serde_json::Value::String(
-                "kind2 not found on PATH — install it from https://kind2-mc.github.io/kind2/ to prove contracts".into()
-            )
+        "hint": if kind2_found && result.errors.is_empty() { serde_json::Value::Null } else if !kind2_found {
+            serde_json::Value::String(format!("kind2 not found — {}", guidance.first().cloned().unwrap_or_default()))
+        } else {
+            serde_json::Value::String("Kind 2 could not analyse the model — see the errors".into())
         },
+        "guidance": guidance,
     });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }

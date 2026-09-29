@@ -167,3 +167,7 @@ path = "traceability.rs"
 [[test]]
 name = "evidence"
 path = "evidence.rs"
+
+[[test]]
+name = "kind2_projection"
+path = "kind2_projection.rs"

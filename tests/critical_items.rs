@@ -35,6 +35,10 @@ impl Drop for ServerGuard {
 }
 
 fn start_server_on_copy(tag: &str) -> ServerGuard {
+    start_server_with_env(tag, &[])
+}
+
+fn start_server_with_env(tag: &str, env: &[(&str, &str)]) -> ServerGuard {
     let tmp = make_tempdir(tag);
     let model = tmp.join("model.json");
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -45,6 +49,7 @@ fn start_server_on_copy(tag: &str) -> ServerGuard {
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "serve"])
         .arg(&model)
         .args(["--port", "0"])
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -196,14 +201,22 @@ fn diagram_exposes_callee_names_for_dive_navigation() {
 
 #[test]
 fn prove_endpoint_degrades_gracefully_without_kind2() {
-    let g = start_server_on_copy("prove");
+    // Point the server at a Kind 2 that does not exist, whatever this
+    // machine has installed.
+    let g = start_server_with_env("prove", &[("OPENLUSTRE_KIND2", "/nonexistent/openlustre/kind2")]);
     let (s, body) = request(g.port, "POST", "/api/prove?timeout=5", "").expect("prove");
     assert_eq!(s, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    // This environment has no kind2 binary: the endpoint must say so with a
-    // hint rather than erroring, and still record the attempted invocation.
+    // The endpoint must say so with a hint rather than erroring, and still
+    // record the attempted invocation.
     assert_eq!(v["kind2_found"], false, "{body}");
     assert!(v["hint"].as_str().unwrap_or("").contains("kind2"));
+    assert!(!v["guidance"].as_array().unwrap().is_empty(), "{body}");
+    let (s, body) = request(g.port, "GET", "/api/kind2/status", "").expect("status");
+    assert_eq!(s, 200);
+    let st: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(st["ready"], false, "{body}");
+    assert_eq!(st["kind2"]["via"], "OPENLUSTRE_KIND2", "{body}");
     let invocation = v["invocation"].as_array().unwrap();
     assert!(invocation.iter().any(|a| a.as_str() == Some("--timeout_wall")));
     assert!(invocation.iter().any(|a| a.as_str() == Some("5")));

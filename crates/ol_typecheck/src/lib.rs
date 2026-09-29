@@ -154,6 +154,46 @@ pub fn check_project(project: &Project) -> CheckReport {
     CheckReport { diagnostics: diags }
 }
 
+/// Types the expressions of an already-checked project, for backends that
+/// need operand types — e.g. the Kind 2 view choosing C's truncating
+/// division for integers.
+pub struct ExprTyper {
+    sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)>,
+    tctx: TypeContext,
+}
+
+impl ExprTyper {
+    pub fn new(project: &Project) -> Self {
+        let sigs = project
+            .all_nodes()
+            .map(|n| (n.name.clone(), (n.inputs.clone(), n.outputs.clone(), n.kind)))
+            .collect();
+        ExprTyper { sigs, tctx: TypeContext::from_project(project) }
+    }
+
+    /// A node's ports and locals by name.
+    pub fn env(node: &NodeDef) -> BTreeMap<String, Type> {
+        node.inputs
+            .iter()
+            .chain(&node.outputs)
+            .map(|p| (p.name.clone(), p.ty.clone()))
+            .chain(node.locals.iter().map(|l| (l.name.clone(), l.ty.clone())))
+            .collect()
+    }
+
+    /// The type of `expr` in `node`, aliases resolved; `None` if it does not
+    /// type-check.
+    pub fn type_of(&self, node: &NodeDef, env: &BTreeMap<String, Type>, expr: &Expr) -> Option<Type> {
+        let mut diags = Vec::new();
+        infer_expr_type(expr, env, &self.sigs, node, &mut diags, "", &self.tctx, None)
+            .map(|t| self.tctx.resolve(&t))
+    }
+
+    pub fn resolve(&self, ty: &Type) -> Type {
+        self.tctx.resolve(ty)
+    }
+}
+
 fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagnostic>) {
     // Synthesize a tiny anonymous node that lets us reuse infer_expr_type for
     // constant-value typechecking. Const RHS can reference other constants

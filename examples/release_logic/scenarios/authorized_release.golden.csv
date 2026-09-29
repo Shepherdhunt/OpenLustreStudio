@@ -3,4 +3,4 @@ cycle,master_arm,station_selected,consent,fault_present,release_request,release_
 1,true,true,true,false,false,false,false,Idle,<none>
 2,true,true,true,false,true,true,false,AuthorizedRelease,<none>
 3,true,true,true,false,true,true,false,AuthorizedRelease,<none>
-4,false,true,true,false,true,false,true,<none>,<none>
+4,false,true,true,false,true,false,true,RefusedRequest,<none>

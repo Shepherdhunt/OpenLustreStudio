@@ -16,15 +16,35 @@ pub fn emit_project(project: &Project) -> String {
     let _ = writeln!(out, "-- project: {}", project.name);
     out.push('\n');
     for pkg in &project.packages {
-        emit_package(pkg, &mut out);
-    }
-    if let Some(main) = &project.main {
-        let _ = writeln!(out, "--%MAIN ; entry: {main}");
+        emit_declarations(pkg, &mut out);
+        for n in &pkg.nodes {
+            let ann = Annotations { main: project.main.as_deref() == Some(n.name.as_str()), ..Default::default() };
+            emit_node_annotated(n, &ann, &mut out);
+            out.push('\n');
+        }
     }
     out
 }
 
+/// What a node carries for Kind 2 besides its body: the contract it imports
+/// (spliced between the signature and the body) and whether it is the entry
+/// point (`--%MAIN;` inside its body).
+#[derive(Debug, Default, Clone)]
+pub struct Annotations {
+    pub contract_import: Option<String>,
+    pub main: bool,
+}
+
 pub fn emit_package(pkg: &Package, out: &mut String) {
+    emit_declarations(pkg, out);
+    for n in &pkg.nodes {
+        emit_node(n, out);
+        out.push('\n');
+    }
+}
+
+/// A package's types and constants.
+pub fn emit_declarations(pkg: &Package, out: &mut String) {
     if !pkg.types.is_empty() {
         let _ = writeln!(out, "-- package: {} (types)", pkg.name);
         for t in &pkg.types {
@@ -43,10 +63,6 @@ pub fn emit_package(pkg: &Package, out: &mut String) {
                 format_expr_lustre(&c.value)
             );
         }
-        out.push('\n');
-    }
-    for n in &pkg.nodes {
-        emit_node(n, out);
         out.push('\n');
     }
 }
@@ -71,6 +87,10 @@ fn emit_type(t: &ol_ir::TypeDef, out: &mut String) {
 }
 
 pub fn emit_node(node: &NodeDef, out: &mut String) {
+    emit_node_annotated(node, &Annotations::default(), out)
+}
+
+pub fn emit_node_annotated(node: &NodeDef, ann: &Annotations, out: &mut String) {
     let kind = match node.kind {
         NodeKind::Function => "function",
         NodeKind::Operator => "node",
@@ -91,6 +111,9 @@ pub fn emit_node(node: &NodeDef, out: &mut String) {
         .join("; ");
 
     let _ = writeln!(out, "{kind} {}({inputs}) returns ({outputs});", node.name);
+    if let Some(import) = &ann.contract_import {
+        let _ = writeln!(out, "(*@contract {import} *)");
+    }
 
     if node.is_imported() {
         let _ = writeln!(out, "-- body is provided by external C (see manifest).");
@@ -125,6 +148,9 @@ pub fn emit_node(node: &NodeDef, out: &mut String) {
         let _ = writeln!(out, "var {locals};");
     }
     let _ = writeln!(out, "let");
+    if ann.main {
+        let _ = writeln!(out, "  --%MAIN;");
+    }
     for eq in &node.equations {
         let lhs = if eq.lhs.len() == 1 {
             eq.lhs[0].clone()

@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 mod evidence;
 mod lustre_import;
+mod prover;
 mod scenario;
 mod studio_server;
 
@@ -42,7 +43,7 @@ enum Cmd {
         model: PathBuf,
         #[arg(short, long)]
         out: PathBuf,
-        /// Use legacy `(*@contract ... @*)` syntax instead of modern `con/noc`.
+        /// Use legacy `(*@contract ... *)` syntax instead of modern `con/noc`.
         #[arg(long)]
         legacy: bool,
         #[arg(long, value_name = "DIR")]
@@ -163,6 +164,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: TestCmd,
     },
+    /// The Kind 2 prover: check it is installed and working, or install it.
+    Kind2 {
+        #[command(subcommand)]
+        cmd: Kind2Cmd,
+    },
     /// Create a new workspace folder: project.json, types.json (named type
     /// definitions), and scenarios/. Open it with
     /// `openlustre studio launch <dir>`.
@@ -173,6 +179,25 @@ enum Cmd {
         /// this, a small starter operator is created.
         #[arg(long)]
         empty: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum Kind2Cmd {
+    /// Find Kind 2 and an SMT solver, say where they came from, and prove a
+    /// one-property model end to end. Exits non-zero when proving would not
+    /// work, with what to do about it.
+    Doctor {
+        /// A Kind 2 binary to check instead of the one found.
+        #[arg(long)]
+        kind2: Option<String>,
+    },
+    /// Download Kind 2 and Z3 (Linux, macOS) into the per-user tools
+    /// directory, where `prove`, `evidence` and the Studio find them.
+    Install {
+        /// Install here instead (`OPENLUSTRE_TOOLS` then points at it).
+        #[arg(long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -351,6 +376,10 @@ fn main() -> Result<()> {
             &out,
         ),
         Cmd::LibCheck { dir } => cmd_lib_check(&dir),
+        Cmd::Kind2 { cmd } => match cmd {
+            Kind2Cmd::Doctor { kind2 } => cmd_kind2_doctor(kind2.as_deref()),
+            Kind2Cmd::Install { dir } => cmd_kind2_install(dir),
+        },
         Cmd::Studio { cmd } => match cmd {
             StudioCmd::Inspect {
                 model,
@@ -881,6 +910,47 @@ fn cmd_simulate(
     Ok(())
 }
 
+fn cmd_kind2_doctor(kind2: Option<&str>) -> Result<()> {
+    let tc = prover::Toolchain::detect(kind2);
+    let show = |what: &str, l: &Option<prover::Located>, v: &Option<String>| match (l, v) {
+        (Some(l), Some(v)) => println!("  {what:<7} {v}  ({}, via {})", l.path.display(), l.via),
+        (Some(l), None) => println!("  {what:<7} does not run: {} (via {})", l.path.display(), l.via),
+        (None, _) => println!("  {what:<7} not found"),
+    };
+    println!("kind2 doctor:");
+    show("kind2", &tc.kind2, &tc.kind2_version);
+    let solver = tc.solver.as_ref().map(|(_, l)| l.clone());
+    show("solver", &solver, &tc.solver_version);
+    println!("  tools   {}", prover::tools_dir().display());
+    if tc.ready() {
+        match prover::smoke_test(&tc) {
+            Ok(verdict) => {
+                println!("  smoke   proved a sample property ({verdict})");
+                println!("ready: {}", tc.summary());
+                return Ok(());
+            }
+            Err(e) => println!("  smoke   FAILED: {e}"),
+        }
+    }
+    for g in prover::guidance(&tc) {
+        println!("  → {g}");
+    }
+    anyhow::bail!("Kind 2 is not ready: {}", tc.summary())
+}
+
+fn cmd_kind2_install(dir: Option<PathBuf>) -> Result<()> {
+    let dir = dir.unwrap_or_else(prover::tools_dir);
+    let tc = prover::install(&dir, &mut |line| println!("install: {line}")).map_err(|e| anyhow::anyhow!(e))?;
+    match prover::smoke_test(&tc) {
+        Ok(v) => println!("install: smoke proof {v}"),
+        Err(e) => anyhow::bail!("installed, but the smoke proof failed: {e}"),
+    }
+    if std::env::var_os("OPENLUSTRE_TOOLS").is_none() && dir != prover::tools_dir() {
+        println!("install: set OPENLUSTRE_TOOLS={} so OpenLustre finds it", dir.display());
+    }
+    Ok(())
+}
+
 fn cmd_prove(
     model: &Path,
     node: Option<&str>,
@@ -892,17 +962,28 @@ fn cmd_prove(
     properties: &[String],
     waveform: bool,
 ) -> Result<()> {
-    let project = load_with_stdlib(model, with_stdlib)?;
+    let mut project = load_with_stdlib(model, with_stdlib)?;
+    if let Some(root) = node {
+        project.main = Some(root.to_string());
+    }
+    // Prove the root and what it uses: an unrelated operator mid-edit must
+    // not block the proof.
+    if let Some(root) = project.main.clone() {
+        project = project.slice_for_root(&root).map_err(|e| anyhow::anyhow!(e))?;
+    }
     let work = match workdir {
         Some(p) => p.to_path_buf(),
         None => std::env::temp_dir().join("openlustre_prove"),
     };
     std::fs::create_dir_all(&work)?;
-    let lus = ol_lustre_emit::emit_project(&project);
-    let con = ol_cocospec_emit::emit_project(&project, Target::Modern);
-    let combined = format!("{lus}\n{con}");
+    let input = ol_cocospec_emit::kind2::emit(&project)
+        .map_err(|errs| anyhow::anyhow!("the model cannot be handed to Kind 2:\n  {}", errs.join("\n  ")))?;
     let lus_path = work.join("model_with_contracts.lus");
-    std::fs::write(&lus_path, &combined)?;
+    std::fs::write(&lus_path, &input.text)?;
+    for n in &input.notes {
+        println!("note: {n}");
+    }
+    let toolchain = prover::Toolchain::detect(Some(kind2));
     let opts = Kind2Options {
         kind2_binary: kind2.to_string(),
         mode: match mode {
@@ -915,18 +996,35 @@ fn cmd_prove(
         timeout_seconds: timeout,
         properties: properties.to_vec(),
     };
-    let result = ol_kind2::run_kind2(&lus_path, &opts)?;
+    let result = ol_kind2::run_kind2(&lus_path, &toolchain.apply(opts))?;
     println!("prove: invoked {}", result.invocation.join(" "));
+    if result.exit_code == -1 && result.properties.is_empty() {
+        for g in prover::guidance(&toolchain) {
+            eprintln!("  → {g}");
+        }
+    }
     println!("exit code: {}", result.exit_code);
     if !result.stderr.is_empty() {
         eprintln!("stderr:\n{}", result.stderr);
+    }
+    for e in &result.errors {
+        eprintln!("kind2 error: {e}");
+    }
+    for r in &result.realizability {
+        let conflict = if r.conflicting.is_empty() { String::new() } else { format!(" — conflicting: {}", r.conflicting.join(", ")) };
+        println!("  realizability of {} ({}): {}{conflict}", r.node, r.context, r.result);
+    }
+    if result.properties.is_empty() && !result.realizability.is_empty() {
+        return Ok(());
     }
     if result.properties.is_empty() {
         println!("(no parseable property results — raw stdout follows)");
         println!("{}", result.stdout);
     } else {
+        let text = std::fs::read_to_string(&lus_path).unwrap_or_default();
         for p in &result.properties {
-            println!("  {}: {}", p.name, p.status);
+            let clause = p.line.and_then(|l| ol_kind2::clause_at(&text, l)).map(|c| format!("   [{c}]")).unwrap_or_default();
+            println!("  {}: {}{clause}", p.label, p.status);
             if let Some(cex) = &p.counterexample {
                 if waveform {
                     if let Some(table) = ol_kind2::render_counterexample_waveform(cex) {

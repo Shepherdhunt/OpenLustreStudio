@@ -33,10 +33,17 @@ pub struct Kind2Options {
     pub properties: Vec<String>,
 }
 
+/// What to ask Kind 2.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum SerMode {
+    /// Prove every property: guarantees, mode ensures, `--%PROPERTY`s —
+    /// with the mode checks (each mode reachable, one mode always active).
     BmcInd,
+    /// Check that each contract is realizable: some implementation can meet
+    /// the guarantees for every input the assumptions allow.
     Realizability,
+    /// Only the mode checks: is every mode reachable, and is some mode
+    /// always active? (Guarantees are not proved.)
     ModeCoverage,
 }
 
@@ -59,17 +66,110 @@ pub struct Kind2Result {
     pub exit_code: i32,
     pub stdout: String,
     pub stderr: String,
-    /// Parsed property results if Kind 2 produced JSON.
+    /// Parsed property results if Kind 2 produced JSON — one per property,
+    /// the most conclusive answer when several engines reported it.
     pub properties: Vec<PropertyResult>,
+    /// Kind 2's `error` / `fatal` log messages (a rejected input file, a
+    /// missing SMT solver, …), with `file:line:col` when it gave one.
+    #[serde(default)]
+    pub errors: Vec<String>,
+    /// Realizability results (`SerMode::Realizability`), in report order.
+    #[serde(default)]
+    pub realizability: Vec<RealizabilityResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PropertyResult {
+    /// Kind 2's name, e.g. `Contract[l12c3].guarantee_name`.
     pub name: String,
+    /// `valid`, `falsifiable`, `reachable`, `unreachable`, `unknown`, …
     pub status: String,
     pub scope: Option<String>,
+    /// What the property checks: `Guarantee`, `Ensure`, `Assumption`,
+    /// `NonVacuityCheck` (a mode is reachable), `OneModeActive` (some mode
+    /// always applies), `PropAnnot` (a `--%PROPERTY`), …
     pub source: Option<String>,
     pub counterexample: Option<serde_json::Value>,
+    /// A trace reaching the property, for reachability checks.
+    #[serde(default)]
+    pub witness: Option<serde_json::Value>,
+    /// Where the property is in the input file (1-based), when reported.
+    #[serde(default)]
+    pub line: Option<u64>,
+    /// A short unique name: [`display_name`], numbered when two properties
+    /// would read the same (two `ensure`s of one mode).
+    #[serde(default)]
+    pub label: String,
+}
+
+/// How a property result reads for a reviewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Outcome {
+    /// Proved, or (for a mode check) the mode is reachable.
+    Holds,
+    /// Falsified — or a mode that can never be active.
+    Fails,
+    /// Timed out or not concluded.
+    Unknown,
+}
+
+impl PropertyResult {
+    pub fn outcome(&self) -> Outcome {
+        match self.status.to_ascii_lowercase().as_str() {
+            "valid" | "reachable" => Outcome::Holds,
+            "falsifiable" | "invalid" | "unreachable" => Outcome::Fails,
+            _ => Outcome::Unknown,
+        }
+    }
+
+    /// True for the mode checks Kind 2 adds on its own.
+    pub fn is_mode_check(&self) -> bool {
+        matches!(self.source.as_deref(), Some("NonVacuityCheck") | Some("OneModeActive"))
+    }
+
+    /// The name without Kind 2's source positions: `C.pos`, `C.Big.ensure`.
+    pub fn display_name(&self) -> String {
+        display_name(&self.name)
+    }
+}
+
+/// Strip `[l12c3]` position tags from a Kind 2 property name.
+pub fn display_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0usize;
+    for ch in name.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The clause at `line` of the Kind 2 input, trimmed of its `;` — e.g.
+/// `guarantee "release_implies_arm" release_cmd => master_arm`.
+pub fn clause_at(input: &str, line: u64) -> Option<String> {
+    let text = input.lines().nth(line.checked_sub(1)? as usize)?.trim();
+    let text = text.trim_end_matches(';').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// One realizability check: of the environment (can the assumptions be met)
+/// or of the contract (can the guarantees be met under them).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RealizabilityResult {
+    /// The node analysed.
+    pub node: String,
+    /// `environment` or `contract`.
+    pub context: String,
+    /// `realizable`, `unrealizable`, or `unknown`.
+    pub result: String,
+    /// For an unrealizable contract: the clauses that conflict, as
+    /// `category name` (e.g. `guarantee no_release_in_fault`).
+    #[serde(default)]
+    pub conflicting: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -85,11 +185,7 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
             args.push("--enable".into());
             args.push("CONTRACTCK".into());
         }
-        SerMode::ModeCoverage => {
-            args.push("--enable".into());
-            args.push("MCS".into());
-        }
-        SerMode::BmcInd => {}
+        SerMode::ModeCoverage | SerMode::BmcInd => {}
     }
     if let Some(main) = &opts.main_node {
         args.push("--lus_main".into());
@@ -98,10 +194,6 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
     if let Some(t) = opts.timeout_seconds {
         args.push("--timeout_wall".into());
         args.push(t.to_string());
-    }
-    if !opts.properties.is_empty() {
-        args.push("--lus_props".into());
-        args.push(opts.properties.join(","));
     }
     for a in &opts.extra_args {
         args.push(a.clone());
@@ -127,6 +219,8 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
                 stdout: String::new(),
                 stderr: format!("could not launch `{}`: {e}", opts.kind2_binary),
                 properties: vec![],
+                errors: vec![],
+                realizability: vec![],
             });
         }
     };
@@ -136,7 +230,20 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let properties = parse_kind2_json(&stdout);
+    let mut properties = parse_kind2_json(&stdout);
+    // Kind 2 has no per-property filter: prove everything, report the asked.
+    if !opts.properties.is_empty() {
+        properties.retain(|p| {
+            let shown = p.display_name();
+            opts.properties.iter().any(|want| {
+                *want == p.name || *want == shown || shown.rsplit('.').next() == Some(want.as_str())
+            })
+        });
+    }
+    if matches!(opts.mode, SerMode::ModeCoverage) {
+        properties.retain(|p| p.is_mode_check());
+    }
+    let (errors, realizability) = parse_kind2_log(&stdout);
 
     Ok(Kind2Result {
         invocation,
@@ -144,31 +251,90 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
         stdout,
         stderr,
         properties,
+        errors,
+        realizability,
     })
+}
+
+fn json_objects(text: &str) -> Vec<serde_json::Value> {
+    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
+        return arr;
+    }
+    text.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l.trim()).ok())
+        .collect()
+}
+
+/// Kind 2's error log and realizability results from its `-json` output.
+pub fn parse_kind2_log(text: &str) -> (Vec<String>, Vec<RealizabilityResult>) {
+    let mut errors = Vec::new();
+    let mut realizability = Vec::new();
+    let mut node = String::new();
+    let mut context = String::new();
+    for v in json_objects(text) {
+        let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+        match get("objectType").as_str() {
+            "log" if matches!(get("level").as_str(), "error" | "fatal") => {
+                let msg = get("value").trim().to_string();
+                let at = match (v.get("line").and_then(|l| l.as_u64()), v.get("column").and_then(|c| c.as_u64())) {
+                    (Some(l), Some(c)) => format!("line {l}, column {c}: "),
+                    (Some(l), None) => format!("line {l}: "),
+                    _ => String::new(),
+                };
+                errors.push(format!("{at}{msg}"));
+            }
+            "analysisStart" => {
+                node = get("top");
+                context = get("context");
+            }
+            "realizabilityCheck" => {
+                let mut conflicting = Vec::new();
+                if let Some(nodes) = v.pointer("/conflictingSet/nodes").and_then(|n| n.as_array()) {
+                    for n in nodes {
+                        for e in n.get("elements").and_then(|e| e.as_array()).into_iter().flatten() {
+                            let s = |k: &str| e.get(k).and_then(|x| x.as_str()).unwrap_or("");
+                            conflicting.push(format!("{} {}", s("category"), s("name")).trim().to_string());
+                        }
+                    }
+                }
+                realizability.push(RealizabilityResult {
+                    node: node.clone(),
+                    context: context.clone(),
+                    result: get("result"),
+                    conflicting,
+                });
+            }
+            _ => {}
+        }
+    }
+    (errors, realizability)
 }
 
 /// Kind 2's `-json` output is a JSON array (or NDJSON in some versions). We
 /// try both. Each property is a `{ objectType: "property", ... }` record.
+///
+/// Several engines may report the same property (BMC and IC3 both reach a
+/// mode, say); one result per name is kept — the first conclusive answer,
+/// in first-report order.
 pub fn parse_kind2_json(text: &str) -> Vec<PropertyResult> {
-    let mut props = Vec::new();
-    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(text) {
-        for v in arr {
-            if let Some(p) = json_to_property(&v) {
-                props.push(p);
-            }
+    let mut props: Vec<PropertyResult> = Vec::new();
+    for v in json_objects(text) {
+        let Some(p) = json_to_property(&v) else { continue };
+        match props.iter_mut().find(|q| q.name == p.name) {
+            Some(q) if q.outcome() == Outcome::Unknown && p.outcome() != Outcome::Unknown => *q = p,
+            Some(_) => {}
+            None => props.push(p),
         }
-        return props;
     }
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
-            if let Some(p) = json_to_property(&v) {
-                props.push(p);
-            }
-        }
+    let names: Vec<String> = props.iter().map(|p| p.display_name()).collect();
+    for (i, p) in props.iter_mut().enumerate() {
+        let same = names.iter().filter(|n| **n == names[i]).count();
+        p.label = if same > 1 {
+            let k = names[..=i].iter().filter(|n| **n == names[i]).count();
+            format!("{} #{k}", names[i])
+        } else {
+            names[i].clone()
+        };
     }
     props
 }
@@ -200,12 +366,17 @@ fn json_to_property(v: &serde_json::Value) -> Option<PropertyResult> {
         .and_then(|s| s.as_str())
         .map(|s| s.to_string());
     let counterexample = obj.get("counterExample").cloned();
+    let witness = obj.get("witness").cloned();
+    let line = obj.get("line").and_then(|l| l.as_u64());
     Some(PropertyResult {
         name,
         status,
         scope,
         source,
         counterexample,
+        witness,
+        line,
+        label: String::new(),
     })
 }
 

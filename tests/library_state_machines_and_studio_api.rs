@@ -142,13 +142,14 @@ fn studio_inspect_emits_the_documented_schema() {
     assert!(nodes
         .iter()
         .any(|n| n["name"] == "ReleaseLogic" && n["kind"] == "Operator"));
-    // The contract summary must include the three modes the example declares.
+    // The contract summary must include the four modes the example declares
+    // (RefusedRequest closes the gap Kind 2 found: modes are exhaustive).
     let contracts = pkg["contracts"].as_array().unwrap();
     let c = contracts
         .iter()
         .find(|c| c["name"] == "ReleaseLogic_contract")
         .unwrap();
-    assert_eq!(c["mode_count"], 3);
+    assert_eq!(c["mode_count"], 4);
     let modes: Vec<&str> = c["modes"]
         .as_array()
         .unwrap()
@@ -158,6 +159,7 @@ fn studio_inspect_emits_the_documented_schema() {
     assert!(modes.contains(&"SafeInhibit"));
     assert!(modes.contains(&"AuthorizedRelease"));
     assert!(modes.contains(&"Idle"));
+    assert!(modes.contains(&"RefusedRequest"));
 }
 
 #[test]

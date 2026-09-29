@@ -355,6 +355,61 @@
               ]
             },
             {
+              "name": "RefusedRequest",
+              "requires": [
+                {
+                  "expr": "Var",
+                  "name": "release_request"
+                },
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "fault_present"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                },
+                {
+                  "arg": {
+                    "expr": "Binary",
+                    "lhs": {
+                      "expr": "Binary",
+                      "lhs": {
+                        "expr": "Var",
+                        "name": "master_arm"
+                      },
+                      "op": "And",
+                      "rhs": {
+                        "expr": "Var",
+                        "name": "station_selected"
+                      }
+                    },
+                    "op": "And",
+                    "rhs": {
+                      "expr": "Var",
+                      "name": "consent"
+                    }
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                }
+              ],
+              "ensures": [
+                {
+                  "arg": {
+                    "expr": "Var",
+                    "name": "release_cmd"
+                  },
+                  "expr": "Unary",
+                  "op": "Not"
+                },
+                {
+                  "expr": "Var",
+                  "name": "inhibit"
+                }
+              ]
+            },
+            {
               "ensures": [
                 {
                   "arg": {

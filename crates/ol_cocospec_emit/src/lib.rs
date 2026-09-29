@@ -4,12 +4,14 @@
 //!
 //! * `Target::Modern` — Kind 2 `con/noc` block contract syntax, attached to a
 //!   node by name.
-//! * `Target::Legacy` — block-comment contract syntax (`(*@contract ... @*)`)
+//! * `Target::Legacy` — block-comment contract syntax (`(*@contract ... *)`)
 //!   for older Kind 2 versions and SCADE-style toolchains.
 //!
 //! Both targets emit the same logical contract; the IR is the source of truth.
 
 use std::fmt::Write as _;
+
+pub mod kind2;
 
 use ol_contract_ir::{parse_contracts, ContractDef};
 use ol_ir::{NodeDef, Project};
@@ -151,7 +153,7 @@ fn emit_node_with_contract_ref(node: &NodeDef, contract_name: &str, out: &mut St
         .join(", ");
     let _ = writeln!(
         out,
-        "(*@contract import {contract_name}({input_args}) returns ({output_args}); @*)"
+        "(*@contract import {contract_name}({input_args}) returns ({output_args}); *)"
     );
     let _ = writeln!(out, "-- see node body in main .lus file");
 }
@@ -174,6 +176,6 @@ fn emit_legacy_node_contract(node: &NodeDef, c: &ContractDef, out: &mut String) 
         }
         let _ = writeln!(out, "  );");
     }
-    let _ = writeln!(out, "@*)");
+    let _ = writeln!(out, "*)");
     let _ = writeln!(out, "-- contract above applies to node `{}`", node.name);
 }

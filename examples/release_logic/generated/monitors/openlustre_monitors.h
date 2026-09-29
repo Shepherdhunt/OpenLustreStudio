@@ -2,10 +2,54 @@
 #ifndef OL_GENERATED_MONITORS_H
 #define OL_GENERATED_MONITORS_H
 #include "openlustre_generated.h"
+#include <stddef.h>
+
+/* --- ReleaseLogic_contract_observer --- */
+typedef struct {
+  bool master_arm;
+  bool station_selected;
+  bool consent;
+  bool fault_present;
+  bool release_request;
+  bool release_cmd;
+  bool inhibit;
+} ReleaseLogic_contract_observer_Input;
+
+typedef struct {
+  bool ol_g0;
+  bool ol_g1;
+  bool ol_g2;
+  bool ol_g3;
+  bool ol_m0_r0;
+  bool ol_m0_r1;
+  bool ol_m0_e0;
+  bool ol_m0_e1;
+  bool ol_m1_r0;
+  bool ol_m1_r1;
+  bool ol_m1_r2;
+  bool ol_m1_r3;
+  bool ol_m1_r4;
+  bool ol_m1_e0;
+  bool ol_m1_e1;
+  bool ol_m2_r0;
+  bool ol_m2_r1;
+  bool ol_m2_r2;
+  bool ol_m2_e0;
+  bool ol_m2_e1;
+  bool ol_m3_r0;
+  bool ol_m3_e0;
+} ReleaseLogic_contract_observer_Output;
+
+typedef struct {
+  bool initialized;
+} ReleaseLogic_contract_observer_State;
+
+void ReleaseLogic_contract_observer_init(ReleaseLogic_contract_observer_State* self);
+void ReleaseLogic_contract_observer_step(ReleaseLogic_contract_observer_State* self, const ReleaseLogic_contract_observer_Input* in, ReleaseLogic_contract_observer_Output* out);
 
 /* monitor for contract `ReleaseLogic_contract` over `ReleaseLogic` */
-typedef struct { int active_mode; bool any_violation; } ReleaseLogic_contract_monitor_State;
+typedef struct { int active_mode; bool any_violation; ReleaseLogic_contract_observer_State obs; } ReleaseLogic_contract_monitor_State;
 void ReleaseLogic_contract_monitor_reset(ReleaseLogic_contract_monitor_State* s);
-void ReleaseLogic_contract_monitor_check(ReleaseLogic_contract_monitor_State* s, const ReleaseLogic_Input* in, const ReleaseLogic_Output* out);
+void ReleaseLogic_contract_monitor_check(ReleaseLogic_contract_monitor_State* s, const ReleaseLogic_Input* in, const ReleaseLogic_Output* out, char* active_mode_buf, size_t active_mode_size, char* violations_buf, size_t violations_size);
 
 #endif /* OL_GENERATED_MONITORS_H */
