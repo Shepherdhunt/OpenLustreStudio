@@ -699,6 +699,107 @@ fn activation_create_validate_edit_build_remove() {
     assert_eq!(sr, 400, "removing a missing activation is rejected");
 }
 
+/// Contracts through the Studio: dry-run check, create (attached to its
+/// operator, interface copied from it), CoCoSpec emission, error vs. warning
+/// handling, and the attached contract staying in step with port renames and
+/// additions — then removal detaches it.
+#[test]
+fn contract_create_check_edit_sync_remove() {
+    let g = start_server_on_workspace("ws_contract");
+    let port = g.port;
+
+    post_ok(port, "/api/edit/add_node", r#"{"name":"Guard","kind":"operator"}"#);
+    for p in [
+        r#"{"node":"Guard","side":"input","name":"arm","type":"bool"}"#,
+        r#"{"node":"Guard","side":"input","name":"fault","type":"bool"}"#,
+        r#"{"node":"Guard","side":"output","name":"cmd","type":"bool"}"#,
+    ] {
+        post_ok(port, "/api/edit/add_port", p);
+    }
+    post_ok(port, "/api/edit/add_equation", r#"{"node":"Guard","lhs":"cmd","body":"arm and not fault"}"#);
+
+    let contract = |guarantee: &str, extra_mode: &str| -> String {
+        format!(
+            r#"{{"name":"GuardC","operator":"Guard",
+                 "ghosts":[{{"name":"first","type":"bool","expr":"true -> false"}}],
+                 "assumptions":[{{"name":"sane","expr":"not (arm and fault) or fault"}}],
+                 "guarantees":[{{"name":"safe","expr":"{guarantee}"}}],
+                 "modes":[{{"name":"Faulted","requires":["fault"],"ensures":["not cmd"]}},
+                          {{"name":"Armed","requires":["arm","not fault"],"ensures":["cmd"]}}{extra_mode}]}}"#
+        )
+    };
+
+    // Dry run: a typo is an error pinned to its clause; nothing is saved.
+    let (s, body) = request(port, "POST", "/api/contract/check", &contract("cmd => armm", "")).expect("check");
+    assert_eq!(s, 200);
+    let dry: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dry["ok"], false, "{dry}");
+    assert!(dry["errors"].to_string().contains("guarantee `safe`"), "{dry}");
+    // A good contract dry-runs clean and renders as CoCoSpec.
+    let (_, body) = request(port, "POST", "/api/contract/check", &contract("cmd => arm", "")).expect("check");
+    let dry: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dry["ok"], true, "{dry}");
+    let coco = dry["cocospec"].as_str().unwrap();
+    assert!(coco.contains("contract GuardC(") && coco.contains("mode Armed ("), "{coco}");
+    assert!(get_json(port, "/api/contract")["contracts"].as_array().unwrap().is_empty(), "dry run saved nothing");
+
+    // Saving a contract with an error is refused.
+    let (s, _) = request(port, "POST", "/api/edit/add_contract", &contract("cmd => armm", "")).expect("bad add");
+    assert_eq!(s, 400);
+
+    // Create: attached to Guard, interface copied from it, texts round-trip.
+    post_ok(port, "/api/edit/add_contract", &contract("cmd => arm", ""));
+    let c = get_json(port, "/api/contract?name=GuardC");
+    assert_eq!(c["attached_to"], serde_json::json!(["Guard"]), "{c}");
+    assert_eq!(c["inputs"].as_array().unwrap().len(), 2, "interface from the operator: {c}");
+    assert_eq!(c["guarantees"][0]["expr"], "cmd => arm", "{c}");
+    assert_eq!(c["modes"][1]["requires"], serde_json::json!(["arm", "not fault"]), "{c}");
+    assert_eq!(c["ghosts"][0]["expr"], "true -> false", "{c}");
+    let ins = get_json(port, "/api/inspect");
+    assert!(
+        !ins["diagnostics"].to_string().contains("`Guard` has no contract"),
+        "C0099 gone once a contract is attached"
+    );
+    let (sb, bb) = request(port, "POST", "/api/build", r#"{"node":"Guard"}"#).expect("build");
+    assert_eq!(sb, 200);
+    let bd: serde_json::Value = serde_json::from_str(&bb).unwrap();
+    assert_eq!(bd["ok"], true, "{bd}");
+
+    // One contract per operator.
+    let (s, _) = request(port, "POST", "/api/edit/add_contract",
+        &contract("cmd => arm", "").replace("\"GuardC\"", "\"GuardC2\"")).expect("second");
+    assert_eq!(s, 400, "an operator has at most one contract");
+
+    // Warnings don't block a save (a vacuous ensure), but they are reported.
+    let vacuous = r#",{"name":"Always","requires":["arm"],"ensures":["true"]}"#;
+    let (_, body) = request(port, "POST", "/api/contract/check", &contract("cmd => arm", vacuous)).expect("check");
+    let dry: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(dry["ok"], true, "{dry}");
+    assert!(dry["diagnostics"].to_string().contains("C0061"), "vacuous ensure warned: {dry}");
+    post_ok(port, "/api/edit/update_contract", &contract("cmd => arm", vacuous));
+    assert_eq!(get_json(port, "/api/contract?name=GuardC")["modes"].as_array().unwrap().len(), 3);
+
+    // Renaming a port renames it in the contract's interface AND clauses.
+    post_ok(port, "/api/edit/update_port", r#"{"node":"Guard","name":"arm","new_name":"armed"}"#);
+    let c = get_json(port, "/api/contract?name=GuardC");
+    assert_eq!(c["inputs"][0]["name"], "armed", "{c}");
+    assert_eq!(c["guarantees"][0]["expr"], "cmd => armed", "{c}");
+    assert_eq!(c["modes"][1]["requires"][0], "armed", "{c}");
+    // Adding a port extends the contract interface, so it still matches.
+    post_ok(port, "/api/edit/add_port", r#"{"node":"Guard","side":"input","name":"hold","type":"bool"}"#);
+    let c = get_json(port, "/api/contract?name=GuardC");
+    assert_eq!(c["inputs"].as_array().unwrap().len(), 3, "{c}");
+    let ins = get_json(port, "/api/inspect");
+    let codes = ins["diagnostics"].to_string();
+    assert!(!codes.contains("C0050") && !codes.contains("C0051"), "interface in step: {codes}");
+
+    // Remove detaches it from the operator.
+    post_ok(port, "/api/edit/remove_contract", r#"{"name":"GuardC"}"#);
+    assert!(get_json(port, "/api/contract")["contracts"].as_array().unwrap().is_empty());
+    let ins = get_json(port, "/api/inspect");
+    assert!(ins["diagnostics"].to_string().contains("`Guard` has no contract"), "detached");
+}
+
 /// Models are built incrementally: an operator whose outputs come from two
 /// constructs must accept the FIRST one while the other outputs are still
 /// unassigned. Validation blocks only errors the edit itself introduces.

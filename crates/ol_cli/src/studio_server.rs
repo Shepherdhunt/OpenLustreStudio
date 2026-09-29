@@ -327,6 +327,18 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         ("POST", "/api/edit/remove_activation") => {
             apply_edit_response(ctx, body, edit_remove_activation)
         }
+        ("GET", "/api/contract") => match contract_get(ctx, &parse_query(query)) {
+            Ok(b) => (200, "application/json", b.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/contract/check") => contract_check_response(ctx, body),
+        ("POST", "/api/edit/add_contract") => apply_edit_response(ctx, body, edit_add_contract),
+        ("POST", "/api/edit/update_contract") => {
+            apply_edit_response(ctx, body, edit_update_contract)
+        }
+        ("POST", "/api/edit/remove_contract") => {
+            apply_edit_response(ctx, body, edit_remove_contract)
+        }
         ("POST", "/api/edit/remove_state_machine") => {
             apply_edit_response(ctx, body, edit_remove_state_machine)
         }
@@ -1405,6 +1417,7 @@ fn edit_add_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Resul
         "output" => node.outputs.push(port),
         other => return Err(format!("side must be input|output, got `{other}`")),
     }
+    sync_attached_contract(project, &node_name, None);
     Ok(())
 }
 
@@ -2281,6 +2294,449 @@ fn activation_get(
     }
 }
 
+// --- Contracts (CoCoSpec: ghosts, assume / guarantee, modes) ----------------
+
+/// The contracts in `project`, parsed (raw JSON entries that fail to parse are
+/// skipped here — the contract checker reports them as C0001).
+fn all_contracts(project: &ol_ir::Project) -> Vec<ol_contract_ir::ContractDef> {
+    project
+        .packages
+        .iter()
+        .flat_map(|p| ol_contract_ir::parse_contracts(&p.contracts).0)
+        .collect()
+}
+
+/// The operators whose `contract` names `cname`.
+fn contract_users(project: &ol_ir::Project, cname: &str) -> Vec<String> {
+    project
+        .all_nodes()
+        .filter(|n| n.contract.as_deref() == Some(cname))
+        .map(|n| n.name.clone())
+        .collect()
+}
+
+/// Parse the structured contract editor payload:
+/// `{name, operator, ghosts: [{name, type, expr}], assumptions: [{name?, expr}],
+/// guarantees: [{name?, expr}], modes: [{name, requires: [..], ensures: [..]}]}`.
+/// The interface is NOT taken from the payload: it is copied from `operator`,
+/// because the checker requires a contract to match its operator exactly.
+fn parse_contract_req(
+    project: &ol_ir::Project,
+    req: &serde_json::Value,
+) -> Result<(ol_contract_ir::ContractDef, String), String> {
+    let name = req_str(req, "name")?.to_string();
+    if !is_identifier(&name) {
+        return Err(format!("`{name}` is not a valid identifier"));
+    }
+    let operator = req_str(req, "operator")?.to_string();
+    let node = project
+        .find_node(&operator)
+        .ok_or_else(|| format!("operator `{operator}` not found"))?;
+    let empty: Vec<serde_json::Value> = vec![];
+    let list = |key: &str| req.get(key).and_then(|v| v.as_array()).unwrap_or(&empty);
+    let expr = |label: &str, v: Option<&serde_json::Value>| -> Result<ol_ir::Expr, String> {
+        let text = v.and_then(|v| v.as_str()).map(str::trim).unwrap_or("");
+        if text.is_empty() {
+            return Err(format!("{label}: the expression is empty"));
+        }
+        ol_stdlib::parse_expr(text).map_err(|e| format!("{label}: {e}"))
+    };
+    let label_of = |item: &serde_json::Value| {
+        item.get("name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+
+    let mut ghost_vars = Vec::new();
+    for g in list("ghosts") {
+        let gname = req_str(g, "name")?.trim().to_string();
+        if !is_identifier(&gname) {
+            return Err(format!("ghost variable `{gname}` is not a valid identifier"));
+        }
+        let tstr = req_str(g, "type")?;
+        let ty = ol_stdlib::parse_type(tstr).map_err(|e| format!("ghost `{gname}` type: {e}"))?;
+        let definition = expr(&format!("ghost `{gname}`"), g.get("expr"))?;
+        ghost_vars.push(ol_contract_ir::GhostVar { name: gname, ty, definition });
+    }
+    let mut assumptions = Vec::new();
+    for (i, a) in list("assumptions").iter().enumerate() {
+        let label = label_of(a);
+        let shown = label.clone().unwrap_or_else(|| format!("#{i}"));
+        assumptions.push(ol_contract_ir::Assumption {
+            expr: expr(&format!("assumption `{shown}`"), a.get("expr"))?,
+            name: label,
+        });
+    }
+    let mut guarantees = Vec::new();
+    for (i, g) in list("guarantees").iter().enumerate() {
+        let label = label_of(g);
+        let shown = label.clone().unwrap_or_else(|| format!("#{i}"));
+        guarantees.push(ol_contract_ir::Guarantee {
+            expr: expr(&format!("guarantee `{shown}`"), g.get("expr"))?,
+            name: label,
+        });
+    }
+    let mut modes = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for m in list("modes") {
+        let mname = req_str(m, "name")?.trim().to_string();
+        if !is_identifier(&mname) {
+            return Err(format!("mode `{mname}` is not a valid identifier"));
+        }
+        if !seen.insert(mname.clone()) {
+            return Err(format!("mode `{mname}` is declared more than once"));
+        }
+        let exprs = |key: &str, what: &str| -> Result<Vec<ol_ir::Expr>, String> {
+            let items = m.get(key).and_then(|v| v.as_array()).unwrap_or(&empty);
+            items
+                .iter()
+                .enumerate()
+                .map(|(k, v)| expr(&format!("mode `{mname}` {what} #{k}"), Some(v)))
+                .collect()
+        };
+        modes.push(ol_contract_ir::Mode {
+            requires: exprs("requires", "require")?,
+            ensures: exprs("ensures", "ensure")?,
+            name: mname,
+        });
+    }
+    let contract = ol_contract_ir::ContractDef {
+        name,
+        inputs: node.inputs.clone(),
+        outputs: node.outputs.clone(),
+        ghost_vars,
+        assumptions,
+        guarantees,
+        modes,
+        imports: vec![],
+    };
+    Ok((contract, operator))
+}
+
+/// `project` with `contract` put in place of any contract of the same name
+/// (keeping that one's imports, which the editor doesn't author), attached to
+/// `operator`.
+fn with_contract(
+    project: &ol_ir::Project,
+    mut contract: ol_contract_ir::ContractDef,
+    operator: &str,
+) -> Result<ol_ir::Project, String> {
+    let mut candidate = project.clone();
+    let mut placed = false;
+    for pkg in &mut candidate.packages {
+        for raw in &mut pkg.contracts {
+            if raw.get("name").and_then(|v| v.as_str()) == Some(contract.name.as_str()) {
+                if let Ok(old) = serde_json::from_value::<ol_contract_ir::ContractDef>(raw.clone()) {
+                    contract.imports = old.imports;
+                }
+                *raw = serde_json::to_value(&contract).map_err(|e| e.to_string())?;
+                placed = true;
+            }
+        }
+    }
+    if !placed {
+        let value = serde_json::to_value(&contract).map_err(|e| e.to_string())?;
+        match candidate.packages.iter_mut().find(|p| p.name != "stdlib") {
+            Some(pkg) => pkg.contracts.push(value),
+            None => candidate.packages.push(ol_ir::Package {
+                name: "user".into(),
+                contracts: vec![value],
+                ..Default::default()
+            }),
+        }
+    }
+    for pkg in &mut candidate.packages {
+        if let Some(n) = pkg.nodes.iter_mut().find(|n| n.name == operator) {
+            n.contract = Some(contract.name.clone());
+        }
+    }
+    Ok(candidate)
+}
+
+/// Contract-check `project` the way a build sees it (stdlib merged, every
+/// construct lowered). Returns `(comparison key, diagnostic)` per diagnostic.
+fn contract_diagnostics(project: &ol_ir::Project) -> Result<Vec<(String, ol_ir::Diagnostic)>, String> {
+    let mut p = project.clone();
+    if let Ok(lib) = ol_stdlib::load_embedded() {
+        lib.merge_into(&mut p, "stdlib");
+    }
+    p.lower_state_machines()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    p.lower_activations()
+        .map_err(|errs| errs.into_iter().map(|e| e.to_string()).collect::<Vec<_>>().join("; "))?;
+    Ok(ol_contract_check::check_project(&p)
+        .diagnostics
+        .into_iter()
+        .map(|d| (format!("{}|{}|{}", d.code, d.message, d.context.join(" · ")), d))
+        .collect())
+}
+
+/// Check a candidate contract edit: the errors it INTRODUCES (a multiset
+/// difference against the current model, as for state machines — so a
+/// half-finished model elsewhere never blocks it) and every diagnostic that
+/// concerns this contract (errors, warnings such as vacuous guarantees or
+/// unreachable modes, and infos), for the editor to show.
+fn check_contract_edit(
+    project: &ol_ir::Project,
+    candidate: &ol_ir::Project,
+    cname: &str,
+) -> Result<(Vec<String>, Vec<serde_json::Value>), String> {
+    let after = contract_diagnostics(candidate)?;
+    let mut before: std::collections::HashMap<String, usize> = Default::default();
+    for (k, d) in contract_diagnostics(project).unwrap_or_default() {
+        if d.severity == ol_ir::Severity::Error {
+            *before.entry(k).or_default() += 1;
+        }
+    }
+    let mine = |d: &ol_ir::Diagnostic| {
+        let tag = format!("contract {cname}");
+        d.context.iter().any(|c| c == &tag || c.ends_with(&format!("/ {tag}")))
+    };
+    let mut introduced = Vec::new();
+    let mut concerning = Vec::new();
+    for (k, d) in &after {
+        if d.severity == ol_ir::Severity::Error {
+            match before.get_mut(k) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => introduced.push(format!("{}: {}", d.code, d.message)),
+            }
+        }
+        if mine(d) {
+            concerning.push(serde_json::json!({
+                "severity": format!("{:?}", d.severity),
+                "code": d.code,
+                "message": d.message,
+            }));
+        }
+    }
+    Ok((introduced, concerning))
+}
+
+/// The contract as Kind 2 CoCoSpec text (what `emit-lustre` writes for it).
+fn contract_cocospec(contract: &ol_contract_ir::ContractDef) -> String {
+    let project = ol_ir::Project {
+        name: "contract".into(),
+        packages: vec![ol_ir::Package {
+            name: "p".into(),
+            contracts: serde_json::to_value(contract).map(|v| vec![v]).unwrap_or_default(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    ol_cocospec_emit::emit_project(&project, ol_cocospec_emit::Target::Modern)
+        .lines()
+        .filter(|l| !l.starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn edit_add_contract(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let (contract, operator) = parse_contract_req(project, req)?;
+    if all_contracts(project).iter().any(|c| c.name == contract.name)
+        || project.find_node(&contract.name).is_some()
+    {
+        return Err(format!("`{}` already exists", contract.name));
+    }
+    if let Some(existing) = project.find_node(&operator).and_then(|n| n.contract.clone()) {
+        return Err(format!(
+            "operator `{operator}` already has contract `{existing}` — edit that one instead"
+        ));
+    }
+    let name = contract.name.clone();
+    let candidate = with_contract(project, contract, &operator)?;
+    let (introduced, _) = check_contract_edit(project, &candidate, &name)?;
+    if !introduced.is_empty() {
+        return Err(format!("the contract has errors: {}", introduced.join("; ")));
+    }
+    *project = candidate;
+    Ok(())
+}
+
+fn edit_update_contract(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let (contract, operator) = parse_contract_req(project, req)?;
+    if !all_contracts(project).iter().any(|c| c.name == contract.name) {
+        return Err(format!("contract `{}` not found", contract.name));
+    }
+    if let Some(existing) = project.find_node(&operator).and_then(|n| n.contract.clone()) {
+        if existing != contract.name {
+            return Err(format!("operator `{operator}` already has contract `{existing}`"));
+        }
+    }
+    let name = contract.name.clone();
+    let candidate = with_contract(project, contract, &operator)?;
+    let (introduced, _) = check_contract_edit(project, &candidate, &name)?;
+    if !introduced.is_empty() {
+        return Err(format!("the contract has errors: {}", introduced.join("; ")));
+    }
+    *project = candidate;
+    Ok(())
+}
+
+/// Remove a contract and detach it from every operator that used it.
+fn edit_remove_contract(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
+    let name = req_str(req, "name")?.to_string();
+    let mut removed = false;
+    for pkg in &mut project.packages {
+        let n = pkg.contracts.len();
+        pkg.contracts
+            .retain(|raw| raw.get("name").and_then(|v| v.as_str()) != Some(name.as_str()));
+        removed |= pkg.contracts.len() != n;
+        for node in &mut pkg.nodes {
+            if node.contract.as_deref() == Some(name.as_str()) {
+                node.contract = None;
+            }
+        }
+    }
+    if removed {
+        Ok(())
+    } else {
+        Err(format!("contract `{name}` not found"))
+    }
+}
+
+/// POST /api/contract/check — a dry run of add/update: the errors the edit
+/// would introduce, every diagnostic about this contract, and its CoCoSpec
+/// text. Nothing is saved.
+fn contract_check_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let result = (|| -> Result<serde_json::Value, String> {
+        let req: serde_json::Value =
+            serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+        let project = load_raw(ctx)?;
+        let (contract, operator) = parse_contract_req(&project, &req)?;
+        let name = contract.name.clone();
+        let cocospec = contract_cocospec(&contract);
+        let candidate = with_contract(&project, contract, &operator)?;
+        let (introduced, diagnostics) = check_contract_edit(&project, &candidate, &name)?;
+        Ok(serde_json::json!({
+            "ok": introduced.is_empty(),
+            "errors": introduced,
+            "diagnostics": diagnostics,
+            "cocospec": cocospec,
+        }))
+    })();
+    match result {
+        Ok(v) => (200, "application/json", v.to_string().into_bytes()),
+        // A parse failure is a normal answer for a dry run, not a server error.
+        Err(e) => (
+            200,
+            "application/json",
+            serde_json::json!({ "ok": false, "errors": [e], "diagnostics": [], "cocospec": "" })
+                .to_string()
+                .into_bytes(),
+        ),
+    }
+}
+
+/// GET /api/contract — every contract with the operators using it, or (with
+/// `?name=`) one contract with its expressions rendered back to text.
+fn contract_get(
+    ctx: &ServerCtx,
+    query: &std::collections::HashMap<String, String>,
+) -> Result<String, String> {
+    let project = load_raw(ctx)?;
+    let contracts = all_contracts(&project);
+    match query.get("name") {
+        None => Ok(serde_json::json!({
+            "schema_version": 1,
+            "contracts": contracts.iter().map(|c| serde_json::json!({
+                "name": c.name,
+                "attached_to": contract_users(&project, &c.name),
+            })).collect::<Vec<_>>(),
+        })
+        .to_string()),
+        Some(name) => {
+            let c = contracts
+                .iter()
+                .find(|c| &c.name == name)
+                .ok_or_else(|| format!("contract `{name}` not found in the model file"))?;
+            let fmt = ol_lustre_emit::format_expr;
+            let ports = |ps: &[ol_ir::Port]| -> Vec<serde_json::Value> {
+                ps.iter().map(|p| serde_json::json!({ "name": p.name, "type": type_str(&p.ty) })).collect()
+            };
+            Ok(serde_json::json!({
+                "schema_version": 1,
+                "name": c.name,
+                "attached_to": contract_users(&project, &c.name),
+                "inputs": ports(&c.inputs),
+                "outputs": ports(&c.outputs),
+                "ghosts": c.ghost_vars.iter().map(|g| serde_json::json!({
+                    "name": g.name, "type": type_str(&g.ty), "expr": fmt(&g.definition),
+                })).collect::<Vec<_>>(),
+                "assumptions": c.assumptions.iter().map(|a| serde_json::json!({
+                    "name": a.name, "expr": fmt(&a.expr),
+                })).collect::<Vec<_>>(),
+                "guarantees": c.guarantees.iter().map(|g| serde_json::json!({
+                    "name": g.name, "expr": fmt(&g.expr),
+                })).collect::<Vec<_>>(),
+                "modes": c.modes.iter().map(|m| serde_json::json!({
+                    "name": m.name,
+                    "requires": m.requires.iter().map(fmt).collect::<Vec<_>>(),
+                    "ensures": m.ensures.iter().map(fmt).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
+                "imports": c.imports.len(),
+                "cocospec": contract_cocospec(c),
+            })
+            .to_string())
+        }
+    }
+}
+
+/// Keep the contract attached to `node_name` in step with the operator's
+/// interface — the checker requires an exact match (C0050–C0053): copy the
+/// operator's inputs/outputs into it and apply a signal rename to every
+/// contract expression. A contract shared by several operators is left
+/// alone (a mismatch there is reported, not silently resolved one way).
+fn sync_attached_contract(project: &mut ol_ir::Project, node_name: &str, rename: Option<(&str, &str)>) {
+    let Some(node) = project.find_node(node_name) else { return };
+    let Some(cname) = node.contract.clone() else { return };
+    let (inputs, outputs) = (node.inputs.clone(), node.outputs.clone());
+    if contract_users(project, &cname).len() != 1 {
+        return;
+    }
+    for pkg in &mut project.packages {
+        for raw in &mut pkg.contracts {
+            if raw.get("name").and_then(|v| v.as_str()) != Some(cname.as_str()) {
+                continue;
+            }
+            let Ok(mut c) = serde_json::from_value::<ol_contract_ir::ContractDef>(raw.clone()) else {
+                return;
+            };
+            c.inputs = inputs.clone();
+            c.outputs = outputs.clone();
+            if let Some((old, new)) = rename.filter(|(o, n)| o != n) {
+                for g in &mut c.ghost_vars {
+                    g.definition.rename_var(old, new);
+                }
+                for a in &mut c.assumptions {
+                    a.expr.rename_var(old, new);
+                }
+                for g in &mut c.guarantees {
+                    g.expr.rename_var(old, new);
+                }
+                for m in &mut c.modes {
+                    m.requires.iter_mut().chain(m.ensures.iter_mut()).for_each(|e| e.rename_var(old, new));
+                }
+                for imp in &mut c.imports {
+                    imp.input_map.iter_mut().for_each(|(_, e)| e.rename_var(old, new));
+                    for (_, local) in &mut imp.output_map {
+                        if local == old {
+                            *local = new.to_string();
+                        }
+                    }
+                }
+            }
+            if let Ok(v) = serde_json::to_value(&c) {
+                *raw = v;
+            }
+            return;
+        }
+    }
+}
+
 // --- Types file: named types, structs, enums, arrays ------------------------
 
 /// Surface syntax for a type, matching what `parse_type` accepts so the GUI
@@ -2840,6 +3296,7 @@ fn edit_update_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Re
     // name and carry copies of their types: keep them pointing at the same
     // signal (SCADE renames propagate model-wide).
     propagate_port_change(project, &node_name, &name, &cur_name, retyped.as_ref());
+    sync_attached_contract(project, &node_name, Some((&name, &cur_name)));
     Ok(())
 }
 
@@ -2921,6 +3378,9 @@ fn edit_remove_port(project: &mut ol_ir::Project, req: &serde_json::Value) -> Re
         return Err(format!("`{name}` is not a port or local of `{node_name}`"));
     }
     node.diagram.positions.remove(&name);
+    // The attached contract's interface follows; clauses still naming the
+    // removed signal are reported (C0080), not silently dropped.
+    sync_attached_contract(project, &node_name, None);
     Ok(())
 }
 
