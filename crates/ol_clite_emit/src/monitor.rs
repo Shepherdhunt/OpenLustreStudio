@@ -2,13 +2,16 @@
 //!
 //! Each contract produces a C monitor that, given the same input/output
 //! structs the production code uses, asserts assumptions and guarantees and
-//! tracks the currently active mode. The monitor lives in its own translation
-//! unit so production C-Lite stays clean.
+//! tracks the currently active mode. The clauses themselves are computed by
+//! the contract's observer node (`ContractDef::observer`), compiled here with
+//! the ordinary node emitter, so temporal operators and ghost variables get
+//! the model's semantics. The monitor lives in its own translation unit so
+//! production C-Lite stays clean.
 
 use std::fmt::Write as _;
 
-use ol_contract_ir::{parse_contracts, ContractDef};
-use ol_ir::{BinOp, Expr, Literal, Project, UnaryOp};
+use ol_contract_ir::{parse_contracts, ContractDef, ObserverSignal};
+use ol_ir::Project;
 
 #[derive(Debug, Clone)]
 pub struct MonitorBundle {
@@ -57,7 +60,7 @@ pub fn emit_monitors(project: &Project) -> MonitorBundle {
                 .find(|n| n.contract.as_deref() == Some(c.name.as_str()))
                 .map(|n| n.name.clone())
                 .unwrap_or_else(|| c.name.clone());
-            emit_monitor(c, &owner, &mut header, &mut source);
+            emit_monitor(c, &owner, project, &mut header, &mut source);
             header.push('\n');
             source.push('\n');
         }
@@ -67,12 +70,27 @@ pub fn emit_monitors(project: &Project) -> MonitorBundle {
     MonitorBundle { header, source }
 }
 
-fn emit_monitor(c: &ContractDef, owner: &str, header: &mut String, source: &mut String) {
+fn emit_monitor(
+    c: &ContractDef,
+    owner: &str,
+    project: &Project,
+    header: &mut String,
+    source: &mut String,
+) {
+    // The contract's observer is an ordinary operator: emit it with the same
+    // code generator as the model, so `pre` / `->`, ghost variables and calls
+    // in contract clauses compile with exactly the model's semantics (and
+    // match the simulator, which steps the same node).
+    let obs = c.observer();
+    let on = obs.node.name.clone();
+    crate::emit_node_header(&obs.node, project, header);
+    crate::emit_node_source(&obs.node, project, source);
+
     let monitor_name = format!("{}_monitor", c.name);
     let _ = writeln!(header, "/* monitor for contract `{}` over `{owner}` */", c.name);
     let _ = writeln!(
         header,
-        "typedef struct {{ int active_mode; bool any_violation; }} {monitor_name}_State;"
+        "typedef struct {{ int active_mode; bool any_violation; {on}_State obs; }} {monitor_name}_State;"
     );
     let _ = writeln!(header, "void {monitor_name}_reset({monitor_name}_State* s);");
     let _ = writeln!(
@@ -83,6 +101,7 @@ fn emit_monitor(c: &ContractDef, owner: &str, header: &mut String, source: &mut 
     let _ = writeln!(source, "void {monitor_name}_reset({monitor_name}_State* s) {{");
     let _ = writeln!(source, "  s->active_mode = -1;");
     let _ = writeln!(source, "  s->any_violation = false;");
+    let _ = writeln!(source, "  {on}_init(&s->obs);");
     let _ = writeln!(source, "}}");
     let _ = writeln!(
         source,
@@ -91,157 +110,66 @@ fn emit_monitor(c: &ContractDef, owner: &str, header: &mut String, source: &mut 
     let _ = writeln!(source, "  if (active_mode_buf && active_mode_size > 0) active_mode_buf[0] = 0;");
     let _ = writeln!(source, "  if (violations_buf && violations_size > 0) violations_buf[0] = 0;");
 
-    let scope = MonScope {
-        inputs: c.inputs.iter().map(|p| p.name.clone()).collect(),
-        outputs: c.outputs.iter().map(|p| p.name.clone()).collect(),
-    };
+    // Feed the observer this cycle's inputs and outputs (memcpy: array fields
+    // can't be assigned in C), then step it.
+    let _ = writeln!(source, "  {on}_Input oi;");
+    let _ = writeln!(source, "  {on}_Output oo;");
+    let _ = writeln!(source, "  memset(&oi, 0, sizeof(oi));");
+    for (p, from) in c.inputs.iter().map(|p| (p, "in")).chain(c.outputs.iter().map(|p| (p, "out"))) {
+        let f = crate::c_ident(&p.name);
+        let _ = writeln!(source, "  memcpy(&oi.{f}, &{from}->{f}, sizeof(oi.{f}));");
+    }
+    let _ = writeln!(source, "  {on}_step(&s->obs, &oi, &oo);");
 
-    for (i, a) in c.assumptions.iter().enumerate() {
-        let cond = emit_mon_expr(&a.expr, &scope);
-        let label = a.name.clone().unwrap_or_else(|| format!("assumption#{i}"));
-        let _ = writeln!(
-            source,
-            "  if (!({cond})) {{ s->any_violation = true; _ol_append(violations_buf, violations_size, \"|\", \"{label}\"); }}"
-        );
+    // Interpret its signals exactly as `Observer::verdict` does: assumptions,
+    // guarantees, then each mode (active when all its requires hold).
+    let field = |i: usize| format!("oo.{}", crate::c_ident(&obs.node.outputs[i].name));
+    for (i, sig) in obs.signals.iter().enumerate() {
+        match sig {
+            ObserverSignal::Assumption { label, .. } | ObserverSignal::Guarantee { label, .. } => {
+                let _ = writeln!(
+                    source,
+                    "  if (!{}) {{ s->any_violation = true; _ol_append(violations_buf, violations_size, \"|\", \"{label}\"); }}",
+                    field(i)
+                );
+            }
+            _ => {}
+        }
     }
-    for (i, g) in c.guarantees.iter().enumerate() {
-        let cond = emit_mon_expr(&g.expr, &scope);
-        let label = g.name.clone().unwrap_or_else(|| format!("guarantee#{i}"));
-        let _ = writeln!(
-            source,
-            "  if (!({cond})) {{ s->any_violation = true; _ol_append(violations_buf, violations_size, \"|\", \"{label}\"); }}"
-        );
-    }
-    for (idx, m) in c.modes.iter().enumerate() {
-        let require_parts: Vec<String> = m
-            .requires
+    for (m, mode) in c.modes.iter().enumerate() {
+        let requires: Vec<String> = obs
+            .signals
             .iter()
-            .map(|r| format!("({})", emit_mon_expr(r, &scope)))
+            .enumerate()
+            .filter(|(_, s)| matches!(s, ObserverSignal::Require { mode, .. } if *mode == m))
+            .map(|(i, _)| field(i))
             .collect();
-        let require_cond = if require_parts.is_empty() {
-            "true".to_string()
-        } else {
-            require_parts.join(" && ")
-        };
-        let _ = writeln!(source, "  if ({require_cond}) {{");
-        let _ = writeln!(source, "    s->active_mode = {idx};");
+        let cond = if requires.is_empty() { "true".to_string() } else { requires.join(" && ") };
+        let _ = writeln!(source, "  if ({cond}) {{");
+        let _ = writeln!(source, "    s->active_mode = {m};");
         let _ = writeln!(
             source,
             "    _ol_append(active_mode_buf, active_mode_size, \"|\", \"{}\");",
-            m.name
+            mode.name
         );
-        for (j, e) in m.ensures.iter().enumerate() {
-            let cond = emit_mon_expr(e, &scope);
-            let _ = writeln!(
-                source,
-                "    if (!({cond})) {{ s->any_violation = true; _ol_append(violations_buf, violations_size, \"|\", \"{}::ensure#{j}\"); }}",
-                m.name
-            );
+        for (i, sig) in obs.signals.iter().enumerate() {
+            if let ObserverSignal::Ensure { mode: em, index } = sig {
+                if *em == m {
+                    let _ = writeln!(
+                        source,
+                        "    if (!{}) {{ s->any_violation = true; _ol_append(violations_buf, violations_size, \"|\", \"{}::ensure#{index}\"); }}",
+                        field(i),
+                        mode.name
+                    );
+                }
+            }
         }
         let _ = writeln!(source, "  }}");
     }
+    let _ = writeln!(source, "  (void)oo;");
 
     let _ = writeln!(source, "  if (active_mode_buf && active_mode_buf[0] == 0) snprintf(active_mode_buf, active_mode_size, \"%s\", \"<none>\");");
     let _ = writeln!(source, "  if (violations_buf && violations_buf[0] == 0) snprintf(violations_buf, violations_size, \"%s\", \"<none>\");");
 
     let _ = writeln!(source, "}}");
-}
-
-struct MonScope {
-    inputs: Vec<String>,
-    outputs: Vec<String>,
-}
-
-impl MonScope {
-    fn ref_name(&self, name: &str) -> String {
-        if self.inputs.iter().any(|n| n == name) {
-            format!("in->{}", crate::c_ident(name))
-        } else if self.outputs.iter().any(|n| n == name) {
-            format!("out->{}", crate::c_ident(name))
-        } else {
-            name.to_string()
-        }
-    }
-}
-
-fn emit_mon_expr(expr: &Expr, scope: &MonScope) -> String {
-    match expr {
-        Expr::Const { lit: Literal::Bool { value } } => if *value { "true" } else { "false" }.into(),
-        Expr::Const { lit: Literal::Int { value } } => format!("({value})"),
-        Expr::Const { lit: Literal::Float { value } } => format!("({value})"),
-        Expr::Const { lit: Literal::Char { value } } => format!("({value})"),
-        Expr::Var { name } => scope.ref_name(name),
-        Expr::Cast { to, arg } => {
-            format!("(({}){})", to.c_name(), emit_mon_expr(arg, scope))
-        }
-        Expr::Unary { op, arg } => {
-            let a = emit_mon_expr(arg, scope);
-            match op {
-                UnaryOp::Not => format!("(!{a})"),
-                UnaryOp::Neg => format!("(-{a})"),
-            }
-        }
-        Expr::Binary { op, lhs, rhs } => {
-            let l = emit_mon_expr(lhs, scope);
-            let r = emit_mon_expr(rhs, scope);
-            let sym = match op {
-                BinOp::And => "&&",
-                BinOp::Or => "||",
-                BinOp::Implies => {
-                    return format!("((!{l}) || ({r}))");
-                }
-                BinOp::Xor => "^",
-                BinOp::Eq => "==",
-                BinOp::Neq => "!=",
-                BinOp::Lt => "<",
-                BinOp::Le => "<=",
-                BinOp::Gt => ">",
-                BinOp::Ge => ">=",
-                BinOp::Add => "+",
-                BinOp::Sub => "-",
-                BinOp::Mul => "*",
-                BinOp::Div => "/",
-                BinOp::Mod => "%",
-                BinOp::BitAnd => "&",
-                BinOp::BitOr => "|",
-                BinOp::BitXor => "^",
-                BinOp::Shl => "<<",
-                BinOp::Shr => ">>",
-            };
-            format!("({l} {sym} {r})")
-        }
-        Expr::IfThenElse {
-            cond,
-            then_branch,
-            else_branch,
-        } => format!(
-            "({} ? {} : {})",
-            emit_mon_expr(cond, scope),
-            emit_mon_expr(then_branch, scope),
-            emit_mon_expr(else_branch, scope)
-        ),
-        Expr::Pre { .. } | Expr::Arrow { .. } => "1 /* temporal in monitor: lowered to true */".into(),
-        Expr::Call { node, .. } => format!("/* call {node} elided */ 1"),
-        // Contracts are base-clocked; a sampled stream in a monitor reads its
-        // held value, and a merge is the plain conditional it computes.
-        Expr::When { arg, .. } => emit_mon_expr(arg, scope),
-        Expr::Merge { clock, on_true, on_false } => format!(
-            "({} ? {} : {})",
-            scope.ref_name(clock),
-            emit_mon_expr(on_true, scope),
-            emit_mon_expr(on_false, scope)
-        ),
-        // Iterators don't appear in boolean contracts; lower to a neutral
-        // value so the monitor still compiles if one ever does.
-        Expr::Iterate { .. } => "/* iterator elided in monitor */ 0".into(),
-        Expr::Field { base, field } => format!("{}.{field}", emit_mon_expr(base, scope)),
-        Expr::Index { base, index } => format!(
-            "{}[{}]",
-            emit_mon_expr(base, scope),
-            emit_mon_expr(index, scope)
-        ),
-        Expr::Tuple { .. } | Expr::Array { .. } | Expr::Struct { .. } => {
-            "/* composite literal */ 0".into()
-        }
-    }
 }

@@ -78,81 +78,30 @@ pub fn check_project(project: &Project) -> ContractReport {
     }
 }
 
-/// The name of the synthetic operator a contract is type-checked as.
-fn probe_node_name(contract: &str) -> String {
-    format!("__contract_{contract}")
-}
-
-/// A contract as an ordinary operator the type checker understands: its
-/// inputs are the contract's inputs AND outputs (a contract reads both), its
-/// ghost variables are locals defined by their equations, and every clause is
-/// a `bool` local defined by the clause expression. Returns the node and, per
-/// equation, the clause label to report errors against.
-fn synthetic_node(c: &ContractDef) -> (NodeDef, Vec<String>) {
-    use ol_ir::{Equation, Local};
-    let mut locals = Vec::new();
-    let mut equations = Vec::new();
-    let mut labels = Vec::new();
-    for g in &c.ghost_vars {
-        locals.push(Local { name: g.name.clone(), ty: g.ty.clone() });
-        equations.push(Equation { lhs: vec![g.name.clone()], rhs: g.definition.clone() });
-        labels.push(format!("ghost `{}`", g.name));
-    }
-    let mut clause = |label: String, expr: &Expr| {
-        let n = format!("__clause_{}", equations.len());
-        locals.push(Local { name: n.clone(), ty: Type::Bool });
-        equations.push(Equation { lhs: vec![n], rhs: expr.clone() });
-        labels.push(label);
-    };
-    for (i, a) in c.assumptions.iter().enumerate() {
-        clause(format!("assumption `{}`", a.name.clone().unwrap_or_else(|| format!("#{i}"))), &a.expr);
-    }
-    for (i, g) in c.guarantees.iter().enumerate() {
-        clause(format!("guarantee `{}`", g.name.clone().unwrap_or_else(|| format!("#{i}"))), &g.expr);
-    }
-    for m in &c.modes {
-        for (k, r) in m.requires.iter().enumerate() {
-            clause(format!("mode `{}` require #{k}", m.name), r);
-        }
-        for (k, e) in m.ensures.iter().enumerate() {
-            clause(format!("mode `{}` ensure #{k}", m.name), e);
-        }
-    }
-    let node = NodeDef {
-        name: probe_node_name(&c.name),
-        kind: ol_ir::NodeKind::Operator,
-        inputs: c.inputs.iter().chain(c.outputs.iter()).cloned().collect(),
-        outputs: vec![],
-        locals,
-        equations,
-        contract: None,
-        diagram: Default::default(),
-        probes: vec![],
-    };
-    (node, labels)
-}
-
-/// Type-check every contract's expressions with the real type checker (C0080):
-/// unknown names, ill-typed operators and non-Boolean clauses are errors, each
-/// reported against the clause that caused it. Without this, a guarantee
-/// naming an undeclared signal passed the checker and only failed at prove
-/// time or when the generated C monitor was compiled.
+/// Type-check every contract's expressions with the real type checker (C0080)
+/// by checking its observer node (see `ContractDef::observer` — the very node
+/// the runtime monitors execute): unknown names, ill-typed operators and
+/// non-Boolean clauses are errors, each reported against the clause that
+/// caused it. Without this, a guarantee naming an undeclared signal passed
+/// the checker and only failed at prove time or when a monitor compiled.
 fn check_expression_types(project: &Project, diags: &mut Vec<Diagnostic>) {
     let mut probe = project.clone();
-    let mut probes: Vec<(String, String, Vec<String>)> = Vec::new();
+    let mut probes: Vec<(ContractDef, ol_contract_ir::Observer)> = Vec::new();
     for pkg in &mut probe.packages {
         let (contracts, _) = parse_contracts(&pkg.contracts);
-        for c in &contracts {
-            let (node, labels) = synthetic_node(c);
-            probes.push((node.name.clone(), c.name.clone(), labels));
-            pkg.nodes.push(node);
+        for c in contracts {
+            let obs = c.observer();
+            pkg.nodes.push(obs.node.clone());
+            probes.push((c, obs));
         }
     }
     if probes.is_empty() {
         return;
     }
     let report = ol_typecheck::check_project(&probe);
-    for (node_name, cname, labels) in &probes {
+    for (contract, obs) in &probes {
+        let node_name = &obs.node.name;
+        let cname = &contract.name;
         let node_ctx = format!("node {node_name}");
         let eq_prefix = format!("{node_ctx} · equation ");
         for d in report.errors() {
@@ -163,7 +112,7 @@ fn check_expression_types(project: &Project, diags: &mut Vec<Diagnostic>) {
                 .context
                 .iter()
                 .find_map(|c| c.strip_prefix(&eq_prefix).and_then(|s| s.parse::<usize>().ok()))
-                .and_then(|i| labels.get(i).cloned())
+                .map(|i| obs.describe_equation(contract, i))
                 .unwrap_or_else(|| "interface".to_string());
             // Report under the contract's own names, not the probe's.
             let message = d.message.replace(node_name.as_str(), cname);

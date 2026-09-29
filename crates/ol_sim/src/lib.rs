@@ -138,6 +138,12 @@ pub struct Sim<'a> {
     pub node: &'a NodeDef,
     state: State,
     contract: Option<ContractDef>,
+    /// The contract's observer node (see `ContractDef::observer`), stepped
+    /// once per cycle with its own persistent state — so `pre` / `->` and
+    /// ghost variables in contracts evaluate exactly as the generated C
+    /// monitor computes them.
+    observer: Option<ol_contract_ir::Observer>,
+    observer_calls: HashMap<usize, State>,
     /// Per-call-site state, keyed by the address of the `Expr::Call` in the IR.
     /// Populated lazily on first invocation.
     call_states: HashMap<usize, State>,
@@ -198,11 +204,14 @@ impl<'a> Sim<'a> {
             ol_ir::ClockInfo::default()
         };
 
+        let observer = contract.as_ref().map(|c| c.observer());
         Ok(Sim {
             project,
             node,
             state: State::default(),
             contract,
+            observer,
+            observer_calls: HashMap::new(),
             call_states: HashMap::new(),
             consts,
             eq_order,
@@ -408,8 +417,7 @@ impl<'a> Sim<'a> {
             for p in &self.node.outputs {
                 out_row.push(out.get(&p.name).cloned().unwrap_or(Value::Bool(false)));
             }
-            if let Some(c) = &self.contract {
-                let step = evaluate_monitor(c, &inputs, &out);
+            if let Some(step) = self.observe(&inputs, &out)? {
                 let mode_label = if step.active_modes.is_empty() {
                     "<none>".to_string()
                 } else {
@@ -431,6 +439,37 @@ impl<'a> Sim<'a> {
         }
 
         Ok(trace)
+    }
+
+    /// Step the contract's observer on this cycle's inputs and outputs and
+    /// interpret its signals (`None` when the node has no contract).
+    fn observe(
+        &mut self,
+        inputs: &BTreeMap<String, Value>,
+        outputs: &BTreeMap<String, Value>,
+    ) -> Result<Option<MonitorStep>, SimError> {
+        let (Some(c), Some(obs)) = (&self.contract, &self.observer) else {
+            return Ok(None);
+        };
+        let mut args = Vec::with_capacity(obs.node.inputs.len());
+        for p in &obs.node.inputs {
+            let v = inputs.get(&p.name).or_else(|| outputs.get(&p.name)).cloned().ok_or_else(|| {
+                SimError::EvalError(format!("contract `{}` reads `{}`, which the node lacks", c.name, p.name))
+            })?;
+            args.push(v);
+        }
+        let values: Vec<bool> = if obs.signals.is_empty() {
+            Vec::new()
+        } else {
+            let out = step_instance(usize::MAX, &obs.node, args, &mut self.observer_calls, self.project, &mut None)?;
+            let items = match out {
+                Value::Tuple(items) => items,
+                single => vec![single],
+            };
+            items.into_iter().map(|v| matches!(v, Value::Bool(true))).collect()
+        };
+        let (active_modes, violations) = obs.verdict(c, &values);
+        Ok(Some(MonitorStep { active_modes, violations }))
     }
 }
 
@@ -536,61 +575,6 @@ fn parse_value(raw: &str, ty: &Type) -> Result<Value, ()> {
 struct MonitorStep {
     active_modes: Vec<String>,
     violations: Vec<String>,
-}
-
-fn evaluate_monitor(
-    c: &ContractDef,
-    inputs: &BTreeMap<String, Value>,
-    outputs: &BTreeMap<String, Value>,
-) -> MonitorStep {
-    let mut env: BTreeMap<String, Value> = BTreeMap::new();
-    env.extend(inputs.clone());
-    env.extend(outputs.clone());
-    let mut state = State::default();
-    let mut call_states: HashMap<usize, State> = HashMap::new();
-    let project = Project::default();
-
-    let mut active = Vec::new();
-    let mut violations = Vec::new();
-
-    // Guarantees are always required to hold.
-    for (i, g) in c.guarantees.iter().enumerate() {
-        let label = g.name.clone().unwrap_or_else(|| format!("guarantee#{i}"));
-        match eval(&g.expr, &env, &mut state, &mut call_states, &project, None, &mut None) {
-            Ok(Value::Bool(true)) => {}
-            _ => violations.push(label),
-        }
-    }
-
-    // A mode is active when all of its `require` clauses hold; when active,
-    // its `ensure` clauses must hold too.
-    for m in &c.modes {
-        let mut hit = true;
-        for r in &m.requires {
-            match eval(r, &env, &mut state, &mut call_states, &project, None, &mut None) {
-                Ok(Value::Bool(true)) => {}
-                _ => {
-                    hit = false;
-                    break;
-                }
-            }
-        }
-        if hit {
-            active.push(m.name.clone());
-            for (j, e) in m.ensures.iter().enumerate() {
-                let label = format!("{}::ensure#{j}", m.name);
-                match eval(e, &env, &mut state, &mut call_states, &project, None, &mut None) {
-                    Ok(Value::Bool(true)) => {}
-                    _ => violations.push(label),
-                }
-            }
-        }
-    }
-
-    MonitorStep {
-        active_modes: active,
-        violations,
-    }
 }
 
 /// C cast semantics for in-range values: integer narrowing wraps two's
@@ -1060,6 +1044,22 @@ fn eval_call(
     for a in args {
         arg_values.push(eval(a, env, state, call_states, project, site_clocks, cov)?);
     }
+    // The call-site key is the address of the `Expr::Call` node — stable for
+    // Sim's lifetime.
+    step_instance(call_expr as *const Expr as usize, callee, arg_values, call_states, project, cov)
+}
+
+/// Run one cycle of node instance `key` (its state lives in
+/// `call_states[key]`) on already-evaluated inputs, returning its output
+/// (a tuple for several outputs). Shared by calls and contract observers.
+fn step_instance(
+    key: usize,
+    callee: &NodeDef,
+    arg_values: Vec<Value>,
+    call_states: &mut HashMap<usize, State>,
+    project: &Project,
+    cov: &mut Option<Coverage>,
+) -> Result<Value, SimError> {
 
     // Project-wide constants are visible inside every callee body. We
     // re-evaluate them here rather than threading a state through every eval
@@ -1127,10 +1127,8 @@ fn eval_call(
             extract_output(callee, &mut callee_env)
         }
         NodeKind::Operator => {
-            // Stateful: take this call site's State, evaluate the body in its
-            // scope, snapshot, and put it back. The call-site key is the
-            // address of the `Expr::Call` node — stable for Sim's lifetime.
-            let key = call_expr as *const Expr as usize;
+            // Stateful: take this instance's State, evaluate the body in its
+            // scope, snapshot, and put it back.
             let mut sub_state = call_states.remove(&key).unwrap_or_default();
             // Clocked locals/outputs hold their last value through inactive
             // cycles — reseed them from the instance's previous snapshot.
