@@ -36,6 +36,7 @@ FOLDER="$WORK/OpenLustre Studio"
 APP="$FOLDER/OpenLustre Studio.app"
 RES="$APP/Contents/Resources"
 packaging/stage.sh "target/$TARGET/release/openlustre" "macos-$ARCH" "$RES" "$VERSION"
+packaging/macos/bundle-libs.sh "$RES" "$ARCH"
 
 plist() {  # app, executable, identifier, name
     cat > "$1/Contents/Info.plist" <<EOF
@@ -50,7 +51,7 @@ plist() {  # app, executable, identifier, name
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>LSMinimumSystemVersion</key><string>12.0</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict>
 </plist>
 EOF

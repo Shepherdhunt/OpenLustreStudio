@@ -94,6 +94,7 @@ fn the_generated_flight_code_flies_the_scripted_mission() {
         .arg(format!("-I{}", integration.display()))
         .arg(out.join("clite/openlustre_generated.c"))
         .arg(integration.join("pms_task.c"))
+        .arg(integration.join("pms_clock.c"))
         .arg(integration.join("mission_sim.c"))
         .arg("-o")
         .arg(&exe)

@@ -125,6 +125,7 @@ and no library calls, every equation traced back to the diagram
 |------|------|
 | `pms_platform.h` | what the flight computer provides: sample the inputs, drive the hooks, `PMS_PERIOD_MS` |
 | `pms_task.c` | the 100 Hz cyclic task: read, step, write (`--realtime` paces it on the clock) |
+| `pms_clock.c` | the period clock for macOS, Linux and Windows (the RTOS timer replaces it on the vehicle) |
 | `mission_sim.c` | a desktop platform: a simulated vehicle, hooks (one of them jammed) and operator flying a 50 s mission |
 | `expected_mission.txt` | the mission's log, which `scripts/verify.sh` and CI compare against |
 

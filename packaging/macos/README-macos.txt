@@ -1,8 +1,9 @@
 OpenLustre Studio for macOS
 ===========================
 
-Two ways to install (pick the download for your Mac's chip: arm64 for
-Apple Silicon M1/M2/M3/M4, x86_64 for Intel):
+Needs macOS 13 (Ventura) or later. Two ways to install (pick the download
+for your Mac's chip: arm64 for Apple Silicon M1/M2/M3/M4, x86_64 for
+Intel):
 
   .pkg      Double-click it. macOS may say it "can't be opened because it
             is from an unidentified developer" (the download is not signed

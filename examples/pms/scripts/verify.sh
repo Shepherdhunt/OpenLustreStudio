@@ -37,7 +37,7 @@ rm -rf out/code
 "$OPENLUSTRE" emit-clite pms.wksc --root PMS --out out/code
 "$CC" -std=c11 -O2 -Wall -Wextra -Wno-unused-but-set-variable -Wno-unused-variable \
     -I out/code/clite -I integration \
-    out/code/clite/openlustre_generated.c integration/pms_task.c integration/mission_sim.c \
+    out/code/clite/openlustre_generated.c integration/pms_task.c integration/pms_clock.c integration/mission_sim.c \
     -o out/pms_mission
 ./out/pms_mission > out/mission.txt
 if diff -u integration/expected_mission.txt out/mission.txt; then

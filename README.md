@@ -249,8 +249,8 @@ Actions ▸ package ▸ Artifacts):
 |---|---|---|
 | **Windows** 10/11, x64 | `OpenLustreStudio-<v>-windows-x86_64-Setup.exe` — a setup wizard; installs for you (no admin rights) or for everyone, adds Start Menu shortcuts and, optionally, `openlustre` to PATH; uninstall from Settings ▸ Apps | `…-windows-x86_64.zip`: portable, unzip and run |
 | **Ubuntu** 22.04+ (and Debian-based), x64 | `openlustre-studio_<v>_amd64.deb` — `sudo apt install ./openlustre-studio_<v>_amd64.deb` | `…-linux-x86_64.tar.gz`: unpack, `./install.sh` (per user; `--system` for everyone; `--uninstall`) |
-| **macOS** 12+, Apple Silicon | `…-macos-arm64.pkg` — double-click (the download is not signed: right-click ▸ Open the first time) | `…-macos-arm64.tar.gz`: unpack, `./install.sh` |
-| **macOS** 12+, Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` |
+| **macOS** 13+, Apple Silicon | `…-macos-arm64.pkg` — double-click (the download is not signed: right-click ▸ Open the first time) | `…-macos-arm64.tar.gz`: unpack, `./install.sh` |
+| **macOS** 13+, Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` |
 
 Every download carries the Studio, the 41-block library, and the samples;
 the Linux and macOS ones also bundle the Kind 2 prover and Z3, so proving

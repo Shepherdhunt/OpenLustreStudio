@@ -45,7 +45,7 @@ jobs:
             |---|---|---|
             | Windows 10/11 (x64) | `OpenLustreStudio-*-windows-x86_64-Setup.exe` | `…-windows-x86_64.zip` (portable) |
             | Ubuntu 22.04+ (x64) | `openlustre-studio_*_amd64.deb` (`sudo apt install ./…deb`) | `…-linux-x86_64.tar.gz` + `./install.sh` |
-            | macOS 12+ Apple Silicon | `…-macos-arm64.pkg` | `…-macos-arm64.tar.gz` + `./install.sh` |
-            | macOS 12+ Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` + `./install.sh` |
+            | macOS 13+ Apple Silicon | `…-macos-arm64.pkg` | `…-macos-arm64.tar.gz` + `./install.sh` |
+            | macOS 13+ Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` + `./install.sh` |
 
             Linux and macOS downloads bundle the Kind 2 prover and Z3; on Windows, Kind 2 runs through WSL or Docker (see README-windows.txt). Every download ships the PMS sample: `openlustre studio launch --sample pms`.
