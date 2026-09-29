@@ -867,7 +867,7 @@
   </div>
 
   <div class="dlg" id="dlg-act">
-    <p>A conditional activation is SCADE's <strong>activate-if decision tree</strong>, owned by one operator: conditions are tested top to bottom, the first that holds selects its branch, and <strong>every branch — else included — must assign every driven variable</strong> (SCADE exhaustiveness) or the save is rejected. It lowers into the operator; its per-branch <code class="inline">__act_*</code> flags show which branch fired when stepping. <em>Stage-1 semantics:</em> branches are selected, not clocked — <code class="inline">pre</code> inside a branch reads the previous <em>cycle</em> (like SCADE <code class="inline">last</code>), not the branch's previous activation.</p>
+    <p>A conditional activation is SCADE's <strong>activate-if decision tree</strong>, owned by one operator: conditions are tested top to bottom, the first that holds selects its branch, and <strong>every branch — else included — must assign every driven variable</strong> (SCADE exhaustiveness) or the save is rejected. It lowers into the operator; its per-branch <code class="inline">__act_*</code> flags show which branch fired when stepping. Branches are <strong>clocked</strong>, as in SCADE: a branch runs only on the cycles it is selected and its state is frozen otherwise — <code class="inline">pre v</code> inside a branch is <code class="inline">v</code> at the branch's previous activation, <code class="inline">-&gt;</code> initializes on its first activation, and a called operator steps only while its branch runs. To hold or read the previous cycle's value whichever branch set it (SCADE's <code class="inline">last 'v</code>), write <code class="inline">last(v)</code> or <code class="inline">last(v, init)</code>.</p>
     <div class="row">view activation <select id="act-select" onchange="actView()"></select></div>
     <div id="act-host"></div>
     <div class="edit-form">
@@ -884,7 +884,7 @@
       </div>
       <div class="row" style="align-items:flex-start">
         <label>branches</label>
-        <textarea id="act-branches" rows="5" style="flex:1" oninput="actPreview()" placeholder="One branch per line, first match wins:&#10;if fault as Fault:    cmd = 0;     safe = true&#10;elsif arm as Engaged: cmd = x + 1; safe = false&#10;else:                 cmd = x;     safe = true"></textarea>
+        <textarea id="act-branches" rows="5" style="flex:1" oninput="actPreview()" placeholder="One branch per line, first match wins:&#10;if fault as Fault:    cmd = 0;           safe = true&#10;elsif arm as Engaged: cmd = last(cmd) + 1; safe = false&#10;else:                 cmd = last(cmd);   safe = true"></textarea>
       </div>
       <div id="act-preview" class="fsm-preview"></div>
       <div class="row">
@@ -6296,6 +6296,13 @@ function kindOfTypeStr(t) {
 
 function simSignals() { return state.sim.session ? state.sim.session.signals : []; }
 
+/// A clocked activation's lowering plumbing (guards, sampled reads,
+/// per-branch values, last() holders): kept out of the watch table and the
+/// waveform. Its "branch selected" flags (`__act_<name>_b<k>`) stay.
+function simPlumbing(name) {
+  return name.startsWith("__act_") && !/_b\d+$/.test(name);
+}
+
 function setSimNote(kind, msg) {
   const el = document.getElementById("sim-note");
   el.className = "build-note " + (kind || "");
@@ -6525,7 +6532,9 @@ function simShowCycle() {
 /// check lanes; run stops are marked.
 function simWaveModel() {
   const s = state.sim, rows = s.rows;
-  const lanes = simSignals().map((g, i) => ({ name: g.name, type: g.type, kind: g.kind, values: rows.map(r => r.values[i]) }));
+  const lanes = simSignals()
+    .map((g, i) => ({ name: g.name, type: g.type, kind: g.kind, values: rows.map(r => r.values[i]) }))
+    .filter(l => !simPlumbing(l.name));
   if (s.session && s.session.monitored) {
     lanes.push({ id: "#mode", name: "mode", kind: "contract", values: rows.map(r => (r.modes || []).join(", ")) });
     lanes.push({ id: "#check", name: "contract", kind: "contract", check: true, values: rows.map(r => (r.violations || []).join(", ")) });
@@ -6603,7 +6612,7 @@ function simBuildWatchTable() {
   const body = document.getElementById("sim-watch-body");
   body.innerHTML = "";
   document.getElementById("step-entry-name").textContent = state.sim.session.root;
-  const sigs = simSignals();
+  const sigs = simSignals().filter(s => !simPlumbing(s.name));
   const ordered = sigs.filter(s => !s.name.startsWith("__")).concat(sigs.filter(s => s.name.startsWith("__")));
   for (const s of ordered) {
     const tr = document.createElement("tr");

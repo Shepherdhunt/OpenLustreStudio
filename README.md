@@ -46,9 +46,17 @@ condition that holds selects its branch, and every branch — else included —
 must assign every driven variable, checked before the tree is saved. It is
 drawn as a decision-tree chart, and on the operator's canvas both constructs
 appear as single blocks (reads in, drives out; double-click to edit). When
-stepping, per-branch flags show which branch fired each cycle.
+stepping, per-branch flags show which branch fired each cycle. Branches are
+**clocked**, as in SCADE: a branch runs only on the cycles it is selected
+and its state is frozen otherwise — `pre v` inside a branch is `v` at the
+branch's previous activation, `->` initializes on its first activation, and
+a called operator steps only while its branch runs. `last(v)` (SCADE's
+`last 'v`) reads the previous cycle's value whichever branch set it — the
+"hold" pattern, e.g. `else: cmd = last(cmd)`. Activations lower onto
+`when` / `merge` clocks, so the simulator, the generated C and the Lustre
+given to Kind 2 all share one semantics.
 
-![A conditional activation in OpenLustre Studio — the Conditional Activations dialog with its decision-tree chart (if fault / elsif engage and not hold / elsif hold / else) above the textual branch editor.](docs/screenshots/04-activation.png)
+![A conditional activation in OpenLustre Studio — the Conditional Activations dialog with its decision-tree chart (if fault / elsif engage and not hold / else with cmd = last(cmd)) above the textual branch editor and the clocked-branch semantics.](docs/screenshots/04-activation.png)
 
 **Contracts, authored in the Studio.** Each operator can carry a CoCoSpec
 contract — ghost variables, assumptions, guarantees and modes — edited as

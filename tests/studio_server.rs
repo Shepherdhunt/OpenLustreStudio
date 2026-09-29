@@ -234,4 +234,7 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("id=\"sim-cil\"") && html.contains("/api/sim/c"), "C-in-the-loop toggle missing");
     assert!(html.contains("function simSetC") && html.contains("function simShownCDiff"), "C-in-the-loop client missing");
     assert!(html.contains("stop_on_divergence"), "stop on divergence missing");
+    // Clocked activations: the editor explains last(), the live views hide
+    // the lowering's plumbing locals.
+    assert!(html.contains("last(v, init)") && html.contains("function simPlumbing"), "clocked activation UI missing");
 }

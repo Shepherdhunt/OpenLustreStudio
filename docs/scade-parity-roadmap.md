@@ -27,7 +27,7 @@ no GUI at all.
 |---|---|---|
 | Dataflow authoring (blocks, wires, typed ports) | ✅ | ✅ SCADE-style glyphs, orthogonal wires, zoom/pan, minimap, align/distribute, clipboard, export |
 | State machines (flat + hierarchical, operator-owned) | ✅ | ✅ textual editor, draggable chart, canvas block |
-| Conditional activation (activate-if) | ✅ stage 1 (selected, not clocked) | ✅ editor, decision-tree chart, canvas block |
+| Conditional activation (activate-if) | ✅ clocked branches (frozen when inactive) + `last(v)` | ✅ editor, decision-tree chart, canvas block |
 | Type checking, function/operator rules | ✅ | ✅ errors mapped onto boxes and wires |
 | **CoCoSpec contracts: assume / guarantee / modes** | ✅ IR, checker (now type-checks clauses), CoCoSpec emit, observer-based runtime monitors | ✅ **contract editor: clause rows, mode table, CoCoSpec text, live checking** (was read-only) |
 | Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
@@ -78,10 +78,10 @@ were silent):
   literals are always C double literals, and both sides print reals with
   one shortest round-trip algorithm (item 6b).
 
-**Known semantic gap (documented):** activations are stage 1 — branches are
-*selected*, not *clocked*. `pre` inside a branch reads the previous cycle
-(like SCADE `last`), not the branch's previous activation. Models that rely
-on frozen inactive branches will behave differently than in SCADE.
+**Activation semantics now match SCADE** (item 4): branches are clocked and
+freeze when inactive; `last(v)` gives SCADE's `last 'v` for hold patterns.
+A model written for the earlier stage-1 semantics that used `pre v` inside a
+branch to mean "the previous cycle" should use `last(v)` instead.
 
 
 ## Recommendations
@@ -130,9 +130,14 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ### P1 — SCADE semantics and code-generation quality
 
-4. **Clocked activation, stage 2 (M–L).** Lower branches onto clocks
-   (`when` / `merge`, or condact-style) so inactive branches freeze, matching
-   SCADE; keep the byte-identical IR-vs-C test as the gate.
+4. ✅ **Clocked activation — done.** Each branch runs on its own nested
+   clock (`when not b1 … when gk`), every variable it reads is sampled onto
+   that clock by a local that holds while the branch is inactive, and the
+   outputs merge back — so `pre` / `->` / stateful calls inside a branch
+   freeze exactly as in SCADE. `last(v)` / `last(v, init)` provides SCADE's
+   `last 'v`. The simulator, the generated C (byte-identical traces, and in
+   lockstep under C in the loop) and the Lustre for Kind 2 (clocked locals
+   declared `x: int when c`) all run the same lowered clocks.
 5. **Model-to-code traceability (M).** Per-equation comments in the generated
    C naming operator / equation / diagram element, a machine-readable trace
    matrix, and a generation report (files, operators, state sizes). This is
@@ -193,12 +198,14 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
 ## Suggested next step
 
-The P0 items and items 6 / 6b are done: the compiled C runs in lockstep with
-the simulator, and every difference it found between model and code —
-integer wrap, enum inputs, `float32` precision, an int-typed real literal —
-is fixed, with the simulator now following C's arithmetic exactly.
+The P0 items and the P1 semantics items (4, 6, 6b) are done: activations are
+clocked like SCADE's, and model and generated C agree cycle by cycle —
+verified in batch, in lockstep, and over long float runs.
 
-Next is item **4** (clocked activation): the one remaining known semantic
-gap with SCADE. Inactive activation branches should freeze their state, and
-the lockstep and byte-identical trace checks are now strong enough to gate
-that change cycle by cycle.
+Next is item **5** (model-to-code traceability): per-equation comments in
+the generated C naming the operator, equation and diagram element, a
+machine-readable trace matrix, and a generation report. It is what KCG users
+expect, what DO-178C-style reviews need, and it feeds the evidence report
+(item 13). Provisioning Kind 2 (item 12) is the other gap worth closing
+soon: the clocked Lustre it now receives hasn't been proved in this
+environment.
