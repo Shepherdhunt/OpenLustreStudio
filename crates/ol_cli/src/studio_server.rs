@@ -260,6 +260,8 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             Ok((_, s)) => (200, "text/plain; charset=utf-8", s.into_bytes()),
             Err(e) => (500, "text/plain", e.into_bytes()),
         },
+        ("GET", "/api/clite/trace") => json_response(clite_trace(ctx)),
+        ("GET", "/api/clite/report") => json_response(clite_report(ctx)),
         ("GET", "/api/clite/driver") => match build_driver(ctx) {
             Ok(s) => (200, "text/plain; charset=utf-8", s.into_bytes()),
             Err(e) => (400, "text/plain", e.into_bytes()),
@@ -736,6 +738,45 @@ fn build_clite(ctx: &ServerCtx) -> Result<(String, String), String> {
     let project = sliced_for_main(ctx)?;
     let bundle = ol_clite_emit::emit_project(&project);
     Ok((bundle.header, bundle.source))
+}
+
+/// GET /api/clite/trace — the model-to-code trace matrix of the generated C
+/// for the build root: every equation's diagram element, origin, source and
+/// line range in `openlustre_generated.c`.
+fn clite_trace(ctx: &ServerCtx) -> Result<serde_json::Value, String> {
+    let project = sliced_for_main(ctx)?;
+    let bundle = ol_clite_emit::emit_project(&project);
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "root": project.main,
+        "file": ol_clite_emit::trace::SOURCE_FILE,
+        "entries": bundle.trace,
+    }))
+}
+
+/// GET /api/clite/report — the generation report for the files the Studio
+/// generates (header, source, driver, Makefile): as JSON and as Markdown.
+fn clite_report(ctx: &ServerCtx) -> Result<serde_json::Value, String> {
+    let project = sliced_for_main(ctx)?;
+    let bundle = ol_clite_emit::emit_project(&project);
+    let driver = build_driver(ctx).unwrap_or_default();
+    let makefile = build_makefile(ctx).unwrap_or_default();
+    let mut files = vec![
+        ("openlustre_generated.h", bundle.header.as_str()),
+        ("openlustre_generated.c", bundle.source.as_str()),
+    ];
+    if !driver.is_empty() {
+        files.push(("driver.c", driver.as_str()));
+    }
+    if !makefile.is_empty() {
+        files.push(("Makefile", makefile.as_str()));
+    }
+    let report = ol_clite_emit::trace::report(&project, project.main.as_deref(), &files, &bundle.trace);
+    Ok(serde_json::json!({
+        "schema_version": 1,
+        "report": report,
+        "markdown": report.to_markdown(),
+    }))
 }
 
 fn build_driver(ctx: &ServerCtx) -> Result<String, String> {

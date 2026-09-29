@@ -175,6 +175,22 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(body.contains("ReleaseLogic_step"), "driver text: {body}");
     assert!(body.contains("int main"));
 
+    // The trace matrix: every equation of the generated C, with its diagram
+    // element and line range; the report fingerprints the generated files.
+    let (s, _, body) = http_get(port, "/api/clite/trace").expect("trace");
+    assert_eq!(s, 200, "{body}");
+    let t: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let entries = t["entries"].as_array().unwrap();
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|e| e["element"].as_str().unwrap().starts_with("eq")
+        || e["element"].as_str().unwrap().contains(':')), "{t}");
+    assert!(entries.iter().all(|e| e["first_line"].as_u64().unwrap() < e["last_line"].as_u64().unwrap()));
+    let (s, _, body) = http_get(port, "/api/clite/report").expect("report");
+    assert_eq!(s, 200, "{body}");
+    let r: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(r["report"]["traced"], r["report"]["equations"]);
+    assert!(r["markdown"].as_str().unwrap().contains("| `openlustre_generated.c` |"));
+
     let (s, _, body) = http_get(port, "/api/clite/makefile").expect("makefile");
     assert_eq!(s, 200);
     assert!(body.contains("TARGET ?= ReleaseLogic"));
@@ -234,6 +250,10 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     assert!(html.contains("id=\"sim-cil\"") && html.contains("/api/sim/c"), "C-in-the-loop toggle missing");
     assert!(html.contains("function simSetC") && html.contains("function simShownCDiff"), "C-in-the-loop client missing");
     assert!(html.contains("stop_on_divergence"), "stop on divergence missing");
+    // Model ↔ code traceability: the line-mapped C pane and the report.
+    assert!(html.contains("/api/clite/trace") && html.contains("function renderCPane") && html.contains("function codeGoto"),
+        "model-to-code navigation missing");
+    assert!(html.contains("mi-code-report") && html.contains("function openReport"), "generation report missing");
     // Clocked activations: the editor explains last(), the live views hide
     // the lowering's plumbing locals.
     assert!(html.contains("last(v, init)") && html.contains("function simPlumbing"), "clocked activation UI missing");

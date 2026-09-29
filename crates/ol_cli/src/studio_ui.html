@@ -76,6 +76,22 @@
   /* The code is selectable so the engineer can copy it out (the dock title bar
      above sets user-select:none, which the panes must not inherit). */
   #sidetext pre { flex: 1; margin: 0; border: none; user-select: text; }
+  /* Generated C, line by line: @trace comments, and the lines traced to the
+     selected model element. Click a traced line to find it in the model. */
+  #side-c { position: relative; }
+  #side-c .cl { display: block; min-height: 1.3em; white-space: pre; }
+  #side-c .cl[data-t] { cursor: pointer; }
+  #side-c .cl[data-t]:hover { background: #f1f5fb; }
+  #side-c .cl.ct { color: #2f7a3a; font-style: italic; }
+  #side-c .cl.hl { background: #fff2bf; }
+  #side-c .cl.hl.ct { background: #ffe79a; }
+  #side-c .cl.cur { background: #ffd98a; box-shadow: inset 3px 0 0 #b86e00; }
+  .report-body { max-height: 70vh; overflow: auto; font-size: 12px; }
+  .report-body table { width: auto; margin: 6px 0 12px; }
+  .report-body td, .report-body th { padding: 2px 8px; }
+  .report-body code { font-family: Consolas, monospace; font-size: 11px; }
+  .report-body h3 { margin: 4px 0 8px; font-size: 15px; text-transform: none; letter-spacing: 0; color: #1e1e1e; }
+  .report-body h4 { margin: 12px 0 4px; }
   #bottomdock {
     grid-column: 1 / 3; grid-row: 4; background: #f5f5f5;
     border-top: 1px solid #c5c5c5; overflow: auto; display: flex; flex-direction: column;
@@ -516,6 +532,7 @@
       <div class="menu-sep"></div>
       <div class="mi" onclick="downloadBuild()">Generate C-Lite (save files)</div>
       <div class="mi" id="mi-code-compile" onclick="openDialog('dlg-compile')">Compile C-Lite…</div>
+      <div class="mi" id="mi-code-report" onclick="openReport()">Generation Report…</div>
     </div>
   </div>
   <div class="menu" data-menu="project">
@@ -636,6 +653,7 @@
         <div class="pstep">
           <button id="pipe-gen-btn" class="pdisabled" onclick="pipeGenerate()">3 · Generate C-Lite</button>
           <span class="build-note" id="pipe-gen-status">build the model first</span>
+          <button id="pipe-report" style="display:none" onclick="openReport()" title="Files with SHA-256, operators, state, and model-to-code traceability">Generation report</button>
         </div>
         <div class="pstep">
           <button id="pipe-run-btn" class="pdisabled" onclick="pipeRun()">4 · Compile &amp; Run (debug)</button>
@@ -942,6 +960,18 @@
     <pre id="sim-output"></pre>
   </div>
 
+  <div class="dlg" id="dlg-report">
+    <div class="row" style="margin-bottom:6px">
+      <span class="build-note" id="report-note">Every equation of the generated C carries an <code class="inline">@trace</code> comment back to its diagram element; click one in the Generated C pane to find it in the model.</span>
+    </div>
+    <div class="row" style="margin-bottom:6px">
+      <button onclick="reportDownload('md')">Download report (.md)</button>
+      <button onclick="reportDownload('json')">Download report (.json)</button>
+      <button onclick="reportDownload('trace')">Download trace matrix (.json)</button>
+    </div>
+    <div id="report-body" class="report-body"></div>
+  </div>
+
   <div class="dlg" id="dlg-compile">
     <div class="edit-form">
       <h4>Compile C-Lite</h4>
@@ -1067,6 +1097,7 @@ const DLG_TITLES = {
   "dlg-operator": "Insert Operator", "dlg-main": "Set Main Operator",
   "dlg-port": "Insert Variable", "dlg-equation": "Insert Equation",
   "dlg-types": "Types", "dlg-constant": "New Constant", "dlg-import": "Import Lustre",
+  "dlg-report": "C-Lite Generation Report",
   "dlg-fsm": "State Machines",
   "dlg-act": "Conditional Activations",
   "dlg-contract": "Contracts",
@@ -1129,14 +1160,145 @@ async function refreshSideText() {
       : "— Build the model (Build dock ▸ 1 · Build Model) to generate and view the Lustre. —";
   } else {
     if (state.pipeline.generated) {
-      const h = await fetchText("/api/clite/header");
-      const c = await fetchText("/api/clite/source");
-      document.getElementById("side-c").textContent = h + "\n/* ---- source ---- */\n\n" + c;
+      const [h, c, t] = await Promise.all([
+        fetchText("/api/clite/header"),
+        fetchText("/api/clite/source"),
+        fetchJSON("/api/clite/trace").catch(() => null),
+      ]);
+      renderCPane(h, c, t);
     } else {
+      state.cTrace = null;
+      state.sideCText = null;
       document.getElementById("side-c").textContent =
         "— Generate C-Lite (Build dock ▸ 3 · Generate C-Lite) to view the generated C. —";
     }
   }
+}
+
+// --- Model ↔ code traceability ----------------------------------------------
+//
+// The Generated C pane is drawn line by line. Each equation's lines (from its
+// `@trace` comment to its last statement) carry the trace-matrix entry: click
+// one to open its operator and select its diagram element; select elements on
+// the canvas to highlight the C they generate.
+
+/// Render header + source, mapping each source line to its trace entry.
+function renderCPane(h, c, t) {
+  const pre = document.getElementById("side-c");
+  const head = h + "\n/* ---- source ---- */\n\n";
+  const text = head + c;
+  const lines = text.split("\n");
+  const offset = head.split("\n").length - 1; // lines before source line 1
+  const entries = (t && t.entries) || [];
+  const owner = new Array(lines.length).fill(-1);
+  entries.forEach((e, k) => {
+    for (let l = e.first_line; l <= e.last_line; l++) owner[offset + l - 1] = k;
+  });
+  state.cTrace = { entries, offset };
+  state.sideCText = text;
+  pre.innerHTML = lines.map((line, i) => {
+    const k = owner[i];
+    const cls = "cl" + (line.includes("/* @trace ") ? " ct" : "");
+    const tip = k >= 0 ? ' title="' + escAttr("Show in the model: " + entries[k].operator + " · " + entries[k].element) + '"' : "";
+    return '<span class="' + cls + '"' + (k >= 0 ? ' data-t="' + k + '"' : "") + tip + ">" + escapeHTML(line) + "</span>";
+  }).join("");
+  codeFollowSelection();
+}
+
+/// Highlight the C lines traced to the canvas selection (an equation or
+/// construct block, or a variable its equations assign) and bring the first
+/// into view.
+function codeFollowSelection() {
+  const pre = document.getElementById("side-c");
+  pre.querySelectorAll(".cl.hl, .cl.cur").forEach(x => x.classList.remove("hl", "cur"));
+  const t = state.cTrace, d = state.diagramData;
+  if (!t || !d || pre.style.display === "none") return;
+  const ids = state.selected || [];
+  if (!ids.length) return;
+  const hit = new Set();
+  t.entries.forEach((e, k) => {
+    if (e.operator === d.node && (ids.includes(e.element) || e.lhs.some(l => ids.includes(l)))) hit.add(k);
+  });
+  let first = null;
+  pre.querySelectorAll(".cl[data-t]").forEach(x => {
+    if (hit.has(Number(x.dataset.t))) { x.classList.add("hl"); first = first || x; }
+  });
+  if (first && !state.codeNoScroll) pre.scrollTop = Math.max(0, first.offsetTop - pre.clientHeight / 3);
+}
+
+/// A traced C line was clicked: open its operator, select its element.
+async function codeGoto(k) {
+  const e = state.cTrace && state.cTrace.entries[k];
+  if (!e) return;
+  if (!state.diagramData || state.diagramData.node !== e.operator) await loadDiagram(e.operator, true);
+  state.codeNoScroll = true; // keep the clicked line where it is
+  try { setSelection(e.element); } finally { state.codeNoScroll = false; }
+  // The element's code stays highlighted; the clicked equation stands out.
+  document.querySelectorAll('#side-c .cl[data-t="' + k + '"]').forEach(x => x.classList.add("cur"));
+  wireStatus("C → model: " + e.operator + " · " + e.element + (e.origin ? " (" + e.origin + ")" : "") + " — " + e.source);
+}
+
+document.getElementById("side-c").addEventListener("click", ev => {
+  const line = ev.target.closest(".cl[data-t]");
+  if (!line || String(window.getSelection() || "")) return; // selecting text, not navigating
+  codeGoto(Number(line.dataset.t));
+});
+
+/// The generation report: files with SHA-256, operators, state, coverage.
+async function openReport() {
+  openDialog("dlg-report");
+  const body = document.getElementById("report-body");
+  body.textContent = "generating…";
+  try {
+    state.report = await fetchJSON("/api/clite/report");
+  } catch (e) {
+    body.innerHTML = '<div class="diag severity-Error">' + escapeHTML(String(e)) + "</div>";
+    return;
+  }
+  body.innerHTML = markdownToHtml(state.report.markdown);
+}
+
+async function reportDownload(kind) {
+  const r = state.report;
+  if (!r) return;
+  const root = (r.report && r.report.root) || "model";
+  if (kind === "md") {
+    downloadDataUrl(root + "_generation_report.md", "data:text/markdown;charset=utf-8," + encodeURIComponent(r.markdown));
+  } else if (kind === "json") {
+    downloadDataUrl(root + "_generation_report.json", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(r.report, null, 2)));
+  } else {
+    const t = await fetchJSON("/api/clite/trace");
+    downloadDataUrl(root + "_trace.json", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(t.entries, null, 2)));
+  }
+}
+
+/// The small Markdown subset the report uses: headings, bullet lists,
+/// tables and inline code.
+function markdownToHtml(md) {
+  const inline = t => escapeHTML(t).replace(/`([^`]+)`/g, "<code>$1</code>");
+  const out = [];
+  const lines = md.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.startsWith("## ")) out.push("<h4>" + inline(l.slice(3)) + "</h4>");
+    else if (l.startsWith("# ")) out.push("<h3>" + inline(l.slice(2)) + "</h3>");
+    else if (l.startsWith("- ")) {
+      const items = [];
+      while (i < lines.length && lines[i].startsWith("- ")) items.push("<li>" + inline(lines[i++].slice(2)) + "</li>");
+      i--;
+      out.push("<ul>" + items.join("") + "</ul>");
+    } else if (l.startsWith("|")) {
+      const rows = [];
+      while (i < lines.length && lines[i].startsWith("|")) rows.push(lines[i++]);
+      i--;
+      const cells = r => r.slice(1, -1).split("|").map(c => c.trim());
+      const head = cells(rows[0]);
+      const body = rows.slice(2).map(cells);
+      out.push("<table><thead><tr>" + head.map(c => "<th>" + inline(c) + "</th>").join("") + "</tr></thead><tbody>" +
+        body.map(r => "<tr>" + r.map(c => "<td>" + inline(c) + "</td>").join("") + "</tr>").join("") + "</tbody></table>");
+    } else if (l.trim()) out.push("<p>" + inline(l) + "</p>");
+  }
+  return out.join("");
 }
 
 /// Copy the visible code pane to the clipboard. The panes are already
@@ -1145,7 +1307,7 @@ async function refreshSideText() {
 async function copySidePane(btn) {
   const showingLustre = document.getElementById("side-lustre").style.display !== "none";
   const pane = document.getElementById(showingLustre ? "side-lustre" : "side-c");
-  const text = pane.textContent || "";
+  const text = (!showingLustre && state.sideCText) || pane.textContent || "";
   const flash = msg => { if (btn) { const o = btn.textContent; btn.textContent = msg; setTimeout(() => btn.textContent = o, 1200); } };
   try {
     await navigator.clipboard.writeText(text);
@@ -1863,6 +2025,7 @@ function pipeGenerate() {
   state.pipeline.generated = true; // unlock the C pane *before* showing it
   setSidePane("c");                 // the generated C is now the visible model code
   document.getElementById("pipe-gen-status").textContent = "✓ generated — see the Generated C pane";
+  document.getElementById("pipe-report").style.display = "";
   document.getElementById("pipe-run-status").textContent = "ready";
   reflectPipeline();
   pipeLog("Generate C-Lite", "generated the directional C-Lite for the main operator");
@@ -3924,6 +4087,7 @@ function definingEq(name) {
 }
 
 function renderProps() {
+  codeFollowSelection();
   const host = document.getElementById("props-body");
   const d = state.diagramData;
   const id = state.selection;
