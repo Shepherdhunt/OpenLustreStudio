@@ -1035,7 +1035,7 @@ fn cmd_prove(
         timeout_seconds: timeout,
         properties: properties.to_vec(),
     };
-    let result = ol_kind2::run_kind2(&lus_path, &toolchain.apply(opts))?;
+    let result = ol_kind2::run_kind2(&lus_path, &toolchain.apply(opts.clone()))?;
     println!("prove: invoked {}", result.invocation.join(" "));
     if result.exit_code == -1 && result.properties.is_empty() {
         for g in prover::guidance(&toolchain) {
@@ -1059,9 +1059,29 @@ fn cmd_prove(
     if !result.errors.is_empty() {
         anyhow::bail!("Kind 2 could not analyse the model ({} error(s))", result.errors.len());
     }
-    if !result.realizability.is_empty() {
-        if let Some(r) = result.realizability.iter().find(|r| r.result != "realizable") {
-            anyhow::bail!("the contract of {} is {} ({})", r.node, r.result, r.context);
+    // Completed-looking rows do not establish completion when the raw
+    // process failed or timed out (Kind 2 can retain exit zero on timeout).
+    if result.exit_code != 0 || result.timed_out {
+        anyhow::bail!("Kind 2 run incomplete: exit {}, timeout {}", result.exit_code, result.timed_out);
+    }
+    if let Some(root) = &opts.main_node {
+        if result.properties.iter().any(|p| p.reported_analysis_tops.is_empty() || p.reported_analysis_tops.iter().any(|top| top != root)) {
+            anyhow::bail!("property results are not bound to requested root {root}");
+        }
+    }
+    if matches!(mode, ProveMode::Realizability) || !result.realizability.is_empty() {
+        if let Some(root) = &opts.main_node {
+            let answer = result.contract_realizability(root);
+            if answer != "realizable" {
+                anyhow::bail!("the requested contract of {root} is {answer}");
+            }
+        } else {
+            if !result.realizability.iter().any(|r| r.context == "contract") {
+                anyhow::bail!("Kind 2 reported no contract realizability result");
+            }
+            if let Some(r) = result.realizability.iter().find(|r| r.result != "realizable") {
+                anyhow::bail!("the contract of {} is {} ({})", r.node, r.result, r.context);
+            }
         }
         if result.properties.is_empty() {
             return Ok(());

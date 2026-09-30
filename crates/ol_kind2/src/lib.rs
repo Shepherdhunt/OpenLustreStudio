@@ -67,7 +67,8 @@ pub struct Kind2Result {
     pub stdout: String,
     pub stderr: String,
     /// Parsed property results if Kind 2 produced JSON — one per property,
-    /// the most conclusive answer when several engines reported it.
+    /// the most conclusive consistent answer when several engines reported it.
+    /// Opposite conclusive answers are retained as `conflicting`.
     pub properties: Vec<PropertyResult>,
     /// Kind 2's `error` / `fatal` log messages (a rejected input file, a
     /// missing SMT solver, …), with `file:line:col` when it gave one.
@@ -80,6 +81,29 @@ pub struct Kind2Result {
     /// settled by then are `unknown` (not an error — the others stand).
     #[serde(default)]
     pub timed_out: bool,
+}
+
+impl Kind2Result {
+    /// Only the requested root's contract can establish its realizability.
+    /// Inconclusive progress does not erase a conclusion; opposite
+    /// conclusions make the check unusable.
+    pub fn contract_realizability(&self, root: &str) -> String {
+        let contract: Vec<_> = self.realizability.iter()
+            .filter(|x| x.node == root && x.context == "contract").collect();
+        let conclusions: std::collections::BTreeSet<_> = contract.iter()
+            .filter(|x| matches!(x.result.as_str(), "realizable" | "unrealizable"))
+            .map(|x| x.result.as_str()).collect();
+        let conflicting: std::collections::BTreeSet<_> = contract.iter()
+            .flat_map(|x| x.conflicting.iter().cloned()).collect();
+        if conclusions.len() > 1 {
+            "conflicting".into()
+        } else if let Some(x) = contract.iter().find(|x| conclusions.contains(x.result.as_str())) {
+            if conflicting.is_empty() { x.result.clone() }
+            else { format!("{} (conflicting: {})", x.result, conflicting.into_iter().collect::<Vec<_>>().join(", ")) }
+        } else {
+            "unknown".into()
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,6 +128,13 @@ pub struct PropertyResult {
     /// would read the same (two `ensure`s of one mode).
     #[serde(default)]
     pub label: String,
+    /// Every reported status, in order, including inconclusive progress and
+    /// contradictory conclusions. Never discard an opposite conclusion.
+    #[serde(default)]
+    pub reported_statuses: Vec<String>,
+    /// Analysis root for every report (empty if absent), in the same order.
+    #[serde(default)]
+    pub reported_analysis_tops: Vec<String>,
 }
 
 /// How a property result reads for a reviewer.
@@ -257,7 +288,8 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    let mut properties = parse_kind2_json(&stdout);
+    let all_properties = parse_kind2_json(&stdout);
+    let mut properties = all_properties.clone();
     // Kind 2 has no per-property filter: prove everything, report the asked.
     if !opts.properties.is_empty() {
         properties.retain(|p| {
@@ -270,8 +302,33 @@ pub fn run_kind2(lus_path: &Path, opts: &Kind2Options) -> Result<Kind2Result, Ki
     if matches!(opts.mode, SerMode::ModeCoverage) {
         properties.retain(|p| p.is_mode_check());
     }
-    let (errors, realizability) = parse_kind2_log(&stdout);
-    let timed_out = stdout.contains("Wallclock timeout");
+    let (mut errors, realizability) = parse_kind2_log(&stdout);
+    errors.extend(parse_kind2_log(&stderr).0);
+    // A partially parseable stream must not silently become completed proof.
+    let is_record = |v: &serde_json::Value| v.is_object() && v.get("objectType").and_then(|x| x.as_str()).is_some_and(|s| !s.is_empty());
+    let malformed = match serde_json::from_str::<Vec<serde_json::Value>>(&stdout) {
+        Ok(records) => records.iter().any(|v| !is_record(v)),
+        Err(_) => stdout.lines().filter(|l| !l.trim().is_empty()).any(|l| {
+            serde_json::from_str::<serde_json::Value>(l.trim()).map_or(true, |v| !is_record(&v))
+        }),
+    };
+    if malformed {
+        errors.push("malformed Kind 2 JSON output".into());
+    }
+    for p in &all_properties {
+        if p.status == "conflicting" {
+            errors.push(format!("conflicting conclusive results for {}: {}", p.name, p.reported_statuses.join(", ")));
+        }
+    }
+    for event in json_objects(&stdout) {
+        if let Some(p) = json_to_property(&event) {
+            let expected = if p.source.as_deref() == Some("NonVacuityCheck") { "reachable" } else { "valid" };
+            if p.outcome() == Outcome::Holds && p.status != expected {
+                errors.push(format!("property {} reported {} for incompatible source {:?}", p.name, p.status, p.source));
+            }
+        }
+    }
+    let timed_out = format!("{stdout}\n{stderr}").to_ascii_lowercase().contains("wallclock timeout");
 
     Ok(Kind2Result {
         invocation,
@@ -303,14 +360,8 @@ pub fn parse_kind2_log(text: &str) -> (Vec<String>, Vec<RealizabilityResult>) {
     for v in json_objects(text) {
         let get = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         match get("objectType").as_str() {
-            "log" if matches!(get("level").as_str(), "error" | "fatal") => {
+            "log" if matches!(get("level").to_ascii_lowercase().as_str(), "error" | "fatal") => {
                 let msg = get("value").trim().to_string();
-                // The timeout leaves unsettled properties `unknown`; an engine
-                // that cannot handle the input (IC3 on nonlinear arithmetic)
-                // stops while the others go on. Neither is a model error.
-                if msg.starts_with("Wallclock timeout") || msg.starts_with("Runtime failure in ") {
-                    continue;
-                }
                 let at = match (v.get("line").and_then(|l| l.as_u64()), v.get("column").and_then(|c| c.as_u64())) {
                     (Some(l), Some(c)) => format!("line {l}, column {c}: "),
                     (Some(l), None) => format!("line {l}: "),
@@ -349,15 +400,35 @@ pub fn parse_kind2_log(text: &str) -> (Vec<String>, Vec<RealizabilityResult>) {
 /// try both. Each property is a `{ objectType: "property", ... }` record.
 ///
 /// Several engines may report the same property (BMC and IC3 both reach a
-/// mode, say); one result per name is kept — the first conclusive answer,
-/// in first-report order.
+/// mode, say); one result per name is kept in first-report order. Unknown
+/// progress never replaces a conclusion; opposite conclusions become a
+/// permanent conflict rather than selecting whichever arrived first.
 pub fn parse_kind2_json(text: &str) -> Vec<PropertyResult> {
     let mut props: Vec<PropertyResult> = Vec::new();
+    let mut top = String::new();
     for v in json_objects(text) {
-        let Some(p) = json_to_property(&v) else { continue };
+        if v.get("objectType").and_then(|x| x.as_str()) == Some("analysisStart") {
+            top = v.get("top").and_then(|x| x.as_str()).unwrap_or_default().into();
+        }
+        let Some(mut p) = json_to_property(&v) else { continue };
+        p.reported_analysis_tops = vec![top.clone()];
         match props.iter_mut().find(|q| q.name == p.name) {
-            Some(q) if q.outcome() == Outcome::Unknown && p.outcome() != Outcome::Unknown => *q = p,
-            Some(_) => {}
+            Some(q) => {
+                let mut reported = q.reported_statuses.clone();
+                reported.push(p.status.clone());
+                let mut tops = q.reported_analysis_tops.clone();
+                tops.push(top.clone());
+                if q.status != "conflicting" {
+                    if q.outcome() == Outcome::Unknown && p.outcome() != Outcome::Unknown {
+                        *q = p;
+                    } else if q.outcome() != Outcome::Unknown && p.outcome() != Outcome::Unknown && q.outcome() != p.outcome() {
+                        q.status = "conflicting".into();
+                        q.counterexample = p.counterexample.or_else(|| q.counterexample.clone());
+                    }
+                }
+                q.reported_statuses = reported;
+                q.reported_analysis_tops = tops;
+            }
             None => props.push(p),
         }
     }
@@ -405,6 +476,8 @@ fn json_to_property(v: &serde_json::Value) -> Option<PropertyResult> {
     let line = obj.get("line").and_then(|l| l.as_u64());
     Some(PropertyResult {
         name,
+        reported_statuses: vec![status.clone()],
+        reported_analysis_tops: vec![],
         status,
         scope,
         source,
@@ -539,4 +612,3 @@ pub fn render_counterexample_waveform(cex: &serde_json::Value) -> Option<String>
     }
     Some(out)
 }
-
