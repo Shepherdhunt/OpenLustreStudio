@@ -105,11 +105,26 @@ pub struct ProofInfo {
     /// when not concluded.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub realizability: String,
+    /// Complete process and input evidence, including unusable runs. A
+    /// completed-looking row summary cannot erase failures at this boundary.
+    pub runs: Vec<ProofRun>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProofRun {
+    pub mode: String,
+    pub requested_root: String,
+    pub source_sha256: String,
+    pub source_text: String,
+    pub result: Option<ol_kind2::Kind2Result>,
+    pub error: Option<String>,
 }
 
 /// One property Kind 2 answered.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProofRow {
+    /// Exact property identity in the retained raw Kind 2 stream.
+    pub countername: String,
     pub name: String,
     /// `guarantee`, `mode ensure`, `mode reachable`, `modes exhaustive`,
     /// `assumption`, `property`.
@@ -484,6 +499,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         toolchain: String::new(),
         assumptions: vec![],
         realizability: String::new(),
+        runs: vec![],
     };
     let Some(opts) = opts else {
         return (Status::NotRun, info("not requested (run with proving enabled to include Kind 2 results)"));
@@ -502,15 +518,25 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         return (Status::NotRun, info("could not create a working directory for Kind 2"));
     }
     let lus_path = work.join("model_with_contracts.lus");
-    let _ = std::fs::write(&lus_path, &input.text);
+    if let Err(e) = std::fs::write(&lus_path, &input.text) {
+        let _ = std::fs::remove_dir_all(&work);
+        return (Status::Gaps, info(&format!("could not write Kind 2 input: {e}")));
+    }
     // Realizability is a property of the contract alone: its view carries
     // no runtime-error checks.
     let contract_path = work.join("contract_only.lus");
     let contract_only = ol_cocospec_emit::kind2::EmitOptions { runtime_errors: false };
-    let _ = std::fs::write(
-        &contract_path,
-        ol_cocospec_emit::kind2::emit_with(slice, contract_only).map(|i| i.text).unwrap_or_default(),
-    );
+    let contract_text = match ol_cocospec_emit::kind2::emit_with(slice, contract_only) {
+        Ok(i) => i.text,
+        Err(errs) => {
+            let _ = std::fs::remove_dir_all(&work);
+            return (Status::Gaps, info(&format!("could not emit contract input: {}", errs.join("; "))));
+        }
+    };
+    if let Err(e) = std::fs::write(&contract_path, &contract_text) {
+        let _ = std::fs::remove_dir_all(&work);
+        return (Status::Gaps, info(&format!("could not write contract input: {e}")));
+    }
     let toolchain = crate::prover::Toolchain::detect(Some(&opts.binary));
     let run = |mode| {
         let path = if matches!(mode, ol_kind2::SerMode::Realizability) { &contract_path } else { &lus_path };
@@ -524,22 +550,44 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
             }),
         )
     };
-    let result = run(ol_kind2::SerMode::BmcInd);
+    let result = run(ol_kind2::SerMode::BmcInd).map(|mut r| {
+        for p in &r.properties {
+            if p.reported_analysis_tops.iter().any(|top| top != root) || p.reported_analysis_tops.is_empty() {
+                r.errors.push(format!("property {} is not bound to requested root {root}", p.name));
+            }
+        }
+        r
+    });
     let realizability = match &result {
-        Ok(r) if has_contract && r.exit_code != -1 && r.errors.is_empty() => run(ol_kind2::SerMode::Realizability).ok(),
+        Ok(r) if has_contract && r.exit_code == 0 && r.errors.is_empty() && !r.timed_out => Some(run(ol_kind2::SerMode::Realizability)),
         _ => None,
     };
+    let record = |mode: &str, text: &str, run: &Result<ol_kind2::Kind2Result, ol_kind2::Kind2Error>| ProofRun {
+        mode: mode.into(),
+        requested_root: root.into(),
+        source_sha256: sha256_hex(text.as_bytes()),
+        source_text: text.into(),
+        result: run.as_ref().ok().cloned(),
+        error: run.as_ref().err().map(ToString::to_string),
+    };
+    let mut runs = vec![record("BmcInd", &input.text, &result)];
+    if let Some(r) = &realizability {
+        runs.push(record("Realizability", &contract_text, r));
+    }
     let _ = std::fs::remove_dir_all(&work);
     let result = match result {
         Ok(r) => r,
-        Err(e) => return (Status::NotRun, info(&format!("Kind 2 could not run: {e}"))),
+        Err(e) => {
+            let mut info = info(&format!("Kind 2 could not run: {e}"));
+            info.runs = runs;
+            return (Status::Gaps, info);
+        }
     };
     if result.exit_code == -1 && result.stderr.contains("could not launch") {
         let hint = crate::prover::guidance(&toolchain).into_iter().next().unwrap_or_default();
-        return (Status::NotRun, info(&format!("Kind 2 not found (`{}`) — {hint}", toolchain.binary())));
-    }
-    if let Some(e) = result.errors.first() {
-        return (Status::Gaps, info(&format!("Kind 2 could not analyse the model: {e}")));
+        let mut info = info(&format!("Kind 2 not found (`{}`) — {hint}", toolchain.binary()));
+        info.runs = runs;
+        return (Status::NotRun, info);
     }
     // Runtime-error checks in property order (the root's own, then call by
     // call), after the contract's properties.
@@ -549,9 +597,14 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     let properties: Vec<ProofRow> = ordered
         .into_iter()
         .map(|p| {
-            let holds = p.outcome() == ol_kind2::Outcome::Holds;
+            let holds = if p.source.as_deref() == Some("NonVacuityCheck") {
+                p.status == "reachable"
+            } else {
+                p.status == "valid"
+            };
             match input.check(&p.name) {
                 Some(c) => ProofRow {
+                    countername: p.name.clone(),
                     name: if c.path.is_empty() { c.node.clone() } else { c.path.clone() },
                     kind: c.kind.label().into(),
                     clause: c.what.clone(),
@@ -562,6 +615,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
                 None => {
                     let (kind, clause) = p.describe(&input.text);
                     ProofRow {
+                        countername: p.name.clone(),
                         name: p.label.clone(),
                         kind: kind.into(),
                         clause,
@@ -574,21 +628,16 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         })
         .collect();
     let realizability = realizability
-        .map(|r| {
-            let contract = r.realizability.iter().find(|x| x.context == "contract");
-            match contract {
-                Some(x) if x.conflicting.is_empty() => x.result.clone(),
-                Some(x) => format!("{} (conflicting: {})", x.result, x.conflicting.join(", ")),
-                None => String::new(),
-            }
-        })
-        .unwrap_or_default();
+        .and_then(Result::ok)
+        .map(|r| r.contract_realizability(root))
+        .unwrap_or_else(|| if has_contract { "not_run".into() } else { String::new() });
     let mut info = ProofInfo {
         note: String::new(),
         properties,
         toolchain: toolchain.summary(),
         assumptions: input.notes,
         realizability,
+        runs,
     };
     if info.properties.is_empty() {
         info.note = "Kind 2 ran but reported no properties".into();
@@ -597,9 +646,19 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     let fails = result.properties.iter().filter(|p| p.outcome() == ol_kind2::Outcome::Fails).count();
     let holds = info.properties.iter().filter(|p| p.holds).count();
     let n = info.properties.len();
+    let run_errors: Vec<String> = info.runs.iter().flat_map(|r| {
+        let mut errors = Vec::new();
+        if let Some(e) = &r.error { errors.push(format!("{}: {e}", r.mode)); }
+        if let Some(result) = &r.result {
+            if result.exit_code != 0 { errors.push(format!("{} exited {}", r.mode, result.exit_code)); }
+            if result.timed_out { errors.push(format!("{} stopped at the timeout", r.mode)); }
+            errors.extend(result.errors.iter().map(|e| format!("{}: {e}", r.mode)));
+        }
+        errors
+    }).collect();
     let status = if fails > 0 {
         Status::Fail
-    } else if holds < n || info.realizability.starts_with("unrealizable") {
+    } else if holds < n || !run_errors.is_empty() || (has_contract && info.realizability != "realizable") {
         Status::Gaps
     } else {
         Status::Pass
@@ -619,7 +678,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
             )
         },
         if info.realizability.is_empty() { String::new() } else { format!("; contract {}", info.realizability) },
-        if result.timed_out && holds < n { "; Kind 2 stopped at the timeout" } else { "" },
+        if run_errors.is_empty() { String::new() } else { format!("; incomplete run: {}", run_errors.join("; ")) },
     );
     (status, info)
 }
