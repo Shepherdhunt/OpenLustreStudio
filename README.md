@@ -30,10 +30,30 @@ browser: a Project Explorer, a dataflow canvas with a block palette, the
 generated Lustre / C side panes, stepped simulation, a gated build pipeline,
 and the tests/verify docks.
 
+**Start with a real project.** The bundled four-station Payload Management
+System connects typed station decoding, payload-moment checks, planning,
+conditional interlocks and a state-machine operator on one canvas. The project
+tree exposes its reusable operators, contracts, types and constants.
+
+![OpenLustre Studio showing the bundled PMS project: reusable station decoders, Balance and PlanRelease blocks, the Inhibit activation, and ReleaseSequencer, with contracts and typed ports visible.](examples/pms/docs/screenshots/13-pms-diagram.png)
+
+**[Explore the capability gallery](docs/capability-gallery.md):**
+[State machines](docs/capability-gallery.md#2-state-machines-and-explicit-interlocks) ·
+[Live simulation](docs/capability-gallery.md#3-inspect-a-cycle-and-its-waveforms) ·
+[Generated C in the loop](docs/capability-gallery.md#4-run-the-model-and-generated-c-together) ·
+[Code traceability](docs/capability-gallery.md#5-follow-a-model-element-into-generated-code) ·
+[Proof and evidence](docs/capability-gallery.md#6-review-evidence-and-its-limits).
+
+These are existing captures of the named examples, not screenshots of the
+new PMS manifest, command-lifecycle or inventory branches. The bundled PMS
+capture is the earlier 100 Hz example; its proof counts describe that example
+only. The gallery records provenance and capture scope. None of the images
+establishes aircraft qualification or SCADE import/export compatibility.
+
 **Dataflow modeling.** Operators are drawn as wired blocks; the model's native
 storage and semantics are Lustre, generated and shown live beside the diagram.
-
-![The OpenLustre Studio workbench — project tree, the Doubler operator on the dataflow canvas, the Mathematics block palette, and the generated Lustre for the selected operator, with the gated Build pipeline below.](docs/screenshots/01-workbench.png)
+A [small Doubler example](docs/screenshots/01-workbench.png) shows the basic
+editing workflow without the larger project's wiring.
 
 **State machines, owned by an operator.** SCADE-style automata are authored
 nested under the operator they drive — the project tree expands into
@@ -201,7 +221,7 @@ has no Windows build: use WSL or Docker through `tools/kind2-wsl.cmd` or
 
 ![The Verify dock in OpenLustre Studio — Kind 2 v2.2.0 with Z3 proves an Autopilot contract whose outputs come from a clocked activation: 7 of 8 properties hold, grouped as contract properties (guarantees, mode ensures) and mode coverage (both modes reachable), while "some mode is always active" is falsifiable, its two-cycle counterexample ready to replay in the simulator.](docs/screenshots/12-kind2.png)
 
-**A complete example: the PMS.** [`examples/pms`](examples/pms) is a
+**A worked example: the bundled PMS.** [`examples/pms`](examples/pms) is a
 Payload Management System for a drone, built in the Studio from an
 [implementation plan](examples/pms/PLAN.md). It identifies the store on each
 of four hooks, plans releases that keep the vehicle balanced (single hooks or
@@ -219,7 +239,11 @@ installs and verifies itself, and has its own CI. `examples/pms` is a
 snapshot of it (`tools/sync-pms.sh` refreshes it), shipped as the sample in
 every download and used here as a regression test.
 
-![The PMS root operator in OpenLustre Studio — station decoding, balance and release planning, the Inhibit decision tree and the release sequencer.](examples/pms/docs/screenshots/13-pms-diagram.png)
+See the [PMS overview above](#a-look-at-the-studio) and the
+[capability gallery](docs/capability-gallery.md) for its state chart,
+interlock tree and baseline evidence. The separately developed
+[PMS repository](https://github.com/Shepherdhunt/PayloadManagementSystem)
+contains newer work; its branch-specific results are not the results pictured here.
 
 Where the Studio stands against the project's goals, and what comes next, is
 tracked in [docs/scade-parity-roadmap.md](docs/scade-parity-roadmap.md).

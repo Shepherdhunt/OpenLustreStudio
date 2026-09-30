@@ -1,0 +1,71 @@
+{
+  "gallery_assembled_against": "57cfc76a870b0a27b1764aa03b6852067375adf5",
+  "assembled_on": "2026-09-30",
+  "new_screenshots_captured": false,
+  "pms_scope": "Bundled fixed-four-station 100 Hz baseline; not newer PMS development branches",
+  "images": [
+    {
+      "path": "examples/pms/docs/screenshots/13-pms-diagram.png",
+      "sha256": "c0ea3d6acecd00b003a21f7c7cde1f5cdf91c95f9d765c091b65e6a55f26f063",
+      "last_image_change_commit": "cb53847e2accb1fb790cb39a9fd449c2442f4402",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "examples/pms/docs/screenshots/14-pms-sequencer.png",
+      "sha256": "1861bd4830dd20a13cb26e82a9fb85a9d15735572f9133fa2470d1eb84317ba3",
+      "last_image_change_commit": "cb53847e2accb1fb790cb39a9fd449c2442f4402",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "examples/pms/docs/screenshots/15-pms-inhibit.png",
+      "sha256": "5f7e1af2e3d10df966210c747747b35e9532b2cc31aa2ed2fc66e02eb1a40067",
+      "last_image_change_commit": "cb53847e2accb1fb790cb39a9fd449c2442f4402",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "examples/pms/docs/screenshots/16-pms-verify.png",
+      "sha256": "05133ac25245ba2bdfc14d89ff15952450d66de1c42a1707254a147fea12fcbe",
+      "last_image_change_commit": "cb53847e2accb1fb790cb39a9fd449c2442f4402",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "examples/pms/docs/screenshots/17-pms-evidence.png",
+      "sha256": "c570f68cf91fa2e0b4d7aed6889d99cd0894ef40113d5510500457b076c1fc4b",
+      "last_image_change_commit": "cb53847e2accb1fb790cb39a9fd449c2442f4402",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "docs/screenshots/07-waveform-review.png",
+      "sha256": "f9dcf70b269ca5d4a9de089dc272f6edb79e06fec8bf9dd23609cc54995f91d2",
+      "last_image_change_commit": "b18aaf20b135386adcf5540034a7fdb8e0b27150",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "docs/screenshots/09-c-in-the-loop.png",
+      "sha256": "0b04faa475d228f47b207bbc9f03a5e786a1f4e3aab28921f9ac91a2b3e9e07e",
+      "last_image_change_commit": "7f66b49d06d62b1fd4534e48b4e4e2c60741982f",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "docs/screenshots/10-traceability.png",
+      "sha256": "d40d0646d318ae629b4f7e3e533e12e0252b82a34dc74159b888d74148ff7751",
+      "last_image_change_commit": "d574178c9ccfb016d8d30fae5a9e4b0522b598bb",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    },
+    {
+      "path": "docs/screenshots/11-evidence.png",
+      "sha256": "3539576184111117ca5030cbe584b99d98e1746c4d1f69f475abe31d212833f3",
+      "last_image_change_commit": "f8ce5a2bde574b2b66c02ebebb490713119bce56",
+      "treatment": "reused, unmodified",
+      "capture_runtime_version": "not independently recorded"
+    }
+  ]
+}
