@@ -1357,8 +1357,9 @@ function evidenceOpen() {
 function evidenceDownload(kind) {
   const d = state.evidence;
   if (!d) return;
-  if (kind === "html") downloadDataUrl("evidence_" + d.operator + ".html", "data:text/html;charset=utf-8," + encodeURIComponent(d.html));
-  else downloadDataUrl("evidence_" + d.operator + ".json", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(d.evidence, null, 2)));
+  const basename = d.artifact_basename || d.operator;
+  if (kind === "html") downloadDataUrl("evidence_" + basename + ".html", "data:text/html;charset=utf-8," + encodeURIComponent(d.html));
+  else downloadDataUrl("evidence_" + basename + ".json", "data:application/json;charset=utf-8," + encodeURIComponent(JSON.stringify(d.evidence, null, 2)));
 }
 
 /// The generation report: files with SHA-256, operators, state, coverage.
@@ -1378,7 +1379,7 @@ async function openReport() {
 async function reportDownload(kind) {
   const r = state.report;
   if (!r) return;
-  const root = (r.report && r.report.root) || "model";
+  const root = r.artifact_basename || (r.report && r.report.root) || "model";
   if (kind === "md") {
     downloadDataUrl(root + "_generation_report.md", "data:text/markdown;charset=utf-8," + encodeURIComponent(r.markdown));
   } else if (kind === "json") {
@@ -7389,7 +7390,7 @@ function exportDiagram(kind) {
     wireStatus("no diagram to export");
     return;
   }
-  const name = state.diagramData.node;
+  const name = state.diagramData.artifact_basename || state.diagramData.node;
   const svgUrl = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(text);
   if (kind === "svg") {
     downloadDataUrl(name + ".svg", svgUrl);

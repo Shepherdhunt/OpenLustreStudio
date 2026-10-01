@@ -106,6 +106,10 @@ pub struct Project {
     /// (never saved) and read by the code generator's traceability.
     #[serde(skip)]
     pub origins: Vec<ConstructOrigin>,
+    /// Native project graph and symbol provenance. Compiler-only metadata:
+    /// the authored library models remain separate and are never rewritten.
+    #[serde(skip)]
+    pub resolution: Option<crate::native_project::NativeResolution>,
 }
 
 /// A block of an operator's equations produced by lowering one owned
@@ -139,12 +143,44 @@ impl ConstructKind {
 
 impl Project {
     pub fn find_node(&self, name: &str) -> Option<&NodeDef> {
+        let resolved = self.resolved_node_name(name)?;
         for pkg in &self.packages {
-            if let Some(n) = pkg.find_node(name) {
+            if let Some(n) = pkg.find_node(resolved) {
                 return Some(n);
             }
         }
         None
+    }
+
+    /// Resolve a root-local node or a directly imported exported node, using
+    /// the consumer's alias. Already-resolved compiler names are accepted.
+    pub fn resolved_node_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        if self.all_nodes().any(|node| node.name == name) {
+            return Some(name);
+        }
+        let resolution = self.resolution.as_ref()?;
+        let (owner, local, external) = if let Some((alias, local)) = name.split_once("::") {
+            if local.contains("::") { return None; }
+            let root = resolution.projects.iter().find(|p| p.project_id == resolution.root_project_id)?;
+            let dependency = root.dependencies.iter().find(|d| d.alias == alias)?;
+            (dependency.project_id.as_str(), local, true)
+        } else {
+            (resolution.root_project_id.as_str(), name, false)
+        };
+        let symbol = resolution.symbols.iter().find(|s| s.project_id == owner
+            && s.kind == "node" && s.local_name == local && (!external || s.exported))?;
+        self.all_nodes().any(|n| n.name == symbol.resolved_name).then_some(symbol.resolved_name.as_str())
+    }
+
+    /// Select an entrypoint without bypassing a dependency's export list by
+    /// supplying its compiler name. Internal callee lookup uses `find_node`.
+    pub fn selected_node_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        let resolved = self.resolved_node_name(name)?;
+        let Some(metadata) = &self.resolution else { return Some(resolved); };
+        let symbol = metadata.symbols.iter().find(|s| s.kind == "node" && s.resolved_name == resolved)?;
+        if symbol.project_id == metadata.root_project_id { return Some(resolved); }
+        let root = metadata.projects.iter().find(|p| p.project_id == metadata.root_project_id)?;
+        (symbol.exported && root.dependencies.iter().any(|d| d.project_id == symbol.project_id)).then_some(resolved)
     }
 
     pub fn all_nodes(&self) -> impl Iterator<Item = &NodeDef> {

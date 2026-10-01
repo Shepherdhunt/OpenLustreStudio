@@ -1162,7 +1162,7 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
             s.push(block);
 
             if callee.outputs.len() == 1 {
-                (s, format!("__out{}.{}", site.idx, callee.outputs[0].name))
+                (s, format!("__out{}.{}", site.idx, c_ident(&callee.outputs[0].name)))
             } else {
                 // Non-top-level multi-output call — return only the first
                 // output; the surrounding equation should have used a tuple
@@ -1171,7 +1171,7 @@ fn lower_anf(expr: &Expr, ctx: &mut EmitCtx) -> (Vec<String>, String) {
                     s,
                     format!(
                         "/* multi-output call used in expression position */ __out{}.{}",
-                        site.idx, callee.outputs[0].name
+                        site.idx, c_ident(&callee.outputs[0].name)
                     ),
                 )
             }

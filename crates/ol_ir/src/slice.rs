@@ -27,9 +27,8 @@ use crate::types::Type;
 /// Produce the sub-project rooted at `root`. Errors when `root` does not
 /// name a node in the project.
 pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> {
-    if project.find_node(root).is_none() {
-        return Err(format!("root node `{root}` not found in project"));
-    }
+    let root = project.selected_node_name(root)
+        .ok_or_else(|| format!("root node `{root}` not found in project"))?;
 
     // --- 1. Node closure over calls (equations + contract expressions). ---
     let mut kept_nodes: BTreeSet<String> = BTreeSet::new();
@@ -283,6 +282,7 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
         main: Some(root.to_string()),
         includes: vec![],
         origins,
+        resolution: project.resolution.clone(),
     })
 }
 

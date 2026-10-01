@@ -29,6 +29,8 @@ pub enum LoadError {
     UnsupportedExtension { path: String },
     #[error("cyclic include detected at {0}")]
     CyclicInclude(String),
+    #[error("native project resolution failed: {0}")]
+    Native(String),
 }
 
 /// Load a `Project` from disk.
@@ -43,7 +45,14 @@ pub enum LoadError {
 /// * A canonical file is merged only once per load. Independent projects
 ///   may share transitive dependencies without duplicating their definitions.
 pub fn load_project(path: &Path) -> Result<Project, LoadError> {
+    if is_native_manifest(path) {
+        return crate::native_project::load_native_project(path).map_err(LoadError::Native);
+    }
     load_recursive(path, &mut LoadState::default())
+}
+
+fn is_native_manifest(path: &Path) -> bool {
+    path.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("olproj"))
 }
 
 #[derive(Default)]
@@ -53,6 +62,9 @@ struct LoadState {
 }
 
 fn load_recursive(path: &Path, state: &mut LoadState) -> Result<Project, LoadError> {
+    if is_native_manifest(path) {
+        return Err(LoadError::Native("legacy includes cannot import .olproj manifests; use explicit native dependencies".into()));
+    }
     let canonical = path
         .canonicalize()
         .unwrap_or_else(|_| path.to_path_buf());
@@ -87,6 +99,9 @@ fn load_directory(dir: &Path, state: &mut LoadState) -> Result<Project, LoadErro
             source: e,
         })?;
         let p = entry.path();
+        if p.is_file() && is_native_manifest(&p) {
+            return Err(LoadError::Native("directory merge cannot consume a native project; select its .olproj manifest explicitly".into()));
+        }
         if p.is_file()
             && matches!(
                 p.extension()

@@ -24,6 +24,7 @@ pub mod state_machine;
 pub mod activation;
 pub mod diag;
 pub mod loader;
+pub mod native_project;
 pub mod clocks;
 pub mod declock;
 
@@ -46,3 +47,4 @@ pub use state_machine::{
 };
 pub use types::Type;
 pub use loader::{load_project, LoadError};
+pub use native_project::{load_native_project, snapshot_native_project, NativeResolution};

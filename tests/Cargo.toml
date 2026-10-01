@@ -179,3 +179,7 @@ path = "pms_example.rs"
 [[test]]
 name = "runtime_errors"
 path = "runtime_errors.rs"
+
+[[test]]
+name = "native_project"
+path = "native_project.rs"

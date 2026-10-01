@@ -28,6 +28,11 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Inspect exact local project snapshots (does not update manifests).
+    Project {
+        #[command(subcommand)]
+        cmd: ProjectCmd,
+    },
     /// Type-check and contract-check a model.
     Check {
         model: PathBuf,
@@ -189,6 +194,14 @@ enum Cmd {
 }
 
 #[derive(Subcommand, Debug)]
+enum ProjectCmd {
+    /// Compute a content fingerprint; existing dependency pins are not validated.
+    Snapshot { manifest: PathBuf },
+    /// Validate all dependency pins and print project/symbol provenance.
+    Resolve { manifest: PathBuf },
+}
+
+#[derive(Subcommand, Debug)]
 enum Kind2Cmd {
     /// Find Kind 2 and an SMT solver, say where they came from, and prove a
     /// one-property model end to end. Exits non-zero when proving would not
@@ -319,6 +332,18 @@ enum ProveMode {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Project { cmd } => match cmd {
+            ProjectCmd::Snapshot { manifest } => {
+                let digest = ol_ir::snapshot_native_project(&manifest).map_err(|e| anyhow::anyhow!(e))?;
+                println!("{digest}");
+                Ok(())
+            }
+            ProjectCmd::Resolve { manifest } => {
+                let project = ol_ir::load_native_project(&manifest).map_err(|e| anyhow::anyhow!(e))?;
+                println!("{}", serde_json::to_string_pretty(&project.resolution)?);
+                Ok(())
+            }
+        },
         Cmd::Check {
             model,
             imports,
@@ -470,6 +495,9 @@ fn load(model: &Path) -> Result<ol_ir::Project> {
 pub(crate) fn load_with_stdlib(model: &Path, stdlib: Option<&Path>) -> Result<ol_ir::Project> {
     let mut project = load(model)?;
     if let Some(dir) = stdlib {
+        if project.resolution.is_some() {
+            anyhow::bail!("native projects require explicit pinned dependencies; --with-stdlib merging is unsupported");
+        }
         let lib = ol_stdlib::load_dir(dir)
             .with_context(|| format!("loading stdlib from {}", dir.display()))?;
         let errors: Vec<String> = lib
@@ -511,6 +539,9 @@ fn cmd_check(
     with_stdlib: Option<&Path>,
 ) -> Result<()> {
     let project = load_with_stdlib(model, with_stdlib)?;
+    if project.resolution.is_some() && imports.is_some() {
+        anyhow::bail!("native v1 does not support external C import manifests; legacy import validation is a separate unresolved capability");
+    }
     let report = ol_typecheck::check_project(&project);
     for d in &report.diagnostics {
         println!("{}", d.render());
@@ -553,6 +584,8 @@ fn cmd_evidence(
         .map(str::to_string)
         .or_else(|| project.main.clone())
         .context("no operator given (--root) and the project has no `main`")?;
+    let root = project.selected_node_name(&root)
+        .with_context(|| format!("no selectable node `{root}`"))?.to_string();
     let model_dir = model.parent().unwrap_or(Path::new("."));
     let scenarios = scenarios.map(Path::to_path_buf).unwrap_or_else(|| model_dir.join("scenarios"));
     let mut model_files = vec![(
@@ -560,7 +593,7 @@ fn cmd_evidence(
         std::fs::read(model).with_context(|| format!("reading {}", model.display()))?,
     )];
     let types = model_dir.join("types.json");
-    if types.is_file() {
+    if types.is_file() && project.resolution.is_none() {
         model_files.push(("types.json".into(), std::fs::read(&types)?));
     }
     let ev = evidence::collect(&evidence::Request {
@@ -572,10 +605,12 @@ fn cmd_evidence(
     })
     .map_err(|e| anyhow::anyhow!(e))?;
     std::fs::create_dir_all(out)?;
-    let html = out.join(format!("evidence_{root}.html"));
-    let json = out.join(format!("evidence_{root}.json"));
+    let basename = artifact_basename(&project, &root);
+    let html = out.join(format!("evidence_{basename}.html"));
+    let json = out.join(format!("evidence_{basename}.json"));
     std::fs::write(&html, ev.to_html())?;
     std::fs::write(&json, serde_json::to_string_pretty(&ev)?)?;
+    write_native_resolution(&project, out)?;
     println!("evidence for `{root}`: {}", ev.verdict);
     for s in &ev.sections {
         println!("  {:<40} {:<8} {}", s.title, s.status.label(), s.summary);
@@ -658,6 +693,8 @@ fn cmd_studio_inspect(
             "package_count": project.packages.len(),
             "node_count": project.all_nodes().count(),
             "packages": packages,
+            "native_resolution": project.resolution,
+            "editable": project.resolution.is_none(),
         },
         "diagnostics": diagnostics,
         "summary": {
@@ -779,6 +816,7 @@ fn cmd_emit_lustre(
     let target = if legacy { Target::Legacy } else { Target::Modern };
     let con = ol_cocospec_emit::emit_project(&project, target);
     std::fs::write(out.join("contracts.lus"), &con)?;
+    write_native_resolution(&project, out)?;
     println!(
         "emit-lustre: wrote {} and {}",
         out.join("model.lus").display(),
@@ -796,6 +834,9 @@ fn cmd_emit_clite(
     root: Option<&str>,
 ) -> Result<()> {
     let mut project = load_with_stdlib(model, with_stdlib)?;
+    if project.resolution.is_some() && imports.is_some() {
+        anyhow::bail!("native v1 does not support external C imports; its legacy ABI/check defects remain unresolved");
+    }
     if let Some(root) = root {
         project = project
             .slice_for_root(root)
@@ -839,9 +880,9 @@ fn cmd_emit_clite(
         // A Makefile so the generated tree builds with one command. This is
         // the "user-defined main operator becomes the entry point of the
         // standalone executable" OpenLustre-vs-SCADE differentiator made
-        // concrete: the project's `main:` field names the operator, and
-        // the Makefile produces a binary named after it.
-        std::fs::write(clite_dir.join("Makefile"), makefile_for_entry(&entry_name))?;
+        // concrete: the project's `main:` field selects the operator. Native
+        // projects use its artifact stem for the Makefile's binary target.
+        std::fs::write(clite_dir.join("Makefile"), makefile_for_entry(&project, &entry_name))?;
     }
 
     let mut wrapper_count = 0usize;
@@ -888,6 +929,7 @@ fn cmd_emit_clite(
     std::fs::write(out.join("trace.json"), serde_json::to_string_pretty(&bundle.trace)?)?;
     std::fs::write(out.join("generation_report.json"), serde_json::to_string_pretty(&report)?)?;
     std::fs::write(out.join("generation_report.md"), report.to_markdown())?;
+    write_native_resolution(&project, out)?;
     println!(
         "emit-clite: traced {} of {} equations — trace.json, generation_report.md",
         report.traced, report.equations
@@ -907,6 +949,21 @@ fn cmd_emit_clite(
     Ok(())
 }
 
+fn write_native_resolution(project: &ol_ir::Project, out: &Path) -> Result<()> {
+    if let Some(resolution) = &project.resolution {
+        std::fs::write(out.join("native_resolution.json"), serde_json::to_string_pretty(resolution)?)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn artifact_basename<'a>(project: &'a ol_ir::Project, entry: &'a str) -> &'a str {
+    match &project.resolution {
+        Some(resolution) => resolution.artifact_basename(entry)
+            .expect("resolved native node has a validated artifact basename"),
+        None => entry,
+    }
+}
+
 fn cmd_simulate(
     model: &Path,
     node: Option<&str>,
@@ -919,6 +976,8 @@ fn cmd_simulate(
         .map(|s| s.to_string())
         .or_else(|| project.main.clone())
         .context("no --node specified and project has no `main`")?;
+    let node_name = project.selected_node_name(&node_name)
+        .with_context(|| format!("no selectable node `{node_name}`"))?;
     let mut sim = ol_sim::Sim::new(&project, &node_name)?;
     let csv = std::fs::read_to_string(inputs)?;
     let trace = sim.run_csv(&csv)?;
@@ -1030,7 +1089,10 @@ fn cmd_prove(
             ProveMode::Realizability => SerMode::Realizability,
             ProveMode::ModeCoverage => SerMode::ModeCoverage,
         },
-        main_node: node.map(|s| s.to_string()).or_else(|| project.main.clone()),
+        main_node: node.or(project.main.as_deref()).map(|name| {
+            project.selected_node_name(name).map(str::to_string)
+                .with_context(|| format!("no selectable node `{name}`"))
+        }).transpose()?,
         extra_args: vec![],
         timeout_seconds: timeout,
         properties: properties.to_vec(),
@@ -1134,7 +1196,7 @@ pub(crate) fn load_for_studio(
         return load_with_stdlib(model, with_stdlib);
     }
     let mut project = load(model)?;
-    if use_embedded {
+    if use_embedded && project.resolution.is_none() {
         let lib = ol_stdlib::load_embedded()
             .map_err(|e| anyhow::anyhow!("embedded stdlib: {e}"))?;
         lib.merge_into(&mut project, "stdlib");
@@ -1225,6 +1287,12 @@ fn serve_studio(
 pub(crate) fn resolve_workspace(path: &Path, empty: bool) -> Result<PathBuf> {
     if !path.is_dir() {
         return Ok(path.to_path_buf());
+    }
+    // Native project folders must be opened through the explicit manifest.
+    // Do this before legacy workspace creation writes any sibling files.
+    if std::fs::read_dir(path)?.filter_map(|e| e.ok()).any(|e| e.path().extension()
+        .and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("olproj"))) {
+        anyhow::bail!("select the .olproj manifest explicitly to open a native project");
     }
     let types_path = path.join("types.json");
     if !types_path.exists() {
@@ -1466,19 +1534,20 @@ fn open_in_browser(url: &str) {
 }
 
 /// Render a single-command Makefile that builds the standalone executable
-/// for a project. The user-defined main operator names both the entry-point
-/// `_step` function the driver calls and the produced binary; this is the
-/// concrete shape of the OpenLustre-vs-SCADE differentiator — any operator
-/// in the project can be designated as `main:` and become the entry point.
-pub(crate) fn makefile_for_entry(entry: &str) -> String {
+/// for a project. The selected operator names the `_step` function called by
+/// the driver. Native projects use its bounded artifact stem for the binary;
+/// legacy projects retain the operator name. Any operator can be designated
+/// as the project's entry point.
+pub(crate) fn makefile_for_entry(project: &ol_ir::Project, entry: &str) -> String {
+    let artifact = artifact_basename(project, entry);
     format!(
 "# Generated by OpenLustre Studio.
 # The user-defined main operator `{entry}` is the entry point of this build.
-# Run `make` to produce `{entry}`; the executable reads inputs from stdin
+# Run `make` to produce `{artifact}`; the executable reads inputs from stdin
 # (CSV with one header row matching the operator's inputs) and prints the
 # per-cycle trace on stdout in the same shape `openlustre simulate` writes.
 
-TARGET ?= {entry}
+TARGET ?= {artifact}
 CC ?= cc
 CFLAGS ?= -std=c11 -Wall -Wextra -O2
 
@@ -1509,7 +1578,9 @@ fn cmd_test_record(
         .map(|s| s.to_string())
         .or_else(|| project.main.clone())
         .context("no --node specified and project has no `main`")?;
-    let recorded = scenario::record_goldens(&project, scenarios, &node_name)
+    let node_name = project.selected_node_name(&node_name)
+        .with_context(|| format!("no selectable node `{node_name}`"))?;
+    let recorded = scenario::record_goldens(&project, scenarios, node_name)
         .map_err(|e| anyhow::anyhow!(e))?;
     for (name, path) in &recorded {
         println!("recorded golden for `{name}` -> {}", path.display());
@@ -1530,6 +1601,8 @@ fn cmd_test_run(
         .map(|s| s.to_string())
         .or_else(|| project.main.clone())
         .context("no --node specified and project has no `main`")?;
+    let node_name = project.selected_node_name(&node_name)
+        .with_context(|| format!("no selectable node `{node_name}`"))?;
     let backends: Vec<scenario::Backend> = match backend {
         TestBackend::Ir => vec![scenario::Backend::Ir],
         TestBackend::C => vec![scenario::Backend::C],
