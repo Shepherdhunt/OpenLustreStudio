@@ -193,3 +193,40 @@ fn merge_into_does_not_clobber_existing_node() {
     assert_eq!(counters.len(), 1, "user's Counter should not be shadowed");
     assert!(counters[0].is_function(), "user's Counter should remain");
 }
+
+/// Two instances reuse the same node definitions at every level. Their
+/// temporal cells must follow the full instance hierarchy, not a global
+/// call-expression address shared by both wrappers.
+#[test]
+fn reused_wrappers_keep_nested_operator_state_separate() {
+    let rhs = |text: &str| serde_json::to_value(ol_stdlib::parse_expr(text).unwrap()).unwrap();
+    let wrapper = |name: &str, body: &str| serde_json::json!({
+        "name": name, "kind": "Operator",
+        "inputs": [{"name":"inc", "ty":{"kind":"Int32"}}],
+        "outputs": [{"name":"count", "ty":{"kind":"Int32"}}],
+        "equations": [{"lhs":["count"], "rhs":rhs(body)}]
+    });
+    let project: Project = serde_json::from_value(serde_json::json!({
+        "name":"nested_instances", "main":"Root",
+        "packages":[{"name":"p", "nodes":[
+            wrapper("Cell", "0 -> pre count + inc"),
+            wrapper("Wrapper", "Cell(inc)"),
+            wrapper("Envelope", "Wrapper(inc)"),
+            {"name":"Root", "kind":"Operator",
+             "inputs":[{"name":"inc_a", "ty":{"kind":"Int32"}},
+                       {"name":"inc_b", "ty":{"kind":"Int32"}}],
+             "outputs":[{"name":"a", "ty":{"kind":"Int32"}},
+                        {"name":"b", "ty":{"kind":"Int32"}}],
+             "equations":[{"lhs":["a"], "rhs":rhs("Envelope(inc_a)")},
+                          {"lhs":["b"], "rhs":rhs("Envelope(inc_b)")}]
+            }
+        ]}]
+    })).unwrap();
+    assert!(!ol_typecheck::check_project(&project).has_errors());
+    let inputs = "inc_a,inc_b\n1,10\n1,10\n2,20\n3,30\n";
+    let expected = "cycle,a,b\n0,0,0\n1,1,10\n2,3,30\n3,6,60\n";
+    let mut a = Sim::new(&project, "Root").unwrap();
+    let mut b = Sim::new(&project, "Root").unwrap();
+    assert_eq!(a.run_csv(inputs).unwrap().to_csv(), expected);
+    assert_eq!(b.run_csv(inputs).unwrap().to_csv(), expected, "separate root instances start independently");
+}

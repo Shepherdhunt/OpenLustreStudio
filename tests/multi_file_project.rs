@@ -174,3 +174,73 @@ fn duplicate_node_across_files_surfaces_via_typecheck() {
     assert!(codes.contains(&"E0001"), "got {codes:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn independent_projects_share_a_transitive_dependency_once() {
+    let dir = make_tempdir();
+    write(dir.join("types.json"), r#"{"name":"signals","packages":[{"name":"signals","types":[{"body":{"kind":"Alias","name":"Sample","target":{"kind":"Int32"}}}]}]}"#);
+    write(dir.join("a.yaml"), "name: a\nmain: A\nincludes: [types.json]\n");
+    write(dir.join("b.yaml"), "name: b\nmain: B\nincludes: [types.json]\n");
+    write(dir.join("root.yaml"), "name: root\nmain: Root\nincludes: [a.yaml, b.yaml]\n");
+    let project = load_project(&dir.join("root.yaml")).expect("shared dependency is not a cycle");
+    assert_eq!(project.main.as_deref(), Some("Root"));
+    assert_eq!(project.packages.len(), 1);
+    assert_eq!(project.packages[0].types.len(), 1, "one canonical dependency identity");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn repeated_canonical_file_reference_is_idempotent() {
+    let dir = make_tempdir();
+    write(dir.join("shared.yaml"), "name: shared\npackages: [{name: shared}]\n");
+    write(dir.join("root.yaml"), "name: root\nincludes: [shared.yaml, ./shared.yaml]\n");
+    let project = load_project(&dir.join("root.yaml")).expect("repeated reference is not a cycle");
+    assert_eq!(project.packages.len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn directory_scan_deduplicates_an_explicitly_included_sibling() {
+    let dir = make_tempdir();
+    write(dir.join("a.yaml"), "name: a\nincludes: [b.yaml]\n");
+    write(dir.join("b.yaml"), "name: b\npackages: [{name: shared}]\n");
+    let project = load_project(&dir).expect("directory members can include one another");
+    assert_eq!(project.packages.len(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn shared_dependency_does_not_hide_a_real_cycle() {
+    let dir = make_tempdir();
+    write(dir.join("shared.yaml"), "name: shared\n");
+    write(dir.join("a.yaml"), "name: a\nincludes: [shared.yaml, b.yaml]\n");
+    write(dir.join("b.yaml"), "name: b\nincludes: [shared.yaml, a.yaml]\n");
+    assert!(matches!(load_project(&dir.join("a.yaml")), Err(ol_ir::loader::LoadError::CyclicInclude(_))));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn independent_type_definitions_cannot_silently_replace_each_other() {
+    let dir = make_tempdir();
+    write(dir.join("a.json"), r#"{"name":"a","packages":[{"name":"a","types":[{"body":{"kind":"Alias","name":"Sample","target":{"kind":"Int32"}}}]}]}"#);
+    write(dir.join("b.json"), r#"{"name":"b","packages":[{"name":"b","types":[{"body":{"kind":"Record","name":"Sample","fields":[{"name":"valid","ty":{"kind":"Bool"}}]}}]}]}"#);
+    let project = load_project(&dir).unwrap();
+    let report = ol_typecheck::check_project(&project);
+    assert!(report.diagnostics.iter().any(|d| d.code == "E0006"), "duplicate type names must be rejected: {:?}", report.diagnostics);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn independent_enums_cannot_silently_rebind_shared_variants() {
+    let enum_package = |package: &str, ty: &str| serde_json::json!({
+        "name":package, "types":[{"body":{"kind":"Enum", "name":ty, "variants":["Idle"]}}]
+    });
+    for packages in [
+        vec![enum_package("flight", "FlightStatus"), enum_package("payload", "PayloadStatus")],
+        vec![enum_package("payload", "PayloadStatus"), enum_package("flight", "FlightStatus")],
+    ] {
+        let project: ol_ir::Project = serde_json::from_value(serde_json::json!({"name":"root", "packages":packages})).unwrap();
+        let report = ol_typecheck::check_project(&project);
+        assert!(report.diagnostics.iter().any(|d| d.code == "E0007"), "ambiguous variant must fail in either include order");
+    }
+}

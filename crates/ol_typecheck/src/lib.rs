@@ -127,6 +127,31 @@ impl TypeContext {
 
 pub fn check_project(project: &Project) -> CheckReport {
     let mut diags = Vec::new();
+    // Packages group declarations; named types are project-wide. Reject
+    // collisions before TypeContext can silently overwrite a library's type.
+    let mut type_names = BTreeSet::new();
+    let mut variant_names = BTreeSet::new();
+    for pkg in &project.packages {
+        for ty in &pkg.types {
+            if !type_names.insert(ty.name()) {
+                diags.push(
+                    Diagnostic::error("E0006", format!("duplicate type name `{}`", ty.name()))
+                        .with_context(format!("package {}", pkg.name)),
+                );
+            }
+            // Enum literals also resolve by a bare project-wide name.
+            if let TypeBody::Enum(def) = &ty.body {
+                for variant in &def.variants {
+                    if !variant_names.insert(variant.as_str()) {
+                        diags.push(
+                            Diagnostic::error("E0007", format!("duplicate enum variant `{variant}`"))
+                                .with_context(format!("enum {} in package {}", def.name, pkg.name)),
+                        );
+                    }
+                }
+            }
+        }
+    }
     let tctx = TypeContext::from_project(project);
 
     check_constants(project, &tctx, &mut diags);

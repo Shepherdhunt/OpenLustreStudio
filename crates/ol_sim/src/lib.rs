@@ -6,10 +6,11 @@
 //! emitter targets.
 //!
 //! Stateful subnode calls are supported: every `Expr::Call` to a stateful
-//! operator gets its own [`State`] keyed by the call expression's address in
-//! the IR. This is sound because the [`Sim`] holds an immutable borrow of the
-//! [`Project`] for its entire lifetime, so the expression pointers it stores
-//! cannot be invalidated.
+//! operator gets its own [`State`] keyed by the call expression's address
+//! within its parent instance. Each state owns the states of its child calls,
+//! so two instances of a reusable operator keep separate nested state. The
+//! [`Sim`] holds an immutable borrow of the [`Project`] for its entire
+//! lifetime, so the expression pointers cannot be invalidated.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -138,6 +139,9 @@ pub struct State {
     /// its chain's count is still zero — the clocked analogue of
     /// `cycle == 0`.
     clock_ticks: HashMap<String, usize>,
+    /// Child calls belong to this particular operator instance. A call
+    /// expression in a shared node definition is not globally unique.
+    child_calls: HashMap<usize, State>,
 }
 
 pub struct Sim<'a> {
@@ -1404,6 +1408,7 @@ fn step_instance(
             // Stateful: take this instance's State, evaluate the body in its
             // scope, snapshot, and put it back.
             let mut sub_state = call_states.remove(&key).unwrap_or_default();
+            let mut child_calls = std::mem::take(&mut sub_state.child_calls);
             // Clocked locals/outputs hold their last value through inactive
             // cycles — reseed them from the instance's previous snapshot.
             for p in callee.outputs.iter().map(|p| &p.name).chain(callee.locals.iter().map(|l| &l.name)) {
@@ -1422,7 +1427,7 @@ fn step_instance(
                     &eq.rhs,
                     &callee_env,
                     &mut sub_state,
-                    call_states,
+                    &mut child_calls,
                     project,
                     Some(&callee_clocks.site_clocks),
                     cov,
@@ -1438,6 +1443,7 @@ fn step_instance(
                 sub_state.prev.insert(k.clone(), v.clone());
             }
             sub_state.cycle += 1;
+            sub_state.child_calls = child_calls;
             call_states.insert(key, sub_state);
             extract_output(callee, &mut callee_env)
         }
