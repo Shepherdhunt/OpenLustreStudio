@@ -627,7 +627,40 @@ fn compile_c(dir:&Path,header:&str,source:&str,driver:&str,sanitizers:bool)->Pat
 fn run_c(executable:&Path,input:&str)->String {
     use std::io::Write;
     let mut child=Command::new(executable).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();let out=child.wait_with_output().unwrap();
-    assert!(out.status.success(),"generated C failed: {}",String::from_utf8_lossy(&out.stderr));String::from_utf8(out.stdout).unwrap()
+    assert!(out.status.success(),"generated C failed: {}",String::from_utf8_lossy(&out.stderr));normalize_c_stdout(&String::from_utf8(out.stdout).unwrap())
+}
+
+fn normalize_c_stdout(stdout: &str) -> String {
+    // Windows C text output translates LF to CRLF. Preserve every other byte,
+    // including bare CR, whitespace, row order and terminal newline count.
+    stdout.replace("\r\n", "\n")
+}
+
+#[test]
+fn generated_c_stdout_normalization_preserves_all_numeric_rows() {
+    let rows = (0..400).map(|row| format!("{row},{},{},{},{},{}",
+        row % 2, row * 3, row * 5, row * 7, row * 11)).collect::<Vec<_>>();
+    let expected = rows.join("\n") + "\n";
+    let crlf = rows.join("\r\n") + "\r\n";
+    assert_eq!(normalize_c_stdout(&expected), expected);
+    assert_eq!(normalize_c_stdout(&crlf), expected);
+    assert_eq!(normalize_c_stdout(&expected.replacen('\n', "\r\n", 1)), expected);
+    let mut reordered = rows.clone();
+    reordered.swap(137, 138);
+    for (control, changed) in [
+        ("wrong value", crlf.replacen("137,1,411,", "137,1,412,", 1)),
+        ("missing row", rows[..399].join("\r\n") + "\r\n"),
+        ("extra row", crlf.clone() + &rows[137] + "\r\n"),
+        ("reordered rows", reordered.join("\r\n") + "\r\n"),
+        ("blank row", crlf.replacen("\r\n", "\r\n\r\n", 1)),
+        ("whitespace", crlf.replacen("137,1,", "137, 1,", 1)),
+        ("bare CR", crlf.replacen("\r\n", "\r", 1)),
+        ("CRCRLF", crlf.replacen("\r\n", "\r\r\n", 1)),
+        ("missing terminal newline", crlf.trim_end_matches("\r\n").to_owned()),
+        ("extra terminal newline", crlf.clone() + "\r\n"),
+    ] {
+        assert_ne!(normalize_c_stdout(&changed), expected, "must reject {control}");
+    }
 }
 
 fn stateful_library(dir:&Path,id:&str)->PathBuf {
