@@ -40,27 +40,42 @@ pub enum LoadError {
 /// * Each loaded project may declare an `includes:` list of relative paths;
 ///   those are loaded recursively and merged. Self-references and cycles
 ///   produce [`LoadError::CyclicInclude`] rather than diverging.
+/// * A canonical file is merged only once per load. Independent projects
+///   may share transitive dependencies without duplicating their definitions.
 pub fn load_project(path: &Path) -> Result<Project, LoadError> {
-    let mut visited = HashSet::new();
-    load_recursive(path, &mut visited)
+    load_recursive(path, &mut LoadState::default())
 }
 
-fn load_recursive(path: &Path, visited: &mut HashSet<PathBuf>) -> Result<Project, LoadError> {
+#[derive(Default)]
+struct LoadState {
+    active: HashSet<PathBuf>,
+    loaded: HashSet<PathBuf>,
+}
+
+fn load_recursive(path: &Path, state: &mut LoadState) -> Result<Project, LoadError> {
     let canonical = path
         .canonicalize()
         .unwrap_or_else(|_| path.to_path_buf());
-    if !visited.insert(canonical.clone()) {
+    if state.active.contains(&canonical) {
         return Err(LoadError::CyclicInclude(path.display().to_string()));
     }
-
-    if path.is_dir() {
-        load_directory(path, visited)
-    } else {
-        load_file_and_includes(path, visited)
+    if state.loaded.contains(&canonical) {
+        return Ok(Project::default());
     }
+    state.active.insert(canonical.clone());
+    let result = if path.is_dir() {
+        load_directory(path, state)
+    } else {
+        load_file_and_includes(path, state)
+    };
+    state.active.remove(&canonical);
+    if result.is_ok() {
+        state.loaded.insert(canonical);
+    }
+    result
 }
 
-fn load_directory(dir: &Path, visited: &mut HashSet<PathBuf>) -> Result<Project, LoadError> {
+fn load_directory(dir: &Path, state: &mut LoadState) -> Result<Project, LoadError> {
     let rd = std::fs::read_dir(dir).map_err(|e| LoadError::Io {
         path: dir.display().to_string(),
         source: e,
@@ -94,7 +109,7 @@ fn load_directory(dir: &Path, visited: &mut HashSet<PathBuf>) -> Result<Project,
         ..Default::default()
     };
     for f in files {
-        let child = load_recursive(&f, visited)?;
+        let child = load_recursive(&f, state)?;
         merged.merge(child);
     }
     Ok(merged)
@@ -102,7 +117,7 @@ fn load_directory(dir: &Path, visited: &mut HashSet<PathBuf>) -> Result<Project,
 
 fn load_file_and_includes(
     path: &Path,
-    visited: &mut HashSet<PathBuf>,
+    state: &mut LoadState,
 ) -> Result<Project, LoadError> {
     let mut project = parse_single_file(path)?;
     let parent = path.parent().unwrap_or(Path::new("."));
@@ -113,7 +128,7 @@ fn load_file_and_includes(
         } else {
             parent.join(&inc)
         };
-        let child = load_recursive(&inc_path, visited)?;
+        let child = load_recursive(&inc_path, state)?;
         project.merge(child);
     }
     Ok(project)
