@@ -102,6 +102,7 @@ impl Library {
             main: None,
             includes: vec![],
             origins: Vec::new(),
+            resolution: None,
         }
     }
 

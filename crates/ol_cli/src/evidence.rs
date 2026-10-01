@@ -72,6 +72,7 @@ pub struct FileHash {
 pub struct Identity {
     pub project: String,
     pub operator: String,
+    pub artifact_basename: String,
     pub kind: String,
     pub inputs: Vec<String>,
     pub outputs: Vec<String>,
@@ -80,6 +81,10 @@ pub struct Identity {
     /// excluded: changes exactly when its behaviour can change.
     pub fingerprint: String,
     pub model_files: Vec<FileHash>,
+    /// Full verified native project graph and source-symbol provenance, when
+    /// the input was a native manifest. Proof still targets transient IR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_resolution: Option<ol_ir::NativeResolution>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,11 +196,13 @@ pub fn collect(req: &Request) -> Result<Evidence, String> {
     let identity = Identity {
         project: req.project.name.clone(),
         operator: node.name.clone(),
+        artifact_basename: crate::artifact_basename(req.project, &node.name).to_owned(),
         kind: format!("{:?}", node.kind),
         inputs: node.inputs.iter().map(|p| format!("{}: {}", p.name, p.ty.lustre_name())).collect(),
         outputs: node.outputs.iter().map(|p| format!("{}: {}", p.name, p.ty.lustre_name())).collect(),
         contract: node.contract.clone(),
         fingerprint: fingerprint(&slice),
+        native_resolution: req.project.resolution.clone(),
         model_files: req
             .model_files
             .iter()
@@ -698,6 +705,7 @@ impl Evidence {
         h.push_str("<section><h2>Identification</h2><table class=\"kv\"><tbody>");
         let kv = |k: &str, v: String| format!("<tr><th>{k}</th><td>{v}</td></tr>");
         h.push_str(&kv("operator", format!("{} ({})", esc(&id.operator), esc(&id.kind))));
+        h.push_str(&kv("artifact basename", esc(&id.artifact_basename)));
         h.push_str(&kv("inputs", esc(&id.inputs.join(", "))));
         h.push_str(&kv("outputs", esc(&id.outputs.join(", "))));
         h.push_str(&kv("contract", esc(id.contract.as_deref().unwrap_or("—"))));
@@ -707,6 +715,12 @@ impl Evidence {
         ));
         for f in &id.model_files {
             h.push_str(&kv("model file", format!("{} — {} bytes<br><code>{}</code>", esc(&f.name), f.bytes, f.sha256)));
+        }
+        if let Some(resolution) = &id.native_resolution {
+            for project in &resolution.projects {
+                h.push_str(&kv("native project snapshot", format!("{}<br><code>{}</code>",
+                    esc(&project.project_id), esc(&project.snapshot_sha256))));
+            }
         }
         h.push_str("</tbody></table>");
 

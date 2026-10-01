@@ -234,6 +234,12 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         Some((p, q)) => (p, q),
         None => (path, ""),
     };
+    if method == "POST" && is_native_path(&ctx.model())
+        && (raw_path.starts_with("/api/edit/") || raw_path == "/api/workspace/save") {
+        return (400, "application/json", json_error(
+            "native projects are read-only in this Studio increment; edit owned model files and refresh dependency snapshots explicitly"
+        ).into_bytes());
+    }
     match (method, raw_path) {
         ("GET", "/") | ("GET", "/index.html") => {
             (200, "text/html; charset=utf-8", STUDIO_UI_HTML.as_bytes().to_vec())
@@ -615,6 +621,8 @@ fn build_inspect(ctx: &ServerCtx) -> Result<String, String> {
             "packages": packages,
             "state_machines": state_machines,
             "activations": activations,
+            "native_resolution": project.resolution,
+            "editable": project.resolution.is_none(),
         },
         "history": { "undo": undo_depth, "redo": redo_depth },
         "diagnostics": diagnostics,
@@ -692,16 +700,26 @@ fn build_model_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
             return (200, "application/json", v.to_string().into_bytes());
         }
     };
-    if project.find_node(&main).is_none() {
+    let main = match project.selected_node_name(&main) {
+        Some(name) => name.to_string(),
+        None => {
         let v = serde_json::json!({
             "ok": false,
             "message": format!("`{main}` is not an operator in this model"),
         });
         return (200, "application/json", v.to_string().into_bytes());
+        }
+    };
+    if project.resolution.is_some() && project.main.as_deref() != Some(main.as_str()) {
+        let value = serde_json::json!({
+            "ok": false,
+            "message": "native Studio builds use the manifest entrypoint; use CLI --root to generate another exported node",
+        });
+        return (200, "application/json", value.to_string().into_bytes());
     }
     // Make the chosen operator the root (persisted to the model file, journaled
     // for undo) so the rest of the toolchain drives it — SCADE "set as root".
-    if project.main.as_deref() != Some(main.as_str()) {
+    if project.resolution.is_none() && project.main.as_deref() != Some(main.as_str()) {
         let before = take_snapshot(ctx);
         match load_raw(ctx) {
             Ok(mut raw) => {
@@ -739,6 +757,14 @@ fn build_model_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec
     }
 
     let full = lustre_with_contracts(&sliced);
+    if project.resolution.is_some() {
+        let value = serde_json::json!({
+            "ok": true, "errors": 0, "warnings": warnings, "main": main,
+            "lustre": full, "native_resolution": sliced.resolution,
+            "message": format!("`{main}` valid — checked the native manifest entrypoint"),
+        });
+        return (200, "application/json", value.to_string().into_bytes());
+    }
     let path = operator_lus_path(ctx, &main);
     if let Err(e) = std::fs::write(&path, &full) {
         return (
@@ -812,6 +838,7 @@ fn clite_report(ctx: &ServerCtx) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!({
         "schema_version": 1,
         "report": report,
+        "artifact_basename": project.main.as_deref().map(|entry| crate::artifact_basename(&project, entry)),
         "markdown": report.to_markdown(),
     }))
 }
@@ -834,7 +861,7 @@ fn build_makefile(ctx: &ServerCtx) -> Result<String, String> {
         .main
         .clone()
         .ok_or_else(|| "project has no `main` operator".to_string())?;
-    Ok(crate::makefile_for_entry(&entry))
+    Ok(crate::makefile_for_entry(&project, &entry))
 }
 
 fn run_sim(ctx: &ServerCtx, csv: &str, full: bool) -> Result<String, String> {
@@ -896,6 +923,8 @@ fn sim_start_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
             .map(str::to_string)
             .or_else(|| project.main.clone())
             .ok_or("no operator to simulate — build one first (building makes it the root)")?;
+        let root = project.selected_node_name(&root)
+            .ok_or_else(|| format!("no selectable node `{root}`"))?.to_string();
         let node = project.find_node(&root).ok_or_else(|| format!("operator `{root}` not found"))?;
         if node.is_imported() {
             return Err(format!("`{root}` is an imported C operator — there is no model to simulate"));
@@ -1535,6 +1564,7 @@ fn build_diagram(
     let value = serde_json::json!({
         "schema_version": 1,
         "node": node.name,
+        "artifact_basename": crate::artifact_basename(&project, &node.name),
         "kind": format!("{:?}", node.kind),
         "positions": node.diagram.positions,
         "grid": node.diagram.grid,
@@ -1582,6 +1612,9 @@ fn load_raw_path(path: &std::path::Path) -> Result<ol_ir::Project, String> {
 }
 
 fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(), String> {
+    if is_native_path(path) || project.resolution.is_some() {
+        return Err("cannot save transient native resolution as an authored model".into());
+    }
     let text = match path
         .extension()
         .and_then(|s| s.to_str())
@@ -1592,6 +1625,10 @@ fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(),
         _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
     };
     std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
+fn is_native_path(path: &std::path::Path) -> bool {
+    path.extension().and_then(|s| s.to_str()).is_some_and(|s| s.eq_ignore_ascii_case("olproj"))
 }
 
 fn load_raw(ctx: &ServerCtx) -> Result<ol_ir::Project, String> {
@@ -1898,13 +1935,15 @@ fn evidence_response(ctx: &ServerCtx, body: &[u8]) -> Result<serde_json::Value, 
         .map(str::to_string)
         .or_else(|| project.main.clone())
         .ok_or("no operator to report on — build one first")?;
+    let root = project.selected_node_name(&root)
+        .ok_or_else(|| format!("no selectable node `{root}`"))?.to_string();
     let mut model_files = Vec::new();
     let model = ctx.model();
     if let Ok(bytes) = std::fs::read(&model) {
         let name = model.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         model_files.push((name, bytes));
     }
-    if let Some(types) = ctx.types_file() {
+    if let Some(types) = ctx.types_file().filter(|_| project.resolution.is_none()) {
         if let Ok(bytes) = std::fs::read(&types) {
             model_files.push(("types.json".into(), bytes));
         }
@@ -1923,10 +1962,12 @@ fn evidence_response(ctx: &ServerCtx, body: &[u8]) -> Result<serde_json::Value, 
     Ok(serde_json::json!({
         "schema_version": 1,
         "operator": root,
+        "artifact_basename": crate::artifact_basename(&project, &root),
         "verdict": ev.verdict,
         "sections": ev.sections,
         "html": ev.to_html(),
         "evidence": ev,
+        "native_resolution": project.resolution,
     }))
 }
 
@@ -5091,7 +5132,7 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         ("openlustre_generated.h", bundle.header),
         ("openlustre_generated.c", bundle.source),
         ("driver.c", driver),
-        ("Makefile", crate::makefile_for_entry(&entry_name)),
+        ("Makefile", crate::makefile_for_entry(&project, &entry_name)),
     ];
     let mut sources = vec!["openlustre_generated.c", "driver.c"];
     if has_contract {
@@ -5105,11 +5146,15 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
             return bad(&format!("writing {name}: {e}"));
         }
     }
+    if let Err(e) = crate::write_native_resolution(&project, &out_dir) {
+        return bad(&format!("writing native resolution: {e}"));
+    }
 
+    let basename = crate::artifact_basename(&project, &entry_name);
     let exe_name = if cfg!(windows) {
-        format!("{entry_name}.exe")
+        format!("{basename}.exe")
     } else {
-        entry_name.clone()
+        basename.to_owned()
     };
     let compile_log =
         crate::scenario::compile_in_dir(&out_dir, &sources, &exe_name, Some(compiler));
@@ -5120,6 +5165,8 @@ fn clite_compile_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
     let value = serde_json::json!({
         "schema_version": 1,
         "out_dir": out_dir.display().to_string(),
+        "semantic_entry": entry_name,
+        "artifact_basename": basename,
         "wrote": wrote.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
         "compiled": compiled,
         "exe": if compiled { serde_json::Value::String(out_dir.join(&exe_name).display().to_string()) } else { serde_json::Value::Null },
@@ -5181,10 +5228,14 @@ fn clite_run_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
             return bad(&format!("writing {name}: {e}"));
         }
     }
+    if let Err(e) = crate::write_native_resolution(&project, &out_dir) {
+        return bad(&format!("writing native resolution: {e}"));
+    }
+    let basename = crate::artifact_basename(&project, &entry_name);
     let exe_name = if cfg!(windows) {
-        format!("{entry_name}_debug.exe")
+        format!("{basename}_debug.exe")
     } else {
-        format!("{entry_name}_debug")
+        format!("{basename}_debug")
     };
     let sources = ["openlustre_generated.c", "debug_driver.c"];
     let log = match crate::scenario::compile_in_dir_defs(
@@ -5207,6 +5258,8 @@ fn clite_run_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
         "ok": true,
         "compiled": true,
         "launched": launched,
+        "semantic_entry": entry_name,
+        "artifact_basename": basename,
         "exe": exe.display().to_string(),
         "message": note,
         "log": log,

@@ -1,5 +1,10 @@
 # OpenLustre Studio
 
+Local reusable projects can opt into the [native `.olproj` manifest format](docs/native-projects.md)
+for explicit exports, aliases, exact snapshots and qualified symbols. This
+increment uses a read-only native Studio view; see the format's documented
+scope and regression evidence before designing an embedded project around it.
+
 **An open-source, SCADE-like graphical modeling IDE for safety-critical
 embedded software.** Engineers graphically design synchronous models —
 dataflow blocks, if/then/else logic, state machines, math, mode-aware
