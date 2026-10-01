@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
 
 use ol_ir::native_project::{load_native_project, snapshot_native_project};
 use ol_ir::{BinOp, Expr, Project};
@@ -457,8 +458,7 @@ fn composed_reserved_output_names_project_the_escaped_c_field() {
     assert_eq!(run_one(&p,12),12);
     let bundle=ol_clite_emit::emit_project(&p);
     let driver=ol_clite_emit::harness::emit_csv_driver(p.find_node("Root").unwrap());
-    let executable=compile_c(&tmp.path().join("cc"),&bundle.header,&bundle.source,&driver,true);
-    assert_eq!(run_c(&executable,"x\n12\n"),"cycle,y\n0,12\n");
+    assert_c_oracle(&tmp.path().join("cc"),&bundle.header,&bundle.source,&driver,"x\n12\n","cycle,y\n0,12\n","reserved output projection");
 }
 
 #[test]
@@ -557,10 +557,70 @@ fn loading_success_and_failure_leave_readonly_library_bytes_and_modes_unchanged(
     for (path,(bytes,mode)) in files.iter().zip(before) {assert_eq!(std::fs::read(path).unwrap(),bytes);assert_eq!(std::fs::metadata(path).unwrap().permissions(),mode);}
 }
 
+fn c_executable(dir: &Path, name: &str) -> PathBuf {
+    dir.join(if cfg!(windows) { format!("{name}.exe") } else { name.to_owned() })
+}
+
+fn c_compiler(sanitizers: bool) -> Command {
+    let mut cc = Command::new("cc");
+    cc.args(["-std=c11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-variable", "-Wno-unused-but-set-variable"]);
+    if sanitizers {
+        cc.args(["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-fno-sanitize-recover=all"]);
+    }
+    cc
+}
+
+fn sanitizer_support() -> &'static Result<(), String> {
+    static SUPPORT: OnceLock<Result<(), String>> = OnceLock::new();
+    SUPPORT.get_or_init(|| {
+        let probe = TempDir::new();
+        let source = probe.path().join("sanitizer_probe.c");
+        std::fs::write(&source, "int main(void) { volatile int value = 7; return value != 7; }\n").unwrap();
+        let executable = c_executable(probe.path(), "sanitizer_probe");
+        let output = c_compiler(true).arg(&source).arg("-o").arg(&executable).output()
+            .expect("existing host cc is required for sanitizer capability probing");
+        if !output.status.success() {
+            return Err(format!("compile/link probe {}: {}{}", output.status,
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)));
+        }
+        let output = Command::new(&executable).output()
+            .map_err(|error| format!("runtime probe could not start: {error}"))?;
+        if !output.status.success() {
+            return Err(format!("runtime probe {}: {}{}", output.status,
+                String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr)));
+        }
+        Ok(())
+    })
+}
+
+fn report_c_coverage(context: &str, coverage: &str) {
+    use std::io::Write;
+    // Direct stderr writes remain visible in successful CI tests; libtest
+    // captures eprintln! output unless the workflow requests --show-output.
+    writeln!(std::io::stderr(), "native generated-C [{context}]: {coverage}").unwrap();
+}
+
+fn assert_c_oracle(dir: &Path, header: &str, source: &str, driver: &str,
+                   input: &str, expected: &str, context: &str) {
+    // Functional C acceptance is mandatory even when sanitizers are absent.
+    let plain = compile_c(&dir.join("plain"), header, source, driver, false);
+    assert_eq!(run_c(&plain, input), expected, "unsanitized C oracle: {context}");
+    report_c_coverage(context, "unsanitized C oracle PASS");
+    match sanitizer_support() {
+        Ok(()) => {
+            // A successful standalone probe makes every generated-C compile,
+            // runtime and oracle failure fatal. There is no fallback here.
+            let sanitized = compile_c(&dir.join("sanitized"), header, source, driver, true);
+            assert_eq!(run_c(&sanitized, input), expected, "ASan+UBSan C oracle: {context}");
+            report_c_coverage(context, "ASan+UBSan C oracle PASS");
+        }
+        Err(reason) => report_c_coverage(context, &format!("ASan+UBSan unavailable; additional sanitized run omitted: {reason}")),
+    }
+}
+
 fn compile_c(dir:&Path,header:&str,source:&str,driver:&str,sanitizers:bool)->PathBuf {
     std::fs::create_dir_all(dir).unwrap();std::fs::write(dir.join("openlustre_generated.h"),header).unwrap();std::fs::write(dir.join("openlustre_generated.c"),source).unwrap();std::fs::write(dir.join("driver.c"),driver).unwrap();
-    let executable=dir.join("run");let mut cc=Command::new("cc");cc.args(["-std=c11","-Wall","-Wextra","-Werror","-Wno-unused-variable","-Wno-unused-but-set-variable"]);
-    if sanitizers {cc.args(["-fsanitize=address,undefined","-fno-omit-frame-pointer"]);}
+    let executable=c_executable(dir,"run");let mut cc=c_compiler(sanitizers);
     let result=cc.arg("-o").arg(&executable).arg(dir.join("openlustre_generated.c")).arg(dir.join("driver.c")).arg(format!("-I{}",dir.display())).output().expect("existing host cc is required for native generated-C acceptance");
     assert!(result.status.success(),"cc failed: {}",String::from_utf8_lossy(&result.stderr));executable
 }
@@ -576,7 +636,7 @@ fn stateful_library(dir:&Path,id:&str)->PathBuf {
 }
 
 #[test]
-fn native_repeated_nested_instances_reset_and_interleave_in_ir_and_sanitized_c() {
+fn native_repeated_nested_instances_reset_and_interleave_in_ir_and_generated_c() {
     let tmp=TempDir::new();let a=stateful_library(&tmp.path().join("a"),"synthetic.state.a");let b=stateful_library(&tmp.path().join("b"),"synthetic.state.b");
     let names=["a0","a1","b0","b1"];
     let r=project(&tmp.path().join("root"),"synthetic.root",model(vec![node("Root",names.iter().map(|n|port(n,int_ty())).collect(),names.iter().map(|n|port(&format!("out_{n}"),int_ty())).collect(),
@@ -597,6 +657,6 @@ fn native_repeated_nested_instances_reset_and_interleave_in_ir_and_sanitized_c()
             driver.push_str(&format!("{backend}_step(&s{owner},&in,&out); printf(\"{frame},{owner},%d,%d,%d,%d\\n\",out.out_a0,out.out_a1,out.out_b0,out.out_b1);\n"));
         }
     }
-    driver.push_str("return 0; }\n");let bundle=ol_clite_emit::emit_project(&p);let executable=compile_c(&tmp.path().join("cc"),&bundle.header,&bundle.source,&driver,true);
-    assert_eq!(run_c(&executable,""),expected,"400 root-instance updates / 1,600 values match independent recurrence including 3 resets");
+    driver.push_str("return 0; }\n");let bundle=ol_clite_emit::emit_project(&p);
+    assert_c_oracle(&tmp.path().join("cc"),&bundle.header,&bundle.source,&driver,"",&expected,"400 root-instance updates / 1,600 values including 3 resets");
 }
