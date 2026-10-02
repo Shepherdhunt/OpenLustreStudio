@@ -112,6 +112,8 @@ fn unknown_record_field_errors() {
     };
     let report = ol_typecheck::check_project(&project_with(node, vec![msg_type]));
     assert!(codes(&report).contains(&"E0120"), "got {:?}", codes(&report));
+    assert!(report.diagnostics.iter().any(|d|
+        d.code == "E0120" && d.message == "struct `AdsbMsg` has no field `speed`"));
 }
 
 #[test]
@@ -344,4 +346,32 @@ fn negative_literal_fits_signed_but_not_unsigned() {
         cs.iter().filter(|c| **c == "E0040").count() == 1,
         "expected exactly one E0040, got {cs:?}"
     );
+}
+
+#[test]
+fn alias_resolution_bounds_cycles_across_arrays_and_preserves_normal_nested_types() {
+    let node = NodeDef {
+        name: "CycleProbe".into(), kind: NodeKind::Function,
+        inputs: vec![Port { name: "x".into(), ty: Type::named("Cycle") }],
+        outputs: vec![Port { name: "y".into(), ty: Type::named("Cycle") }],
+        locals: vec![], equations: vec![Equation { lhs: vec!["y".into()], rhs: Expr::var("x") }],
+        contract: None, diagram: Default::default(), probes: vec![],
+    };
+    let project = project_with(node, vec![
+        alias_type("Cycle", Type::Array { elem: Box::new(Type::named("Cycle")), len: 1 }),
+        alias_type("A", Type::named("B")),
+        alias_type("B", Type::Array { elem: Box::new(Type::named("A")), len: 2 }),
+        alias_type("Scalar", Type::Int32),
+        alias_type("Row", Type::Array { elem: Box::new(Type::named("Scalar")), len: 3 }),
+        alias_type("Grid", Type::Array { elem: Box::new(Type::named("Row")), len: 2 }),
+    ]);
+    let tctx = ol_typecheck::TypeContext::from_project(&project);
+    assert_eq!(tctx.resolve(&Type::named("Cycle")), Type::named("Cycle"));
+    assert_eq!(tctx.resolve(&Type::named("A")), Type::named("A"));
+    assert_eq!(tctx.resolve(&Type::named("Grid")), Type::Array {
+        elem: Box::new(Type::Array { elem: Box::new(Type::Int32), len: 3 }), len: 2,
+    });
+    let report = ol_typecheck::check_project(&project);
+    assert_eq!(report.errors().filter(|d| d.code == "E0008").count(), 3, "{report:?}");
+    assert!(report.errors().all(|d| d.message.contains("recursive")), "{report:?}");
 }

@@ -1101,10 +1101,18 @@ fn named_types_save_into_the_types_file_and_serve_back() {
         .iter().map(|x| x["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"Mode") && names.contains(&"Sample") && names.contains(&"Vec3"),
         "served types: {names:?}");
+    let sample = t["types"].as_array().unwrap().iter()
+        .find(|x| x["name"] == "Sample").unwrap();
+    assert_eq!(sample["kind"], "record", "API type tags retain compatibility");
+    assert_eq!(sample["display_kind"], "struct", "the visible type kind is struct");
 
     // The definitions live in the TYPES file, not the workspace file.
     let types_disk = std::fs::read_to_string(ws.join("types.json")).unwrap();
     let project_disk = std::fs::read_to_string(ws.join("ws.wksc")).unwrap();
+    let saved_types: serde_json::Value = serde_json::from_str(&types_disk).unwrap();
+    let saved_sample = saved_types["packages"][0]["types"].as_array().unwrap().iter()
+        .find(|x| x["body"]["name"] == "Sample").unwrap();
+    assert_eq!(saved_sample["body"]["kind"], "Record", "persisted type tags retain compatibility");
     for n in ["Mode", "Sample", "Vec3"] {
         assert!(types_disk.contains(n), "{n} not in types.json");
         assert!(!project_disk.contains(n), "{n} leaked into the workspace file");
@@ -1309,4 +1317,105 @@ fn constructs_validate_against_workspace_types_and_constants() {
     let ins = get_json(port, "/api/inspect");
     let model_pkgs = ins["project"]["packages"].as_array().unwrap();
     assert!(model_pkgs.iter().all(|p| p["name"] != "__included"), "{ins}");
+}
+
+#[test]
+fn simulation_rejects_recursive_array_alias_and_huge_output_before_engine_allocation() {
+    let tmp = make_tempdir("typed_bounds");
+    let model = tmp.join("bounds.wksc");
+    let project = serde_json::json!({
+        "name": "bounds", "main": "CycleProbe", "packages": [{"name": "p",
+            "types": [{"body": {"kind": "Alias", "name": "Cycle", "target": {
+                "kind": "Array", "elem": {"kind": "Named", "name": "Cycle"}, "len": 1
+            }}}],
+            "nodes": [
+                {"name": "CycleProbe", "kind": "Function",
+                    "inputs": [{"name": "x", "ty": {"kind": "Named", "name": "Cycle"}}],
+                    "outputs": [{"name": "y", "ty": {"kind": "Named", "name": "Cycle"}}],
+                    "equations": [{"lhs": ["y"], "rhs": {"expr": "Var", "name": "x"}}]},
+                {"name": "HugeOutput", "kind": "Function", "inputs": [],
+                    "outputs": [{"name": "huge", "ty": {"kind": "Array", "elem": {"kind": "Bool"}, "len": u32::MAX}}],
+                    "equations": []}
+            ]
+        }]
+    });
+    std::fs::write(&model, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+    let g = start_server(tmp, &model);
+    let output = Command::new(env!("CARGO")).args(["run", "-q", "-p", "ol_cli", "--", "check"])
+        .arg(&model).output().expect("check recursive alias");
+    assert_eq!(output.status.code(), Some(1), "CLI rejects the type without a crash: {output:?}");
+    let cli = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    assert!(cli.contains("E0008") && cli.contains("recursive"), "{cli}");
+    for (root, signal, reason) in [
+        ("CycleProbe", "CycleProbe.x", "type nesting exceeds 64"),
+        ("HugeOutput", "HugeOutput.huge", "shape exceeds 10000 values"),
+    ] {
+        let (status, body) = request(g.port, "POST", "/api/sim/start", &serde_json::json!({"node": root}).to_string()).unwrap();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains(signal) && body.contains(reason), "{body}");
+        assert_eq!(request(g.port, "GET", "/api/health", "").unwrap().0, 200);
+    }
+}
+
+#[test]
+fn simulation_constructor_uses_checked_slice_and_preflights_retained_constant_types() {
+    let tmp = make_tempdir("typed_const_bounds");
+    let model = tmp.join("constant-bounds.wksc");
+    let expr = |text: &str| serde_json::to_value(ol_stdlib::parse_expr(text).unwrap()).unwrap();
+    let scalar_node = |name: &str, body: &str| serde_json::json!({
+        "name": name, "kind": "Function",
+        "inputs": [{"name": "x", "ty": {"kind": "Int32"}}],
+        "outputs": [{"name": "y", "ty": {"kind": "Int32"}}],
+        "equations": [{"lhs": ["y"], "rhs": expr(body)}]
+    });
+    let project = serde_json::json!({
+        "name": "constant-bounds", "main": "Healthy", "packages": [{"name": "p",
+            "types": [
+                {"body": {"kind": "Alias", "name": "Self", "target": {"kind": "Named", "name": "Self"}}},
+                {"body": {"kind": "Record", "name": "Loop", "fields": [{"name": "child", "ty": {"kind": "Named", "name": "Loop"}}]}}
+            ],
+            "constants": [
+                {"name": "base", "ty": {"kind": "Int32"}, "value": expr("7")},
+                {"name": "needed", "ty": {"kind": "Int32"}, "value": expr("base + 1")},
+                {"name": "unused", "ty": {"kind": "Int32"}, "value": expr("99")},
+                {"name": "bad_alias", "ty": {"kind": "Named", "name": "Self"}, "value": expr("0")},
+                {"name": "bad_struct", "ty": {"kind": "Named", "name": "Loop"}, "value": expr("0")},
+                {"name": "bad_huge", "ty": {"kind": "Array", "elem": {"kind": "Bool"}, "len": u32::MAX}, "value": expr("0")}
+            ],
+            "nodes": [
+                scalar_node("Healthy", "x + needed"),
+                scalar_node("UsesAlias", "if bad_alias = bad_alias then x else 0"),
+                scalar_node("UsesStruct", "if bad_struct = bad_struct then x else 0"),
+                scalar_node("UsesHuge", "if bad_huge = bad_huge then x else 0")
+            ]
+        }]
+    });
+    std::fs::write(&model, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+    let g = start_server(tmp, &model);
+    post_ok(g.port, "/api/sim/start", r#"{"node":"Healthy"}"#);
+    let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":3},"break":"y = needed + 3"}"#).unwrap();
+    assert_eq!(status, 200, "ordinary constant and its dependency remain available: {body}");
+    let step: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(step["stopped"], "break");
+    assert_eq!(step["rows"][0]["values"], serde_json::json!(["3", "11"]));
+    let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":3},"break":"unused = 99"}"#).unwrap();
+    assert_eq!(status, 400);
+    assert!(body.contains("unused") && body.contains("not a signal, constant or enum value in the simulation"), "{body}");
+    let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":4}}"#).unwrap();
+    assert_eq!(status, 200, "invalid breakpoint runs no cycle and can be corrected: {body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["cycle"], 2);
+    for (root, constant, reason) in [
+        ("UsesAlias", "bad_alias", "type nesting exceeds 64"),
+        ("UsesStruct", "bad_struct", "type nesting exceeds 64"),
+        ("UsesHuge", "bad_huge", "shape exceeds 10000 values"),
+    ] {
+        let (status, body) = request(g.port, "POST", "/api/sim/start", &serde_json::json!({"node": root}).to_string()).unwrap();
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains(&format!("constant `{constant}`")) && body.contains(reason), "{body}");
+        assert_eq!(request(g.port, "GET", "/api/health", "").unwrap().0, 200);
+    }
+    post_ok(g.port, "/api/sim/start", r#"{"node":"Healthy"}"#);
+    let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":4}}"#).unwrap();
+    assert_eq!(status, 200, "healthy root remains runnable after rejected constants: {body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["cycle"], 1);
 }

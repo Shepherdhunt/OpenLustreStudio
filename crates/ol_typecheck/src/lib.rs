@@ -88,28 +88,34 @@ impl TypeContext {
         ctx
     }
 
-    /// Resolve named types through the alias chain. Self-referential aliases
-    /// terminate at a fixed depth rather than looping forever.
+    /// Resolve aliases and array elements with one shared traversal budget.
+    /// Recursive or excessively deep aliases remain unresolved for diagnostics.
     pub fn resolve(&self, ty: &Type) -> Type {
-        let mut cur = ty.clone();
-        for _ in 0..64 {
-            match cur {
-                Type::Named { name: ref n } => match self.aliases.get(n) {
-                    Some(target) => {
-                        cur = target.clone();
-                    }
-                    None => return cur,
-                },
-                Type::Array { elem, len } => {
-                    return Type::Array {
-                        elem: Box::new(self.resolve(&elem)),
-                        len,
-                    };
-                }
-                other => return other,
-            }
+        self.try_resolve(ty, 0, &mut BTreeSet::new()).unwrap_or_else(|| ty.clone())
+    }
+
+    fn try_resolve(&self, ty: &Type, depth: usize, aliases: &mut BTreeSet<String>) -> Option<Type> {
+        if depth > 64 {
+            return None;
         }
-        cur
+        match ty {
+            Type::Named { name } => match self.aliases.get(name) {
+                Some(target) => {
+                    if !aliases.insert(name.clone()) {
+                        return None;
+                    }
+                    let resolved = self.try_resolve(target, depth + 1, aliases);
+                    aliases.remove(name);
+                    resolved
+                }
+                None => Some(ty.clone()),
+            },
+            Type::Array { elem, len } => Some(Type::Array {
+                elem: Box::new(self.try_resolve(elem, depth + 1, aliases)?),
+                len: *len,
+            }),
+            other => Some(other.clone()),
+        }
     }
 
     pub fn record_fields(&self, name: &str) -> Option<&Vec<RecordField>> {
@@ -153,6 +159,14 @@ pub fn check_project(project: &Project) -> CheckReport {
         }
     }
     let tctx = TypeContext::from_project(project);
+
+    for name in tctx.aliases.keys().collect::<BTreeSet<_>>() {
+        if tctx.try_resolve(&Type::named(name), 0, &mut BTreeSet::new()).is_none() {
+            diags.push(Diagnostic::error("E0008", format!(
+                "type alias `{name}` is recursive or exceeds the supported nesting depth of 64"
+            )).with_context(format!("type {name}")));
+        }
+    }
 
     check_constants(project, &tctx, &mut diags);
 
@@ -995,7 +1009,7 @@ pub fn infer_expr_type(
                                 Diagnostic::error(
                                     "E0120",
                                     format!(
-                                        "record `{rec_name}` has no field `{field}`"
+                                        "struct `{rec_name}` has no field `{field}`"
                                     ),
                                 )
                                 .with_context(ctx.to_string()),
@@ -1008,7 +1022,7 @@ pub fn infer_expr_type(
                             Diagnostic::error(
                                 "E0121",
                                 format!(
-                                    "cannot access field `{field}`: `{rec_name}` is not a record type"
+                                    "cannot access field `{field}`: `{rec_name}` is not a struct type"
                                 ),
                             )
                             .with_context(ctx.to_string()),
@@ -1020,7 +1034,7 @@ pub fn infer_expr_type(
                     diags.push(
                         Diagnostic::error(
                             "E0122",
-                            format!("cannot access field `{field}` on non-record type {other:?}"),
+                            format!("cannot access field `{field}` on type {other:?}; expected a struct"),
                         )
                         .with_context(ctx.to_string()),
                     );
@@ -1128,7 +1142,7 @@ pub fn infer_expr_type(
                                             Diagnostic::error(
                                                 "E0127",
                                                 format!(
-                                                    "record `{rec_name}` field `{}` expects {:?}, got {vt:?}",
+                                                    "struct `{rec_name}` field `{}` expects {:?}, got {vt:?}",
                                                     fi.field, rf.ty
                                                 ),
                                             )
@@ -1141,7 +1155,7 @@ pub fn infer_expr_type(
                                 diags.push(
                                     Diagnostic::error(
                                         "E0126",
-                                        format!("record `{rec_name}` has no field `{}`", fi.field),
+                                        format!("struct `{rec_name}` has no field `{}`", fi.field),
                                     )
                                     .with_context(ctx.to_string()),
                                 );
@@ -1154,7 +1168,7 @@ pub fn infer_expr_type(
                             diags.push(
                                 Diagnostic::error(
                                     "E0128",
-                                    format!("record `{rec_name}` literal is missing field `{}`", rf.name),
+                                    format!("struct `{rec_name}` literal is missing field `{}`", rf.name),
                                 )
                                 .with_context(ctx.to_string()),
                             );
@@ -1166,7 +1180,7 @@ pub fn infer_expr_type(
                     diags.push(
                         Diagnostic::error(
                             "E0125",
-                            format!("`{rec_name}` is not a record type, so `{rec_name} {{ … }}` is not a value"),
+                            format!("`{rec_name}` is not a struct type, so `{rec_name} {{ … }}` is not a value"),
                         )
                         .with_context(ctx.to_string()),
                     );

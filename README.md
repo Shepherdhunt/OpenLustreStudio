@@ -342,7 +342,7 @@ openlustre evidence model.json --root MyOperator --scenarios scenarios/ \
 crates/
   ol_ir              strict dataflow + state-machine IR, project slicer
   ol_contract_ir     CoCoSpec contract IR
-  ol_typecheck       types, records/enums/arrays, no-implicit-narrowing
+  ol_typecheck       types, structs/enums/arrays, no-implicit-narrowing
   ol_contract_check  contract well-formedness + vacuity/unreachability
   ol_lustre_emit     Lustre emitter (readable projection)
   ol_cocospec_emit   contract emitter + the Kind 2 view (one faithful file)

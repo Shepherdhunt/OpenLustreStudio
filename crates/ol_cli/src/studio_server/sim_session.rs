@@ -77,7 +77,8 @@ pub struct SimSession {
     pub signature: u64,
     /// Cycles run so far.
     pub cycle: usize,
-    /// `[{name, kind: input|local|output, type}]`, in row-value order.
+    /// Signal names, roles and resolved typed schemas, in row-value order.
+    /// Inputs also include editable placeholder values (never measurements).
     pub signals: serde_json::Value,
     /// Whether the root has a contract (rows then carry modes / violations).
     pub monitored: bool,
@@ -103,15 +104,43 @@ impl SimSession {
             };
             let node = sim.node;
             let sig = |name: &str, kind: &str, ty: &Type| {
-                serde_json::json!({ "name": name, "kind": kind, "type": super::type_str(ty) })
+                let mut signal = serde_json::json!({
+                    "name": name, "kind": kind, "type": super::type_str(ty),
+                    "schema": ol_sim::input_schema(ty, &project)?,
+                });
+                if kind == "input" {
+                    signal["placeholder"] = serde_json::json!(true);
+                    signal["placeholder_note"] = serde_json::json!(
+                        "Placeholder values for editing: zero numbers, false Booleans and an unambiguous neutral enum variant when available. Enter values for your test; these are not sensor measurements or a validated configuration."
+                    );
+                    match ol_sim::input_placeholder(ty, &project) {
+                        Ok(value) => {
+                            signal["default_value"] = value_json(&value);
+                            signal["default_text"] = serde_json::json!(value.to_csv());
+                        }
+                        Err(error) => {
+                            signal["default_value"] = serde_json::Value::Null;
+                            signal["default_text"] = serde_json::Value::Null;
+                            signal["default_error"] = serde_json::json!(error);
+                        }
+                    }
+                }
+                Ok::<_, String>(signal)
             };
-            let signals: Vec<serde_json::Value> = node
+            let signals = node
                 .inputs
                 .iter()
                 .map(|p| sig(&p.name, "input", &p.ty))
                 .chain(node.locals.iter().map(|l| sig(&l.name, "local", &l.ty)))
                 .chain(node.outputs.iter().map(|p| sig(&p.name, "output", &p.ty)))
-                .collect();
+                .collect::<Result<Vec<_>, _>>();
+            let signals = match signals {
+                Ok(signals) => signals,
+                Err(error) => {
+                    let _ = ready_tx.send(Err(error));
+                    return;
+                }
+            };
             let monitored = node.contract.is_some();
             let _ = ready_tx.send(Ok((serde_json::Value::Array(signals), monitored)));
             let mut runner = Runner {
@@ -188,6 +217,20 @@ fn ended() -> String {
     "the simulation session ended — start it again".to_string()
 }
 
+/// Preserve struct/array shape and enum names at the JSON API boundary.
+fn value_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Bool(v) => serde_json::json!(v),
+        Value::Int(v) => serde_json::json!(v),
+        Value::Float(v) => serde_json::json!(v),
+        Value::Float32(v) => serde_json::json!(v),
+        Value::Record(fields) => serde_json::Value::Object(fields.iter()
+            .map(|(name, value)| (name.clone(), value_json(value))).collect()),
+        Value::Array(values) | Value::Tuple(values) => serde_json::Value::Array(values.iter().map(value_json).collect()),
+        Value::Enum(name) | Value::ModeLabel(name) => serde_json::json!(name),
+    }
+}
+
 /// Cycles of input history kept for attaching the C mid-session.
 const HISTORY_MAX: usize = 100_000;
 /// Replayed rows returned by an attach (the client keeps this many).
@@ -224,6 +267,11 @@ impl Runner<'_> {
         let mut cycles_inputs = Vec::with_capacity(plan.len());
         for (k, over) in plan.iter().enumerate() {
             let at = if req.sequence.is_empty() { String::new() } else { format!("step {k}: ") };
+            for name in req.inputs.keys().chain(over.keys()) {
+                if !self.sim.node.inputs.iter().any(|p| p.name == *name) {
+                    return Err(format!("{at}unexpected input `{name}` for `{}`", self.sim.node.name));
+                }
+            }
             let mut inputs = BTreeMap::new();
             for p in &self.sim.node.inputs {
                 let raw = over

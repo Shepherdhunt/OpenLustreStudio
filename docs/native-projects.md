@@ -54,7 +54,7 @@ paths are unsupported.
 ## Authored references and identity
 
 Existing IR string fields carry qualified references: a call's `node` can be
-`flight::Control`, a named type or record constructor can be
+`flight::Control`, a named type or struct constructor can be
 `signals::SensorSignal`, a value can be `payload::LIMIT`, and a contract name
 can be `flight::Bounds`. An external enum value is
 `payload::Status::Ready`, gated by the `Status` type export. Own enum values may
@@ -68,14 +68,14 @@ type. Full, delimited UTF-8 hex encoding gives injective backend identifiers,
 independent of the consumer alias. Distinct projects may reuse local names.
 Repeated aliases and diamonds with the same project ID and snapshot resolve
 once; two snapshots of one project ID in a graph are rejected. Shared nominal
-records/enums therefore retain one identity; separately owned records retain
+structs/enums therefore retain one identity; separately owned structs retain
 different identities even when their layouts match. Existing primitive alias
 semantics are preserved.
 
-Port/local names and record fields remain unchanged. Ordinary locals shadow
+Port/local names and struct fields remain unchanged. Ordinary locals shadow
 own global values. A local/port/ghost name that exactly matches a generated
 global symbol or derived node/contract C artifact is rejected so a qualified
-reference cannot capture it. Record fields matching generated constant macros
+reference cannot capture it. Struct fields matching generated constant macros
 are also rejected; other fields and unrelated `olp_` names remain available. Export
 lists constrain cross-project source references and public root selection;
 they are not an access-control or security boundary. Internal compiler lookup

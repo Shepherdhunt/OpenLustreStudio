@@ -25,6 +25,13 @@ The dataflow canvas is a SCADE-style drafting surface:
 - **Orthogonal wires** — rounded-corner Manhattan routing (with a
   feedback loop-around for backward wires), source-anchored
   `name: type` annotations, and a View-menu toggle back to curves.
+- **Expression details** — the panel above the canvas shows each operation's
+  ordered operand expressions and their types, full field/index paths, and
+  the declared named struct sources (including resolved aliases). Select a
+  block or use the Equation selector to inspect it. Logical Boolean and
+  bitwise integer operations are labeled explicitly; the wires retain their
+  referenced signal identities for editing. Long names wrap in the inspector,
+  and truncated canvas labels keep their full text on hover.
 - **Navigation** — Ctrl+wheel zoom about the cursor (25%–400%),
   Zoom to Fit / 100% in the View menu, middle-drag panning, and a
   status-bar zoom readout.
@@ -87,6 +94,28 @@ rejected). A step after a semantic model edit answers `409
 /api/sim/stop` ends it and `GET /api/sim/state` reports it. Contract
 monitoring uses the same observer node as the generated C, so the modes
 and violations shown per cycle match a compiled run.
+
+Each signal also includes its resolved `schema`: named structs and their
+fields, alias targets, fixed array lengths, and enum variants. Expand
+**Type / fields** in the watch table to inspect it. Structs and arrays have
+editable JSON inputs; plain Enter inserts a line, and Ctrl/Cmd+Enter steps.
+Generated zero/false values and unambiguous neutral enum variants are
+**placeholders**, not measured sensor readings or validated configurations.
+An enum without a neutral placeholder requires the user to choose a variant.
+Reset keeps entered inputs and returns the session to cycle zero.
+
+The API accepts structured JSON values or value text, including the existing
+CSV-safe `{field=value;...}` and `[value;...]` syntax. Missing/extra fields,
+wrong field types, and invalid enum variants identify their input path and
+run no cycles. JSON integer fields must fit signed 64-bit storage; larger
+uint64 inputs are explicitly unsupported. Character inputs are bytes
+0–255. Float inputs must be finite. Recursive/deep types and excessive schema
+or placeholder expansion report a bounded error. Field names and types come
+from the model; no units are inferred where the type metadata declares none.
+The persisted model tags `Record` / `record` remain unchanged.
+Sessions use the selected root's checked dependency slice. Breakpoints accept
+its retained constants and enum values; unused globals are rejected before a
+cycle runs. The full model signature still detects stale sessions.
 
 `POST /api/sim/c {"on": true}` puts the generated C of the simulated
 operator in the loop: it is compiled (the build is reused while the model's

@@ -254,3 +254,95 @@ fn grid_pitch_persists_to_the_model_file_and_round_trips() {
     let d = diagram(port, "ReleaseLogic");
     assert_eq!(d["grid"], 16);
 }
+
+#[test]
+fn expression_details_preserve_struct_fields_nested_paths_and_boolean_operands() {
+    let g = start_server_on_copy("projection_details");
+    let port = g.port;
+    for (path, body) in [
+        ("/api/edit/add_type", r#"{"kind":"record","name":"SensorState","fields":[{"name":"attitude_valid","type":"bool"},{"name":"rates_valid","type":"bool"},{"name":"flags","type":"bool[2]"}]}"#),
+        ("/api/edit/add_type", r#"{"kind":"record","name":"Sensor","fields":[{"name":"valid","type":"bool"},{"name":"state","type":"SensorState"}]}"#),
+        ("/api/edit/add_type", r#"{"kind":"alias","name":"SensorAlias","target":"Sensor"}"#),
+        ("/api/edit/add_type", r#"{"kind":"alias","name":"SensorAlias2","target":"SensorAlias"}"#),
+        ("/api/edit/add_node", r#"{"name":"Projected","kind":"operator"}"#),
+        ("/api/edit/add_port", r#"{"node":"Projected","side":"input","name":"sensor","type":"SensorAlias2"}"#),
+        ("/api/edit/add_port", r#"{"node":"Projected","side":"input","name":"permit","type":"bool"}"#),
+        ("/api/edit/add_port", r#"{"node":"Projected","side":"input","name":"idx","type":"int32"}"#),
+        ("/api/edit/add_port", r#"{"node":"Projected","side":"output","name":"ok","type":"bool"}"#),
+        ("/api/edit/add_port", r#"{"node":"Projected","side":"output","name":"nested","type":"bool"}"#),
+        ("/api/edit/add_equation", r#"{"node":"Projected","lhs":"ok","body":"sensor.valid and sensor.state.attitude_valid and sensor.state.rates_valid and sensor.state.flags[idx] and permit"}"#),
+        ("/api/edit/add_equation", r#"{"node":"Projected","lhs":"nested","body":"sensor.valid and (permit or sensor.state.attitude_valid)"}"#),
+        ("/api/edit/set_layout", r#"{"node":"Projected","positions":{"eq0":{"x":333.0,"y":120.0,"w":63.0,"h":40.0}}}"#),
+    ] {
+        let (status, response) = request(port, "POST", path, body).expect(path);
+        assert_eq!(status, 200, "{path}: {response}");
+    }
+    let model_before = std::fs::read(g.tmp.join("model.json")).unwrap();
+    let d = diagram(port, "Projected");
+    let eq = &d["equations"][0];
+    assert_eq!(eq["invalid"], false, "{eq}");
+    let detail = &eq["expression_detail"];
+    assert_eq!(detail["kind"], "logical");
+    assert_eq!(detail["operation"], "Logical AND");
+    assert_eq!(detail["has_projections"], true);
+    let operands = detail["operands"].as_array().unwrap();
+    assert_eq!(operands.len(), 5);
+    assert_eq!(operands[0]["text"], "sensor.valid");
+    assert_eq!(operands[1]["text"], "sensor.state.attitude_valid");
+    assert_eq!(operands[2]["text"], "sensor.state.rates_valid");
+    assert_eq!(operands[4]["text"], "permit");
+    assert!(operands.iter().all(|o| o["type"]["kind"] == "Bool"), "{operands:?}");
+    let refs = detail["references"].as_array().unwrap();
+    let field = refs.iter().find(|r| r["path"] == "sensor.state.rates_valid").unwrap();
+    assert_eq!(field["source"], "sensor");
+    assert_eq!(field["type"]["kind"], "Bool");
+    assert_eq!(field["source_type"]["name"], "SensorAlias2");
+    assert_eq!(field["resolved_source_type"]["name"], "Sensor");
+    assert_eq!(field["source_kind"], "struct");
+    assert!(refs.iter().any(|r| r["path"] == "idx" && r["type"]["kind"] == "Int32"));
+    assert!(refs.iter().any(|r| r["path"] == "permit" && r["type"]["kind"] == "Bool"));
+    // Existing editable dependencies and their identities remain unchanged.
+    let pins = eq["inputs"].as_array().unwrap();
+    assert_eq!(pins.len(), 3);
+    assert_eq!(pins[0]["name"], "sensor");
+    assert_eq!(pins[1]["name"], "idx");
+    assert_eq!(pins[2]["name"], "permit");
+    assert_eq!(find_wire(&d, "sensor", "eq0").unwrap()["to_port"], 0);
+    assert_eq!(d["positions"]["eq0"]["x"], 333.0);
+    assert_eq!(d["positions"]["eq0"]["w"], 63.0);
+    assert_eq!(model_before, std::fs::read(g.tmp.join("model.json")).unwrap());
+    // Mixed operators retain their grouping: OR is one operand of AND.
+    let nested = &d["equations"][1]["expression_detail"]["operands"];
+    assert_eq!(nested.as_array().unwrap().len(), 2);
+    assert!(nested[1]["text"].as_str().unwrap().contains(" or "));
+}
+
+#[test]
+fn expression_details_distinguish_bitwise_and_and_keep_repeated_operands() {
+    let g = start_server_on_copy("bitwise_details");
+    let port = g.port;
+    for (path, body) in [
+        ("/api/edit/add_node", r#"{"name":"Bits","kind":"operator"}"#),
+        ("/api/edit/add_port", r#"{"node":"Bits","side":"input","name":"mask","type":"int32"}"#),
+        ("/api/edit/add_port", r#"{"node":"Bits","side":"input","name":"permit","type":"bool"}"#),
+        ("/api/edit/add_port", r#"{"node":"Bits","side":"output","name":"bits","type":"int32"}"#),
+        ("/api/edit/add_port", r#"{"node":"Bits","side":"output","name":"ok","type":"bool"}"#),
+        ("/api/edit/add_equation", r#"{"node":"Bits","lhs":"bits","body":"mask & 3"}"#),
+        ("/api/edit/add_equation", r#"{"node":"Bits","lhs":"ok","body":"permit and permit"}"#),
+    ] {
+        let (status, response) = request(port, "POST", path, body).expect(path);
+        assert_eq!(status, 200, "{path}: {response}");
+    }
+    let d = diagram(port, "Bits");
+    let bitwise = &d["equations"][0];
+    assert_eq!(bitwise["symbol"]["text"], "&");
+    assert_eq!(bitwise["expression_detail"]["kind"], "bitwise");
+    assert_eq!(bitwise["expression_detail"]["operation"], "Bitwise AND (&)");
+    assert!(bitwise["expression_detail"]["operands"].as_array().unwrap().iter()
+        .all(|o| o["type"]["kind"] == "Int32"));
+    let logical = &d["equations"][1];
+    assert_eq!(logical["symbol"]["text"], "AND");
+    assert_eq!(logical["expression_detail"]["kind"], "logical");
+    assert_eq!(logical["expression_detail"]["operands"].as_array().unwrap().len(), 2);
+    assert_eq!(logical["inputs"].as_array().unwrap().len(), 1);
+}

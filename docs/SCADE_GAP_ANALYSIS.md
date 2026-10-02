@@ -100,7 +100,7 @@ symbols; typed wire labels.
    on the canvas, and a right-click "wrap text / don't wrap" per box.
    *Also requested:* drag a composite **type onto the canvas to MAKE / FLATTEN**
    it (construct an array/struct from element inputs, or destructure one) — a
-   Structures/Arrays authoring feature tied to the Types node.
+   Structs/Arrays authoring feature tied to the Types node.
    *Also:* **composite constant values** — array/struct/string (`char[]`)
    constants need array-literal syntax in `ol_stdlib::parse_expr` (today only
    scalar constants parse) plus a `char` type; scalar constants already work.
@@ -126,7 +126,7 @@ dual-backend equivalence test — or it isn't done. The §6 log records each sli
 | Workflow step | SCADE Suite | OpenLustre Studio today |
 |---|---|---|
 | Graphical authoring | Full diagram editor: palette drag-drop, pin-to-pin wire drawing, hierarchical sheets | Drag-drop palette, **SCADE gates with red "needs a source" input pins / red "needs a destination" output pin, pin-to-pin wiring** (result-local collapsed into the gate), draggable grid-snapped canvas with persisted layout that doesn't auto-collapse, multi-select + right-click menu + Delete, red invalid-link coding |
-| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)**: dataflow, `pre`/`->`, records/enums/arrays, constants, flat FSMs (lowered), imported C operators |
+| Language | Scade 6 (Lustre core + clocks, automata, iterators, packages) | Lustre subset + **boolean clocks (`when`/`merge`)** + **array iterators (`map`/`fold`)**: dataflow, `pre`/`->`, structs/enums/arrays, constants, flat FSMs (lowered), imported C operators |
 | Static checks | Type/clock checker | Type checker + **clock calculus** + contract checker (vacuity, unreachability, overlap), live in the GUI |
 | Simulation | Cycle stepping, watch, plots, co-simulation | **Two-column watch/set table** (sticky typed inputs, computed locals/outputs), full per-item trace, CSV batch simulation, golden-trace scenarios |
 | Formal verification | Design Verifier (Prover plug-in) | Kind 2 adapter (BMC/induction, realizability, mode coverage) + CoCoSpec contract emission, in-GUI Verify tab |
@@ -346,7 +346,7 @@ adds a small frontend, `crates/ol_cli/src/lustre_import.rs`:
 SCADE puts **Types** and **Constants** in the model browser between the
 operators and the libraries; now so do we.
 
-* **Types node** — lists the project's named types (enum / record / alias)
+* **Types node** — lists the project's named types (enum / struct / alias)
   with a kind hint; clicking a type or "New type…" opens the existing Types
   editor, right-click deletes. (The data was already in `/api/inspect`; this
   surfaces it in the tree.)
@@ -669,7 +669,7 @@ document for certification-adjacent use.
 * **Operations toolbox** (right dock): the SCADE operator families —
   Mathematics (plus, minus, multiply, divide, modulo, numeric_cast, squared,
   cubed, to_nth_power(n); square_root listed but disabled pending float
-  intrinsics), Comparisons, Logical, Structures/Arrays, Time/Statefuls,
+  intrinsics), Comparisons, Logical, Structs/Arrays, Time/Statefuls,
   Choice, Bitwise, Higher Order (map/fold disabled — iterators are roadmap) —
   plus the project's operators and the 41 library blocks. Everything drags
   onto the canvas and lands as a placed equation with a typed result local
@@ -695,7 +695,7 @@ document for certification-adjacent use.
 * **Workspaces**: opening a directory (`openlustre new <dir>` or `studio launch
   <dir>`) creates the project folder — `project.json` (starter operator),
   `types.json`, `scenarios/` — and serves it as one project.
-* **Types file**: a Types tab defines enums, structures (records), and array
+* **Types file**: a Types tab defines enums, structs, and array
   aliases; definitions save into `types.json` and reach the model through
   `includes`. Uniqueness is validated against everything loaded.
 * **Defined data types everywhere**: port/local type selectors list the full

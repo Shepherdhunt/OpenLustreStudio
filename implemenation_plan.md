@@ -69,7 +69,7 @@ node calls
 function calls
 typed wires
 fixed-size arrays
-records
+structs
 enums
 ```
 
@@ -687,7 +687,7 @@ Comparison
 Condition blocks
 Temporal blocks
 Arrays
-Records/structures
+Structs
 Bit manipulation
 State machines
 Avionics protocol/message blocks
@@ -780,7 +780,7 @@ Task 4: Implement primitive type system
 - uint8/uint16/uint32/uint64
 - float32/float64
 - fixed arrays
-- records
+- structs
 - enums
 
 Task 5: Implement dataflow type checker
@@ -812,7 +812,7 @@ Task 8: Implement Lustre emitter
 - equations
 - if/then/else
 - pre/init
-- arrays/records/enums
+- arrays/structs/enums
 
 Task 9: Implement CoCoSpec emitter
 - emit assumptions

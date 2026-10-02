@@ -930,12 +930,34 @@ fn sim_start_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u
             return Err(format!("`{root}` is an imported C operator — there is no model to simulate"));
         }
         let slice = project.slice_for_root(&root)?;
+        // Type inspection and engine initialization must reject recursive or
+        // huge shapes before type inference or simulator state can traverse
+        // them. Include called nodes' locals/outputs, not only root inputs.
+        for node in slice.all_nodes() {
+            for (name, ty) in node.inputs.iter().chain(&node.outputs)
+                .map(|p| (&p.name, &p.ty))
+                .chain(node.locals.iter().map(|l| (&l.name, &l.ty)))
+            {
+                ol_sim::simulation_type_size(ty, &slice)
+                    .map_err(|e| format!("signal `{}.{name}`: {e}", node.name))?;
+                ol_sim::input_schema(ty, &slice)
+                    .map_err(|e| format!("signal `{}.{name}`: {e}", node.name))?;
+            }
+        }
+        for constant in slice.packages.iter().flat_map(|p| &p.constants) {
+            ol_sim::simulation_type_size(&constant.ty, &slice)
+                .map_err(|e| format!("constant `{}`: {e}", constant.name))?;
+            ol_sim::input_schema(&constant.ty, &slice)
+                .map_err(|e| format!("constant `{}`: {e}", constant.name))?;
+        }
         let errors = ol_typecheck::check_project(&slice).errors().count();
         if errors > 0 {
             return Err(format!("`{root}` has {errors} error(s) — fix them (see Messages) before simulating"));
         }
         let signature = semantic_signature(&project);
-        let session = sim_session::SimSession::start(project, root, signature)?;
+        // The constructor evaluates constants eagerly. Give it exactly the
+        // checked root slice so unrelated declarations cannot affect a run.
+        let session = sim_session::SimSession::start(slice, root, signature)?;
         let info = serde_json::json!({
             "root": session.root,
             "cycle": 0,
@@ -972,7 +994,7 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
     json_response((|| {
         let req: serde_json::Value =
             serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
-        let text_map = |v: &serde_json::Value| -> std::collections::BTreeMap<String, String> {
+        let text_map = |v: &serde_json::Value| -> Result<std::collections::BTreeMap<String, String>, String> {
             v.as_object()
                 .map(|obj| {
                     obj.iter()
@@ -985,12 +1007,17 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
                         })
                         .collect()
                 })
-                .unwrap_or_default()
+                .ok_or_else(|| "inputs must be an object mapping input names to typed values or value text".to_string())
         };
-        let inputs = req.get("inputs").map(text_map).unwrap_or_default();
+        let inputs = match req.get("inputs") {
+            Some(value) => text_map(value)?,
+            None => std::collections::BTreeMap::new(),
+        };
         let sequence: Vec<_> = match req.get("sequence") {
             None | Some(serde_json::Value::Null) => Vec::new(),
-            Some(serde_json::Value::Array(a)) if a.len() <= 10_000 => a.iter().map(text_map).collect(),
+            Some(serde_json::Value::Array(a)) if a.len() <= 10_000 => a.iter().enumerate()
+                .map(|(k, v)| text_map(v).map_err(|e| format!("step {k}: {e}")))
+                .collect::<Result<_, _>>()?,
             Some(serde_json::Value::Array(_)) => return Err("a sequence runs at most 10000 cycles".into()),
             Some(_) => return Err("`sequence` must be an array of per-cycle input objects".into()),
         };
@@ -1018,6 +1045,7 @@ fn parse_breakpoint(
     session: &sim_session::SimSession,
     text: &str,
 ) -> Result<ol_ir::Expr, String> {
+    let project = project.slice_for_root(&session.root).map_err(|e| format!("breakpoint: {e}"))?;
     let expr = ol_stdlib::parse_expr(text).map_err(|e| format!("breakpoint: {e}"))?;
     if expr.contains_temporal() {
         return Err("breakpoint: a condition is about the current cycle — `pre` / `->` aren't allowed".into());
@@ -1036,7 +1064,7 @@ fn parse_breakpoint(
         }
     }
     if let Some(v) = expr.free_vars().into_iter().find(|v| !known.contains(v)) {
-        return Err(format!("breakpoint: `{v}` is not a signal of `{}`", session.root));
+        return Err(format!("breakpoint: `{v}` is not a signal, constant or enum value in the simulation of `{}`", session.root));
     }
     Ok(expr)
 }
@@ -1181,6 +1209,142 @@ fn eq_symbol(rhs: &ol_ir::Expr) -> serde_json::Value {
         Expr::Call { node, .. } => serde_json::json!({ "kind": "call", "text": node }),
         _ => serde_json::Value::Null,
     }
+}
+
+/// Read paths preserve field/index projections instead of reducing them to
+/// their root free variable. They are inspection metadata only: editable
+/// pins and wires retain their existing identities.
+fn diagram_read_accesses(expr: &ol_ir::Expr, out: &mut Vec<ol_ir::Expr>) {
+    use ol_ir::Expr;
+    fn root(e: &Expr) -> Option<&str> {
+        match e {
+            Expr::Var { name } => Some(name),
+            Expr::Field { base, .. } | Expr::Index { base, .. } => root(base),
+            _ => None,
+        }
+    }
+    // A projected array can also read an independent index expression.
+    fn indices(e: &Expr, out: &mut Vec<Expr>) {
+        match e {
+            Expr::Field { base, .. } => indices(base, out),
+            Expr::Index { base, index } => {
+                indices(base, out);
+                diagram_read_accesses(index, out);
+            }
+            _ => {}
+        }
+    }
+    match expr {
+        Expr::Const { .. } => {}
+        Expr::Var { .. } => out.push(expr.clone()),
+        Expr::Field { .. } | Expr::Index { .. } if root(expr).is_some() => {
+            out.push(expr.clone());
+            indices(expr, out);
+        }
+        Expr::Unary { arg, .. } | Expr::Pre { arg } | Expr::Cast { arg, .. } => {
+            diagram_read_accesses(arg, out);
+        }
+        Expr::Binary { lhs, rhs, .. } => {
+            diagram_read_accesses(lhs, out);
+            diagram_read_accesses(rhs, out);
+        }
+        Expr::Arrow { init, body } => {
+            diagram_read_accesses(init, out);
+            diagram_read_accesses(body, out);
+        }
+        Expr::IfThenElse { cond, then_branch, else_branch } => {
+            for e in [cond, then_branch, else_branch] { diagram_read_accesses(e, out); }
+        }
+        Expr::Call { args, .. } => {
+            for e in args { diagram_read_accesses(e, out); }
+        }
+        Expr::Field { base, .. } => diagram_read_accesses(base, out),
+        Expr::Index { base, index } => {
+            diagram_read_accesses(base, out);
+            diagram_read_accesses(index, out);
+        }
+        Expr::Tuple { items } | Expr::Array { items } => {
+            for e in items { diagram_read_accesses(e, out); }
+        }
+        Expr::Struct { fields, .. } => {
+            for f in fields { diagram_read_accesses(&f.value, out); }
+        }
+        Expr::When { arg, clock, .. } => {
+            diagram_read_accesses(arg, out);
+            out.push(Expr::var(clock));
+        }
+        Expr::Merge { clock, on_true, on_false } => {
+            out.push(Expr::var(clock));
+            diagram_read_accesses(on_true, out);
+            diagram_read_accesses(on_false, out);
+        }
+        Expr::Iterate { init, arrays, .. } => {
+            if let Some(e) = init { diagram_read_accesses(e, out); }
+            for e in arrays { diagram_read_accesses(e, out); }
+        }
+    }
+}
+
+fn diagram_expression_detail(
+    project: &ol_ir::Project,
+    node: &ol_ir::NodeDef,
+    typer: &ol_typecheck::ExprTyper,
+    env: &std::collections::BTreeMap<String, ol_ir::Type>,
+    expr: &ol_ir::Expr,
+) -> serde_json::Value {
+    use ol_ir::{BinOp, Expr};
+    let (kind, operation) = match expr {
+        Expr::Binary { op: BinOp::And, .. } => ("logical", "Logical AND"),
+        Expr::Binary { op: BinOp::Or, .. } => ("logical", "Logical OR"),
+        Expr::Binary { op: BinOp::Xor, .. } => ("logical", "Logical XOR"),
+        Expr::Binary { op: BinOp::Implies, .. } => ("logical", "Logical implication"),
+        Expr::Unary { op: ol_ir::UnaryOp::Not, .. } => ("logical", "Logical NOT"),
+        Expr::Binary { op: BinOp::BitAnd, .. } => ("bitwise", "Bitwise AND (&)"),
+        Expr::Binary { op: BinOp::BitOr, .. } => ("bitwise", "Bitwise OR (|)"),
+        Expr::Binary { op: BinOp::BitXor, .. } => ("bitwise", "Bitwise XOR (^)"),
+        _ => ("expression", "Expression"),
+    };
+    let operands = flatten_nary(expr).map(|(_, es)| es).unwrap_or_else(|| match expr {
+        Expr::Binary { lhs, rhs, .. } => vec![*lhs.clone(), *rhs.clone()],
+        Expr::Unary { arg, .. } => vec![*arg.clone()],
+        _ => vec![expr.clone()],
+    });
+    let mut accesses = Vec::new();
+    diagram_read_accesses(expr, &mut accesses);
+    let mut seen = std::collections::HashSet::new();
+    let references = accesses.iter().filter_map(|e| {
+        let path = ol_lustre_emit::format_expr(e);
+        if !seen.insert(path.clone()) { return None; }
+        let mut base = e;
+        while let Expr::Field { base: inner, .. } | Expr::Index { base: inner, .. } = base {
+            base = inner;
+        }
+        let Expr::Var { name } = base else { return None };
+        // Global literals/constants are already visible in the operand text.
+        let declared = env.get(name)?;
+        let resolved = typer.resolve(declared);
+        let is_struct = matches!(&resolved, ol_ir::Type::Named { name: n }
+            if project.packages.iter().flat_map(|p| &p.types).any(|t|
+                matches!(&t.body, ol_ir::TypeBody::Record { name, .. } if name == n)));
+        Some(serde_json::json!({
+            "path": path,
+            "type": typer.type_of(node, env, e),
+            "source": name,
+            "source_type": declared,
+            "resolved_source_type": resolved,
+            "source_kind": if is_struct { "struct" } else { "value" },
+        }))
+    }).collect::<Vec<_>>();
+    serde_json::json!({
+        "kind": kind,
+        "operation": operation,
+        "operands": operands.iter().map(|e| serde_json::json!({
+            "text": ol_lustre_emit::format_expr(e),
+            "type": typer.type_of(node, env, e),
+        })).collect::<Vec<_>>(),
+        "has_projections": references.iter().any(|r| r["path"] != r["source"]),
+        "references": references,
+    })
 }
 
 /// Build a diagram JSON for the requested node (or `main`). Inputs, locals,
@@ -1385,6 +1549,8 @@ fn build_diagram(
     let mut ghosts: std::collections::BTreeMap<String, String> = Default::default();
     let mut equations = Vec::new();
     let mut wires = Vec::new();
+    let diagram_typer = ol_typecheck::ExprTyper::new(&project);
+    let diagram_env = ol_typecheck::ExprTyper::env(node);
     for (i, eq) in node.equations.iter().enumerate().take(own_eq_count) {
         let eq_id = format!("eq{i}");
         let invalid = !eq_problems[i].is_empty();
@@ -1490,6 +1656,7 @@ fn build_diagram(
             "lhs": eq.lhs,
             "text": format!("{} = {}", eq.lhs.join(", "), ol_lustre_emit::format_expr(&eq.rhs)),
             "body": ol_lustre_emit::format_expr(&eq.rhs),
+            "expression_detail": diagram_expression_detail(&project, node, &diagram_typer, &diagram_env, &eq.rhs),
             "symbol": symbol,
             "nary": nary,
             "reads": reads,
@@ -3285,6 +3452,7 @@ fn types_list(ctx: &ServerCtx) -> Result<String, String> {
             types.push(serde_json::json!({
                 "package": pkg.name,
                 "kind": kind,
+                "display_kind": type_kind_label(&t.body),
                 "name": t.name(),
                 "detail": detail,
             }));
@@ -3353,11 +3521,11 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
                 let fname = match f.get("name").and_then(|v| v.as_str()) {
                     Some(n) if is_identifier(n) => n.to_string(),
                     Some(n) => return bad(&format!("`{n}` is not a valid field name")),
-                    None => return bad("record field missing `name`"),
+                    None => return bad("struct field missing `name`"),
                 };
                 let tstr = match f.get("type").and_then(|v| v.as_str()) {
                     Some(t) => t,
-                    None => return bad("record field missing `type`"),
+                    None => return bad("struct field missing `type`"),
                 };
                 let ty = match ol_stdlib::parse_type(tstr) {
                     Ok(t) => t,
@@ -3366,7 +3534,7 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
                 fields.push(ol_ir::RecordField { name: fname, ty });
             }
             if fields.is_empty() {
-                return bad("record needs at least one field");
+                return bad("struct needs at least one field");
             }
             ol_ir::TypeBody::Record { name: name.clone(), fields }
         }
@@ -3381,7 +3549,7 @@ fn add_type_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
             };
             ol_ir::TypeBody::Alias { name: name.clone(), target: ty }
         }
-        other => return bad(&format!("kind must be enum|record|alias, got {other:?}")),
+        other => return bad(&format!("unrecognized type kind {other:?}; supported types are enums, structs, and aliases")),
     };
 
     let target_path = ctx.types_file().unwrap_or_else(|| ctx.model());
@@ -4109,7 +4277,7 @@ fn operation_signature(o: &OpDef) -> (Vec<&'static str>, &'static str) {
         "and" | "or" | "xor" => (n("bool"), "bool"),
         "not" => (vec!["bool"], "bool"),
         "implies" => (vec!["bool", "bool"], "bool"),
-        "record_field" => (vec!["structure"], "field type"),
+        "record_field" => (vec!["struct"], "field type"),
         "array_index" => (vec!["array"], "element type"),
         "init_pre" | "arrow" => (vec!["T", "T"], "T"),
         "when" | "when_not" => (vec!["T", "bool clock"], "T on the clock"),
@@ -4198,9 +4366,9 @@ fn operation_families() -> Vec<(&'static str, Vec<OpDef>)> {
             op("not", "not", 1, "bool"),
             op("implies", "implies (=>)", 2, "bool"),
         ]),
-        ("Structures/Arrays", vec![
+        ("Structs/Arrays", vec![
             OpDef { id: "record_field", label: "field access (.f)", pins: 1, out_type: "int32",
-                    param: Some("field"), enabled: true, hint: "read one field of a structure" },
+                    param: Some("field"), enabled: true, hint: "read one field of a struct" },
             OpDef { id: "array_index", label: "array index ([i])", pins: 1, out_type: "int32",
                     param: Some("index"), enabled: true, hint: "read one element by constant index" },
         ]),
@@ -4531,7 +4699,7 @@ fn add_operation_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
 
 fn type_kind_label(body: &ol_ir::TypeBody) -> &'static str {
     match body {
-        ol_ir::TypeBody::Record { .. } => "record",
+        ol_ir::TypeBody::Record { .. } => "struct",
         ol_ir::TypeBody::Enum(_) => "enum",
         ol_ir::TypeBody::Alias { .. } => "alias",
     }
@@ -4558,7 +4726,7 @@ fn pick_variant(param: &Option<String>, variants: &[String]) -> Option<String> {
 /// (chosen by the client from a kind-specific menu) becomes one or more
 /// equations with red ghost input pins — exactly like a dropped operation, so
 /// the user wires the inputs afterward:
-///   record → `make` (build from field inputs) | `flatten` (split into fields)
+///   struct → `make` (build from field inputs) | `flatten` (split into fields)
 ///   array  → `make` | `flatten` | `slice` (param "start,len")
 ///   enum   → `variant` (param) | `compare` (param) | `match` (param result type)
 fn add_type_op_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {

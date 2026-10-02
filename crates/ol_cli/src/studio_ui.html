@@ -190,6 +190,13 @@
   .watch-table td:first-child { font-family: Consolas, monospace; color: #2b3a4a; white-space: nowrap; }
   .watch-val { width: 110px; font-family: Consolas, monospace; }
   .watch-val.invalid { border: 1.5px solid #d11a1a; background: #fdeeee; }
+  .watch-structured { display:block; width:360px; max-width:70vw; min-height:100px; resize:both; white-space:pre; }
+  .watch-type { max-width:360px; white-space:normal; overflow-wrap:anywhere; }
+  .watch-type summary { cursor:pointer; color:#0067c0; }
+  .watch-type ul { padding-left:18px; margin:4px 0; }
+  .watch-type code { white-space:normal; overflow-wrap:anywhere; }
+  .watch-placeholder { display:block; max-width:360px; white-space:normal; color:#666; font-size:11px; }
+  .watch-error { display:block; max-width:360px; color:#b11; white-space:normal; overflow-wrap:anywhere; }
   .watch-computed { font-family: Consolas, monospace; color: #2b579a; }
   /* Build pipeline: four gated steps */
   .pipeline { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: 4px 0 8px; }
@@ -235,6 +242,22 @@
   #diagram-host { background: #fff; border: 1px solid #c5c5c5; overflow: auto; }
   .diagram-toolbar { display: flex; align-items: center; gap: 8px; margin: 6px 0;
                      font-size: 12px; color: #3c3c3c; }
+  #diagram-expressions { margin: 0 0 6px; border: 1px solid #c5c5c5; background: #fff; }
+  #diagram-expressions > summary { padding: 5px 8px; cursor: pointer; color: #2b579a; }
+  .expression-toolbar { padding: 4px 8px; }
+  .expression-toolbar label { display: flex; align-items: center; gap: 8px; }
+  .expression-toolbar select { min-width: 0; max-width: 100%; }
+  #diagram-expression-body { padding: 0 8px 6px; max-height: 180px; overflow: auto; }
+  #diagram-expression-body p { margin: 4px 0; }
+  #diagram-expression-body table { width: 100%; table-layout: fixed; border-collapse: collapse; }
+  #diagram-expression-body th, #diagram-expression-body td {
+    text-align: left; vertical-align: top; padding: 3px 5px; border-bottom: 1px solid #e8e8e8;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  #diagram-expression-body .expression-type { width: 90px; }
+  #diagram-expression-body .expression-source { width: 35%; }
+  #diagram-expression-body code { white-space: normal; overflow-wrap: anywhere; }
+  #diagram-expression-body pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 5px 0; }
   svg .box { fill: #fff; stroke: #5a5a5a; stroke-width: 1.1; }
   svg .box.eq { fill: #eef4fb; stroke: #2b579a; }
   svg .box.invalid { stroke: #d11a1a; stroke-width: 2; fill: #fdeeee; }
@@ -591,6 +614,13 @@
     <div id="diagram-crumbs"></div>
   </div>
   <div id="diagram-problems"></div>
+  <details id="diagram-expressions" open hidden>
+    <summary id="diagram-expression-summary">Expression details</summary>
+    <div class="expression-toolbar"><label>Equation
+      <select id="diagram-expression-select" onchange="inspectDiagramExpression(this.value)"></select>
+    </label></div>
+    <div id="diagram-expression-body"></div>
+  </details>
   <div id="diagram-host"></div>
 </div>
 
@@ -809,7 +839,7 @@
   </div>
 
   <div class="dlg" id="dlg-types">
-    <p>Named types — simple aliases (<code class="inline">Celsius : int8</code>), structures, arrays, character arrays / strings (<code class="inline">char[16]</code>), and enums — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
+    <p>Named types — simple aliases (<code class="inline">Celsius : int8</code>), structs, arrays, character arrays / strings (<code class="inline">char[16]</code>), and enums — usable as the data type of any input, output, or local. <span id="types-file-note" class="build-note"></span></p>
     <div id="types-list"></div>
     <div class="edit-form">
       <h4>New enum</h4>
@@ -820,7 +850,7 @@
       </div>
     </div>
     <div class="edit-form">
-      <h4>New structure (record)</h4>
+      <h4>New struct</h4>
       <div class="row">
         <label>name</label><input id="type-record-name" placeholder="Sample">
         <label>fields</label><input id="type-record-fields" style="flex:1" placeholder="value: float32, valid: bool">
@@ -862,7 +892,7 @@
         <label>value</label><input id="const-value" style="flex:1" placeholder="32    ·    true    ·    1.5    ·    -5">
         <button class="primary" onclick="editAddConstant()">Create</button>
       </div>
-      <p class="build-note">Examples: <code class="inline">MAX : uint16 = 32</code>, <code class="inline">GAIN : float32 = 1.5</code>, <code class="inline">ENABLED : bool = true</code>. Array / structure / string (char) constant values are a coming enhancement.</p>
+      <p class="build-note">Examples: <code class="inline">MAX : uint16 = 32</code>, <code class="inline">GAIN : float32 = 1.5</code>, <code class="inline">ENABLED : bool = true</code>. Array / struct / string (char) constant values are a coming enhancement.</p>
       <div class="build-note" id="const-status"></div>
     </div>
   </div>
@@ -1101,11 +1131,14 @@ async function fetchText(p) { const r = await fetch(p); return r.text(); }
 
 function typeName(t) {
   if (!t || typeof t !== "object") return String(t);
-  if (t.kind && t.kind !== "Array" && t.kind !== "Named") return t.kind.toLowerCase();
+  if (t.kind && t.kind !== "Array" && t.kind !== "Named") return displayTypeKind(t.kind);
   if (t.kind === "Named") return t.name || t["0"] || JSON.stringify(t);
   if (t.kind === "Array") return typeName(t.elem) + "[" + t.len + "]";
   return JSON.stringify(t);
 }
+
+// Serialized model/API tags stay unchanged; only the displayed terminology changes.
+function displayTypeKind(kind) { return String(kind).toLowerCase() === "record" ? "struct" : String(kind).toLowerCase(); }
 
 function typeKind(t) { return (t && typeof t === "object" ? t.kind : null) || "Bool"; }
 
@@ -1461,7 +1494,7 @@ function buildTypesNode(host, types) {
   sum.innerHTML = 'Types <span class="badge">' + types.length + '</span>';
   det.appendChild(sum);
   for (const t of types) {
-    const kind = t.body && t.body.kind ? t.body.kind.toLowerCase() : "type";
+    const kind = t.body && t.body.kind ? displayTypeKind(t.body.kind) : "type";
     const d = document.createElement("div");
     d.className = "node";
     d.innerHTML = '<span class="kind">T</span> ' + escapeHTML(t.name) +
@@ -2350,6 +2383,69 @@ function renderProblems() {
     d.problems.map(p => "✖ " + escapeHTML(p)).join("<br>") + "</div>";
 }
 
+// Inspection uses the actual expression tree supplied by the model API.
+// Wires keep their editable source identities; operand rows expose the
+// field projections and comparisons those dependencies participate in.
+function expressionSourceText(ref) {
+  const declared = typeName(ref.source_type), resolved = typeName(ref.resolved_source_type);
+  return ref.source + " : " + declared + (resolved !== declared ? " → " + resolved : "") +
+    (ref.source_kind === "struct" ? " (struct)" : "");
+}
+
+function expressionDetailHTML(eq) {
+  const detail = eq.expression_detail;
+  if (!detail) return '<pre>' + escapeHTML(eq.text) + '</pre>';
+  const operands = detail.operands || [], refs = detail.references || [];
+  const noun = detail.kind === "logical" ? "Boolean operands" : "operands";
+  return '<p><strong>' + escapeHTML(detail.operation) + '</strong> · ' + operands.length + " " + noun +
+    '</p><p class="build-note">Wires show referenced signals. The rows show the expressions evaluated by this operation.</p>' +
+    '<table aria-label="Expression operands"><thead><tr><th>Operand expression</th><th class="expression-type">Type</th></tr></thead><tbody>' +
+    operands.map((o, i) => '<tr><td>' + (i + 1) + '. <code>' + escapeHTML(o.text) + '</code></td><td>' +
+      escapeHTML(o.type ? typeName(o.type) : "unresolved — see diagnostics") + '</td></tr>').join("") + '</tbody></table>' +
+    (refs.length ? '<p><strong>Fields and signals used</strong></p><table aria-label="Referenced fields and signals"><thead><tr>' +
+      '<th>Field / signal</th><th class="expression-type">Type</th><th class="expression-source">Declared source</th></tr></thead><tbody>' +
+      refs.map(r => '<tr><td><code>' + escapeHTML(r.path) + '</code></td><td>' +
+        escapeHTML(r.type ? typeName(r.type) : "unresolved — see diagnostics") + '</td><td>' +
+        escapeHTML(expressionSourceText(r)) + '</td></tr>').join("") + '</tbody></table>' : '') +
+    '<p><strong>Full equation</strong></p><pre>' + escapeHTML(eq.text) + '</pre>';
+}
+
+function renderDiagramExpression() {
+  const d = state.diagramData, panel = document.getElementById("diagram-expressions");
+  if (!d || !d.equations.length) { panel.hidden = true; return; }
+  panel.hidden = false;
+  const selected = d.equations.find(e => e.id === state.selection);
+  const prior = panel.dataset.node === d.node && d.equations.find(e => e.id === panel.dataset.equation);
+  const eq = selected || prior || d.equations.find(e => e.expression_detail?.kind === "logical" && e.expression_detail.has_projections)
+    || d.equations.find(e => e.expression_detail?.has_projections) || d.equations[0];
+  panel.dataset.node = d.node;
+  panel.dataset.equation = eq.id;
+  // Stepping/dragging redraws the SVG often. Keep inspection text and its
+  // scroll position intact until the equation or loaded model changes.
+  if (panel.expressionItem === eq) return;
+  panel.expressionItem = eq;
+  const select = document.getElementById("diagram-expression-select");
+  select.innerHTML = d.equations.map(e => '<option value="' + escapeAttr(e.id) + '"' +
+    (e.id === eq.id ? ' selected' : '') + '>' + escapeHTML(e.id + " · " + e.lhs.join(", ")) + '</option>').join("");
+  const detail = eq.expression_detail;
+  document.getElementById("diagram-expression-summary").textContent = "Expression details · " + eq.lhs.join(", ") +
+    (detail ? " · " + detail.operation + " · " + detail.operands.length + " operands" : "");
+  document.getElementById("diagram-expression-body").innerHTML = expressionDetailHTML(eq);
+}
+
+function inspectDiagramExpression(id) {
+  document.getElementById("diagram-expressions").open = true;
+  setSelection(id);
+}
+
+function expressionDependencyTip(eq, source) {
+  const refs = (eq.expression_detail?.references || []).filter(r => r.source === source);
+  if (!refs.some(r => r.path !== source)) return source;
+  return "Dependency " + expressionSourceText(refs[0]) + " · " +
+    refs.map(r => r.path + " : " + (r.type ? typeName(r.type) : "unresolved")).join("; ") +
+    " · inspect Expression details for the operands";
+}
+
 const DIAG = { ROW: 44, BOXH: 30, INW: 150, EQW: 280, OUTW: 170,
                X_IN: 16, X_EQ: 230, X_OUT: 580, PIN_PITCH: 16, PIN_MARGIN: 13 };
 
@@ -2413,6 +2509,12 @@ function wrapText(text, maxChars) {
 function boxLabelLines(it, p) {
   const charW = it.sym ? 8.2 : 6.6, pad = it.sym ? 12 : 16;
   return wrapText(it.label, Math.floor(((p.w || DIAG.INW) - pad) / charW));
+}
+
+function boxSingleLabel(it, p) {
+  const charW = it.sym ? 8.2 : 6.6, pad = it.sym ? 12 : 16;
+  const lim = Math.max(1, Math.floor(((p.w || DIAG.INW) - pad) / charW));
+  return it.label.length > lim ? it.label.slice(0, lim - 1) + "…" : it.label;
 }
 
 // A gate's height grows to seat its input pins on the left edge (SCADE
@@ -2708,6 +2810,7 @@ const SHAPES_UNLABELLED = new Set(["and", "or", "xor", "not", "mux", "sm", "act"
 function renderDiagram() {
   const d = state.diagramData;
   if (!d) return;
+  renderDiagramExpression();
   const pos = state.diagPos;
   const pinGhosts = operandGhostSet(d);
   const collapsed = collapsedLocals(d);
@@ -2732,6 +2835,7 @@ function renderDiagram() {
     reason: (e.reason ? e.reason + " — " : "") + e.text,
     calls: e.calls || [],
     inputs: e.inputs || [],
+    expression: e,
     // The collapsed result local this gate produces (if any), so its right pin
     // can render as the result — red until consumed.
     outName: (e.output && e.output.collapsible) ? e.output.name : null,
@@ -2819,8 +2923,10 @@ function renderDiagram() {
       if (pin) { x2 = pin.x; y2 = pin.y; entry = pin.entry; }
     }
     const cls = w.invalid ? "wire invalid" : "wire";
+    const destEq = d.equations.find(e => e.id === w.to);
+    const dependencyTip = destEq ? expressionDependencyTip(destEq, w.from) : "";
     svg += '<path class="' + cls + '" d="' + wirePathD(x1, y1, x2, y2, entry) + '">' +
-      (w.reason ? '<title>' + escapeHTML(w.reason) + '</title>' : '') + '</path>';
+      (w.reason || dependencyTip ? '<title>' + escapeHTML(w.reason || dependencyTip) + '</title>' : '') + '</path>';
     if (showLabels || live) {
       // The SCADE wire annotation: the carried variable and its type, seated
       // just past the source pin (so parallel wires keep their labels apart —
@@ -2854,10 +2960,11 @@ function renderDiagram() {
     // Gate glyphs carry no text at all: the shape is the label.
     if (!SHAPES_UNLABELLED.has(it.shape)) {
       const lines = p.wrap ? boxLabelLines(it, p)
-        : [it.label.length > 42 ? it.label.slice(0, 41) + "…" : it.label];
+        : [boxSingleLabel(it, p)];
       const tx = it.sym ? (p.x + p.w / 2 + (it.shape === "mem" ? 3 : 0)) : (p.x + 8);
       const firstY = p.y + h / 2 + (it.sym ? 5 : 4) - (lines.length - 1) * WRAP_LINEH / 2;
       svg += '<text' + (it.sym ? ' class="sym" text-anchor="middle"' : '') + ' x="' + tx + '" y="' + firstY + '">';
+      svg += '<title>' + escapeHTML(it.label) + '</title>';
       lines.forEach((ln, li) => {
         svg += '<tspan x="' + tx + '"' + (li ? ' dy="' + WRAP_LINEH + '"' : '') + '>' + escapeHTML(ln) + '</tspan>';
       });
@@ -2901,7 +3008,7 @@ function renderDiagram() {
         if (!pg) return;
         // Bound pins name their source; unbound pins read as a neutral "input N"
         // slot — wire it, or just type the expression in Properties.
-        const tip = pin.bound ? pin.name
+        const tip = pin.bound ? (it.expression ? expressionDependencyTip(it.expression, pin.name) : pin.name)
           : ("input " + (k + 1) + " — needs a source (drag a wire here, or type the expression in Properties)");
         svg += '<circle class="inpin' + (pin.bound ? "" : " unbound") + '" data-eq="' + it.id +
           '" data-port="' + k + '" data-operand="' + escapeAttr(pin.name) + '" cx="' + pg.x +
@@ -3530,7 +3637,7 @@ function openTypeDropMenu(typeName, x, y, clientX, clientY) {
   const head = document.createElement("div");
   head.className = "ctx-item";
   head.style.cssText = "font-weight:600;color:#555;cursor:default";
-  head.textContent = typeName + " (" + kind.toLowerCase() + ")";
+  head.textContent = typeName + " (" + displayTypeKind(kind) + ")";
   m.appendChild(head);
   for (const [label, action] of actions) {
     const d = document.createElement("div");
@@ -4673,7 +4780,7 @@ async function loadTypes() {
     html = "<table><thead><tr><th>name</th><th>kind</th><th>definition</th><th>package</th><th></th></tr></thead><tbody>";
     for (const ty of t.types) {
       const editable = ty.package !== "stdlib";
-      html += "<tr><td><code class='inline'>" + escapeHTML(ty.name) + "</code></td><td>" + ty.kind +
+      html += "<tr><td><code class='inline'>" + escapeHTML(ty.name) + "</code></td><td>" + escapeHTML(ty.display_kind || displayTypeKind(ty.kind)) +
         "</td><td>" + escapeHTML(ty.detail) + "</td><td>" + escapeHTML(ty.package) + "</td><td>" +
         (editable ? '<button onclick="typesRemove(\'' + escapeAttr(ty.name) + '\')">Delete</button>' : "") +
         "</td></tr>";
@@ -6148,8 +6255,8 @@ function validateValue(tk, raw) {
     return { ok: false, msg: "bool must be true or false" };
   }
   if (tk === "Float32" || tk === "Float64") {
-    if (raw !== "" && isFinite(Number(raw))) return { ok: true, norm: raw };
-    return { ok: false, msg: "must be a number" };
+    if (raw !== "" && isFinite(Number(raw)) && (tk !== "Float32" || Number.isFinite(Math.fround(Number(raw))))) return { ok: true, norm: raw };
+    return { ok: false, msg: "must be a finite " + tk.toLowerCase() + " number" };
   }
   const ranges = {
     Int8: [-128, 127], Int16: [-32768, 32767], Int32: [-2147483648, 2147483647],
@@ -6159,7 +6266,12 @@ function validateValue(tk, raw) {
     if (!/^-?\d+$/.test(raw)) return { ok: false, msg: "must be an integer" };
     if ((tk === "Uint64" || tk === "Uint8" || tk === "Uint16" || tk === "Uint32") && raw[0] === "-")
       return { ok: false, msg: "must be ≥ 0" };
-    if (tk === "Int64" || tk === "Uint64") return { ok: true, norm: raw };
+    if (tk === "Int64" || tk === "Uint64") {
+      const n = BigInt(raw);
+      if (n < -9223372036854775808n || n > 9223372036854775807n)
+        return { ok: false, msg: "input integers must fit signed 64-bit storage; larger uint64 inputs are unsupported" };
+      return { ok: true, norm: raw };
+    }
     const n = Number(raw), [lo, hi] = ranges[tk];
     if (n < lo || n > hi) return { ok: false, msg: tk + " range is " + lo + "…" + hi };
     return { ok: true, norm: raw };
@@ -6189,10 +6301,16 @@ function buildWatchTable() {
     const c2 = document.createElement("td");
     if (editable) {
       const tk = typeKind(type);
+      if (tk === "Named" || tk === "Array") {
+        c2.textContent = "Start simulation to edit typed " + typeName(type) + " inputs";
+        tr.appendChild(c2);
+        body.appendChild(tr);
+        return;
+      }
       const inp = document.createElement("input");
       inp.className = "watch-val";
       inp.dataset.port = name; inp.dataset.tk = tk;
-      inp.value = state.sim.values[name] != null ? state.sim.values[name] : defaultForKind(tk);
+      inp.value = simInitialInput({ name, type: typeName(type), schema: { kind: "scalar", type: typeName(type) }, default_text: defaultForKind(tk) });
       state.sim.values[name] = inp.value;
       inp.addEventListener("input", () => onWatchInput(inp));
       onWatchInput(inp);
@@ -6208,6 +6326,12 @@ function buildWatchTable() {
   e.inputs.forEach(p => row(p.name, p.type, "", true));
   (e.locals || []).forEach(l => row(l.name, l.type, " (local)", false));
   e.outputs.forEach(p => row(p.name, p.type, " (out)", false));
+  const startRow = document.createElement("tr"), startCell = document.createElement("td");
+  startCell.colSpan = 2;
+  const start = document.createElement("button");
+  start.textContent = "Start typed input editor";
+  start.addEventListener("click", () => simStart());
+  startCell.appendChild(start); startRow.appendChild(startCell); body.appendChild(startRow);
 }
 
 // --- Waveform viewer -------------------------------------------------------------
@@ -6696,6 +6820,110 @@ function kindOfTypeStr(t) {
 
 function simSignals() { return state.sim.session ? state.sim.session.signals : []; }
 
+function simResolvedSchema(schema) {
+  for (let depth = 0; schema && schema.kind === "alias" && depth < 64; depth++) schema = schema.target;
+  return schema;
+}
+
+// Show the model's declared names and fields; no inferred units or flattened type names.
+function simSchemaHTML(schema, path = "", depth = 0) {
+  if (!schema) return "Type definition unavailable";
+  if (depth > 64) return "Type nesting exceeds the inspection limit";
+  const label = escapeHTML((path ? path + " : " : "") + (schema.type || schema.name || schema.kind));
+  if (schema.kind === "alias") return label + " (alias)<ul><li>" + simSchemaHTML(schema.target, path, depth + 1) + "</li></ul>";
+  if (schema.kind === "struct") return label + " (struct)<ul>" + (schema.fields || []).map(f =>
+    "<li>" + simSchemaHTML(f.schema, path ? path + "." + f.name : f.name, depth + 1) + "</li>").join("") + "</ul>";
+  if (schema.kind === "array") return label + " (array, " + escapeHTML(String(schema.len)) + " elements)<ul><li>" +
+    simSchemaHTML(schema.elem, path + "[index]", depth + 1) + "</li></ul>";
+  if (schema.kind === "enum") return label + " (enum): " + (schema.variants || []).map(escapeHTML).join(" | ");
+  if (schema.kind === "unsupported") return label + ": " + escapeHTML(schema.error || "unsupported type");
+  return label;
+}
+
+function simValidateJSON(schema, value, path, depth = 0) {
+  if (!schema || depth > 64) return path + ": type definition unavailable or too deeply nested";
+  if (schema.kind === "alias") return simValidateJSON(schema.target, value, path, depth + 1);
+  if (schema.kind === "unsupported") return path + ": " + (schema.error || "unsupported type");
+  if (schema.kind === "struct") {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return path + ": expected struct " + schema.type + " as a JSON object";
+    const fields = schema.fields || [], names = fields.map(f => f.name);
+    for (const name of Object.keys(value)) if (!names.includes(name)) return path + ": extra field " + name;
+    for (const f of fields) {
+      if (!Object.prototype.hasOwnProperty.call(value, f.name)) return path + ": missing field " + f.name + " (" + f.type + ")";
+      const error = simValidateJSON(f.schema, value[f.name], path + "." + f.name, depth + 1);
+      if (error) return error;
+    }
+    return "";
+  }
+  if (schema.kind === "array") {
+    if (!Array.isArray(value)) return path + ": expected array of " + schema.len + " elements";
+    if (value.length !== schema.len) return path + ": expected " + schema.len + " elements, got " + value.length;
+    for (let i = 0; i < value.length; i++) {
+      const error = simValidateJSON(schema.elem, value[i], path + "[" + i + "]", depth + 1);
+      if (error) return error;
+    }
+    return "";
+  }
+  if (schema.kind === "enum") return typeof value === "string" && (schema.variants || []).includes(value) ? "" :
+    path + ": expected " + schema.type + " variant: " + (schema.variants || []).join(" | ");
+  if (schema.type === "bool") return typeof value === "boolean" ? "" : path + ": expected bool true or false";
+  if (schema.type === "char") return Number.isInteger(value) && value >= 0 && value <= 255 ? "" : path + ": expected character byte from 0 to 255";
+  if (typeof value !== "number" || !Number.isFinite(value)) return path + ": expected " + schema.type + " number";
+  if (/^(u?int)/.test(schema.type) && !Number.isInteger(value)) return path + ": expected " + schema.type + " integer";
+  // JS rounds large JSON integers. Validate their exact limits on the server using the original text.
+  if ((schema.type === "int64" || schema.type === "uint64") && !Number.isSafeInteger(value)) {
+    return schema.type === "uint64" && value < 0 ? path + ": must be ≥ 0" : "";
+  }
+  const check = validateValue(kindOfTypeStr(schema.type), String(value));
+  return check.ok ? "" : path + ": " + check.msg;
+}
+
+function simValidateInput(signal, raw) {
+  raw = (raw == null ? "" : String(raw)).trim();
+  const schema = simResolvedSchema(signal.schema);
+  if (!raw) return { ok: false, msg: signal.default_error || "enter a value for " + signal.type };
+  if (!schema) return validateValue(kindOfTypeStr(signal.type), raw);
+  if (schema.kind === "struct" || schema.kind === "array") {
+    // Keep established watch/CSV struct syntax usable during trace replay; the server validates it.
+    if (schema.kind === "struct" && /^\{[\s\S]*=/.test(raw)) return { ok: true, norm: raw };
+    let value;
+    try { value = JSON.parse(raw); } catch (_) {
+      // Trace arrays use semicolons and bare enum variants; retain those inputs for server validation.
+      if (schema.kind === "array" && raw.startsWith("[") && raw.endsWith("]")) return { ok: true, norm: raw };
+      return { ok: false, msg: "enter valid JSON for " + signal.type + "; expand Type / fields for its definition" };
+    }
+    const msg = simValidateJSON(signal.schema, value, signal.name);
+    return msg ? { ok: false, msg } : { ok: true, norm: raw }; // preserve typed numeric text exactly
+  }
+  if (schema.kind === "enum") return (schema.variants || []).includes(raw) ? { ok: true, norm: raw } :
+    { ok: false, msg: "choose a " + schema.type + " variant: " + (schema.variants || []).join(" | ") };
+  if (schema.kind === "unsupported") return { ok: false, msg: schema.error || "unsupported type " + signal.type };
+  if (schema.type === "char") return /^\d+$/.test(raw) && Number(raw) <= 255 ? { ok: true, norm: raw } :
+    { ok: false, msg: "enter a character byte from 0 to 255" };
+  return validateValue(kindOfTypeStr(schema.type), raw);
+}
+
+function simInitialInput(signal) {
+  const signature = JSON.stringify(signal.schema || signal.type);
+  state.sim.valueTypes ||= {};
+  const keep = state.sim.valueTypes[signal.name] === signature && state.sim.values[signal.name] != null;
+  state.sim.valueTypes[signal.name] = signature;
+  if (keep) return state.sim.values[signal.name];
+  const schema = simResolvedSchema(signal.schema);
+  if ((schema?.kind === "struct" || schema?.kind === "array") && signal.default_value != null)
+    return JSON.stringify(signal.default_value, null, 2);
+  return signal.default_text != null ? signal.default_text : signal.schema ? "" : defaultForKind(kindOfTypeStr(signal.type));
+}
+
+function onSimWatchInput(inp, signal) {
+  const check = simValidateInput(signal, inp.value);
+  inp.classList.toggle("invalid", !check.ok);
+  inp.setAttribute("aria-invalid", String(!check.ok));
+  inp.title = check.ok ? "" : check.msg;
+  inp.inputError.textContent = check.ok ? "" : check.msg;
+  state.sim.values[signal.name] = inp.value;
+}
+
 /// A clocked activation's lowering plumbing (guards, sampled reads,
 /// per-branch values, last() holders): kept out of the watch table and the
 /// waveform. Its "branch selected" flags (`__act_<name>_b<k>`) stay.
@@ -6765,7 +6993,7 @@ async function simStart(node) {
   setMenuEnabled("mi-sim-step", true);
   setMenuEnabled("mi-sim-stop", true);
   setSimStatus("SIMULATING " + d.root + " — cycle 0");
-  setSimNote("ok", "session on " + d.root + " at cycle 0 — set the inputs, then Step or Run");
+  setSimNote("ok", "session on " + d.root + " at cycle 0 — generated inputs are placeholders (zero / false / neutral enum), not sensor readings; review them, then Step or Run");
   renderSimChip();
   if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
   if (document.getElementById("sim-cil").checked) await simSetC(true);
@@ -6844,7 +7072,7 @@ async function simAdvance(count, withBreak) {
   if (!state.sim.session && !(await simStart())) return;
   const inputs = {};
   for (const s of simSignals().filter(s => s.kind === "input")) {
-    const v = validateValue(kindOfTypeStr(s.type), state.sim.values[s.name]);
+    const v = simValidateInput(s, state.sim.values[s.name]);
     if (!v.ok) { setSimNote("err", "input " + s.name + ": " + v.msg); return; }
     inputs[s.name] = v.norm;
   }
@@ -6998,7 +7226,7 @@ async function simReplay(node, sequence, label) {
   } catch (e) { setSimNote("err", "the replay request failed"); return; }
   if (!r.ok) { setSimNote("err", d.error || "the replay failed"); return; }
   const lastIn = sequence[sequence.length - 1];
-  ins.forEach(g => state.sim.values[g.name] = String(lastIn[g.name]));
+  ins.forEach(g => state.sim.values[g.name] = typeof lastIn[g.name] === "object" ? JSON.stringify(lastIn[g.name]) : String(lastIn[g.name]));
   simBuildWatchTable();
   if (!state.diagramData || state.diagramData.node !== node) await loadDiagram(node, true);
   simTake(d, req);
@@ -7022,20 +7250,54 @@ function simBuildWatchTable() {
     }
     const c1 = document.createElement("td");
     c1.textContent = s.name + " : " + s.type + (s.kind === "local" ? " (local)" : s.kind === "output" ? " (out)" : "");
+    if (s.schema) {
+      const definition = document.createElement("details");
+      definition.className = "watch-type";
+      definition.innerHTML = "<summary>Type / fields</summary><div>" + simSchemaHTML(s.schema, s.name) + "</div>";
+      c1.appendChild(definition);
+    }
     tr.appendChild(c1);
     const c2 = document.createElement("td");
     if (s.kind === "input") {
-      const tk = kindOfTypeStr(s.type);
-      const inp = document.createElement("input");
-      inp.className = "watch-val";
-      inp.dataset.port = s.name; inp.dataset.tk = tk;
-      inp.value = state.sim.values[s.name] != null ? state.sim.values[s.name] : defaultForKind(tk);
+      const schema = simResolvedSchema(s.schema);
+      const structured = schema?.kind === "struct" || schema?.kind === "array";
+      const inp = document.createElement(structured ? "textarea" : schema?.kind === "enum" ? "select" : "input");
+      inp.className = "watch-val" + (structured ? " watch-structured" : "");
+      inp.dataset.port = s.name;
+      const initial = simInitialInput(s);
+      if (schema?.kind === "enum") {
+        const variants = schema.variants || [];
+        if (!variants.includes(initial)) {
+          const choice = document.createElement("option");
+          choice.value = initial; choice.textContent = initial || "Choose variant…";
+          inp.appendChild(choice);
+        }
+        for (const variant of variants) {
+          const choice = document.createElement("option");
+          choice.value = variant; choice.textContent = variant; inp.appendChild(choice);
+        }
+      }
+      inp.value = initial;
+      inp.setAttribute("aria-label", s.name + " input, " + s.type);
+      inp.spellcheck = false;
       state.sim.values[s.name] = inp.value;
-      inp.addEventListener("input", () => onWatchInput(inp));
-      // Enter in an input steps — the fastest way to drive a model by hand.
-      inp.addEventListener("keydown", ev => { if (ev.key === "Enter") { ev.preventDefault(); simStep(); } });
-      onWatchInput(inp);
       c2.appendChild(inp);
+      const note = document.createElement("span");
+      note.className = "watch-placeholder";
+      note.textContent = (s.default_error || s.placeholder_note || "Initial values are placeholders; enter simulation inputs.") +
+        (structured ? " Step validates exact numeric limits. Ctrl/Cmd+Enter steps." : "");
+      c2.appendChild(note);
+      inp.inputError = document.createElement("span");
+      inp.inputError.className = "watch-error";
+      inp.inputError.setAttribute("role", "status");
+      c2.appendChild(inp.inputError);
+      inp.addEventListener("input", () => onSimWatchInput(inp, s));
+      inp.addEventListener("change", () => onSimWatchInput(inp, s));
+      // Multiline structs use Ctrl/Cmd+Enter to step; plain Enter edits the JSON.
+      inp.addEventListener("keydown", ev => {
+        if (ev.key === "Enter" && (!structured || ev.ctrlKey || ev.metaKey)) { ev.preventDefault(); simStep(); }
+      });
+      onSimWatchInput(inp, s);
     } else {
       c2.id = "watch-out-" + s.name;
       c2.className = "watch-computed";

@@ -323,7 +323,7 @@ fn operations_catalog_has_the_scade_families() {
     let names: Vec<&str> = cat["categories"].as_array().unwrap()
         .iter().map(|c| c["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec![
-        "Mathematics", "Comparisons", "Logical", "Structures/Arrays",
+        "Mathematics", "Comparisons", "Logical", "Structs/Arrays",
         "Time/Statefuls", "Choice", "Bitwise", "Higher Order",
     ]);
     let math = &cat["categories"][0]["items"];
@@ -639,4 +639,3 @@ fn clite_compile_endpoint_emits_and_builds_an_executable() {
     let exe = v["exe"].as_str().expect("exe path");
     assert!(PathBuf::from(exe).exists(), "exe missing: {exe}");
 }
-

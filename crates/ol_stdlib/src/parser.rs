@@ -773,7 +773,7 @@ impl Parser {
                                 Some(Tok::Ident(f)) => f,
                                 other => {
                                     return Err(ParseError::Expected {
-                                        expected: "field name in record literal".into(),
+                                        expected: "field name in struct literal".into(),
                                         found: other
                                             .map(|t| t.describe())
                                             .unwrap_or_else(|| "<eof>".into()),

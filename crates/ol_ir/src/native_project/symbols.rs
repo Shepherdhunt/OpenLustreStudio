@@ -359,7 +359,7 @@ impl Resolver<'_> {
             })
         }) {
             return Err(format!(
-                "project `{}` record field `{field}` collides with a generated constant macro",
+                "project `{}` struct field `{field}` collides with a generated constant macro",
                 self.owner
             ));
         }

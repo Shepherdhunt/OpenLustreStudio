@@ -17,6 +17,9 @@ use std::collections::{BTreeMap, HashMap};
 use ol_contract_ir::{parse_contracts, ContractDef};
 use ol_ir::{BinOp, Expr, IterKind, Literal, NodeDef, NodeKind, Project, Type, TypeBody, UnaryOp};
 
+mod input;
+pub use input::{input_placeholder, input_schema, simulation_type_size};
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Bool(bool),
@@ -126,6 +129,8 @@ pub enum SimError {
     HeaderMismatch { expected: Vec<String>, got: Vec<String> },
     #[error("could not parse CSV value `{value}` for column `{col}` of type {ty:?}")]
     ParseError { value: String, col: String, ty: Type },
+    #[error("{0}")]
+    InputError(String),
     #[error("evaluation error: {0}")]
     EvalError(String),
 }
@@ -454,11 +459,7 @@ impl<'a> Sim<'a> {
             .iter()
             .find(|p| p.name == name)
             .ok_or_else(|| SimError::EvalError(format!("`{name}` is not an input of `{}`", self.node.name)))?;
-        parse_value(raw.trim(), &p.ty, self.project).map_err(|_| SimError::ParseError {
-            value: raw.into(),
-            col: p.name.clone(),
-            ty: p.ty.clone(),
-        })
+        input::parse(raw.trim(), &p.ty, self.project, &p.name).map_err(SimError::InputError)
     }
 
     /// Evaluate a condition over one cycle's signal values — a breakpoint.
@@ -567,53 +568,6 @@ fn enum_variant_value(name: &str, project: &Project) -> Option<Value> {
         }
     }
     None
-}
-
-fn parse_value(raw: &str, ty: &Type, project: &Project) -> Result<Value, ()> {
-    match ty {
-        Type::Bool => match raw.to_ascii_lowercase().as_str() {
-            "true" | "1" | "t" => Ok(Value::Bool(true)),
-            "false" | "0" | "f" => Ok(Value::Bool(false)),
-            _ => Err(()),
-        },
-        Type::Float32 => raw.parse::<f32>().map(Value::Float32).map_err(|_| ()),
-        t if t.is_float() => raw.parse::<f64>().map(Value::Float).map_err(|_| ()),
-        t if t.is_integer() => raw.parse::<i64>().map(Value::Int).map_err(|_| ()),
-        // Arrays at the CSV boundary use `[e0;e1;…]` — the same bracketed,
-        // semicolon-separated form `Value::to_csv` produces, so traces
-        // round-trip and the generated C driver can match byte-for-byte.
-        Type::Array { elem, len } => {
-            let inner = raw
-                .trim()
-                .strip_prefix('[')
-                .and_then(|s| s.strip_suffix(']'))
-                .ok_or(())?;
-            let parts: Vec<&str> = if inner.trim().is_empty() {
-                Vec::new()
-            } else {
-                inner.split(';').collect()
-            };
-            if parts.len() != *len as usize {
-                return Err(());
-            }
-            let mut vals = Vec::with_capacity(parts.len());
-            for p in parts {
-                vals.push(parse_value(p.trim(), elem, project)?);
-            }
-            Ok(Value::Array(vals))
-        }
-        // An enum input is written by variant name; an alias parses as its
-        // target type.
-        Type::Named { name } => {
-            let def = project.packages.iter().flat_map(|p| &p.types).find(|t| t.name() == name).ok_or(())?;
-            match &def.body {
-                TypeBody::Enum(e) if e.variants.iter().any(|v| v == raw) => Ok(Value::Enum(raw.to_string())),
-                TypeBody::Alias { target, .. } => parse_value(raw, target, project),
-                _ => Err(()),
-            }
-        }
-        _ => Err(()),
-    }
 }
 
 /// One observed cycle (see [`Sim::step_observed`]).
@@ -1129,10 +1083,10 @@ fn eval(
             let bv = eval(base, env, state, call_states, project, site_clocks, cov)?;
             match bv {
                 Value::Record(m) => m.get(field).cloned().ok_or_else(|| {
-                    SimError::EvalError(format!("record has no field `{field}`"))
+                    SimError::EvalError(format!("struct has no field `{field}`"))
                 }),
                 other => Err(SimError::EvalError(format!(
-                    "field access `.{field}` on non-record value: {other:?}"
+                    "field access `.{field}` on a value that is not a struct: {other:?}"
                 ))),
             }
         }
