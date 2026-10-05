@@ -6,10 +6,21 @@ A first browser-based front end ships **inside the `openlustre` binary**:
 
 ```bash
 openlustre studio serve path/to/model.ols --with-stdlib libraries --port 8181
-# studio: serving http://127.0.0.1:8181 (model: path/to/model.ols)
+# studio: serving http://127.0.0.1:8181/?token=3f9c… (model: path/to/model.ols)
 ```
 
-Open the printed URL in any browser to get the Project Explorer, the
+**Access.** The printed link carries a token drawn afresh at each launch
+(`studio launch` opens it for you). Opening it sets a cookie for that
+Studio and drops the token from the address bar; requests without the
+token are refused, as are requests from other web pages (`Origin`) and
+requests not addressed to `127.0.0.1` / `localhost` (`Host`, against DNS
+rebinding) — the Studio edits files and runs compilers, so no web page the
+browser happens to have open may drive it. Scripts and other front ends
+send the token in an `X-OpenLustre-Token` header; set
+`OPENLUSTRE_STUDIO_TOKEN` (16+ letters, digits, `-`, `_`) to choose it
+instead of a random one. `/api/health` answers without a token.
+
+Open the printed link in any browser to get the Project Explorer, the
 diagnostics panel, the generated Lustre and C-Lite views, and a
 simulation runner — no JS toolchain, no separate install, no Node, no
 Tauri build step. The page re-fetches the JSON inspection every five

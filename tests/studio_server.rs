@@ -9,6 +9,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 struct ServerGuard {
     child: Child,
     port: u16,
@@ -26,6 +29,7 @@ fn start_server() -> ServerGuard {
         .join("../examples/release_logic/model/release_logic.json");
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args([
             "run", "-q", "-p", "ol_cli", "--",
             "studio", "serve",
@@ -78,7 +82,7 @@ fn start_server() -> ServerGuard {
 fn http_get(port: u16, path: &str) -> Option<(u16, String, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+        "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).ok()?;
     stream.shutdown(Shutdown::Write).ok();
@@ -90,7 +94,7 @@ fn http_get(port: u16, path: &str) -> Option<(u16, String, String)> {
 fn http_post(port: u16, path: &str, body: &str) -> Option<(u16, String, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len(),
     );
     stream.write_all(req.as_bytes()).ok()?;
@@ -268,4 +272,61 @@ fn studio_server_health_root_inspect_lustre_clite_and_simulate() {
     // Clocked activations: the editor explains last(), the live views hide
     // the lowering's plumbing locals.
     assert!(html.contains("last(v, init)") && html.contains("function simPlumbing"), "clocked activation UI missing");
+}
+
+/// Send `head` (request line and headers, without the final blank line) and
+/// return the status and the raw response head and body.
+fn raw(port: u16, head: &str) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    let req = format!("{head}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).unwrap();
+    stream.shutdown(Shutdown::Write).ok();
+    let mut buf = String::new();
+    stream.read_to_string(&mut buf).unwrap();
+    let (h, body) = buf.split_once("\r\n\r\n").expect("a response");
+    let status = h.lines().next().unwrap().split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, h.to_string(), body.to_string())
+}
+
+/// Other web pages must not drive the Studio: without this launch's token,
+/// from another origin, or addressed by a non-loopback name (DNS
+/// rebinding), requests are refused before they touch anything; the launch
+/// link sets a strict cookie and the page works with it.
+#[test]
+fn the_studio_refuses_requests_without_its_token_or_from_other_pages() {
+    let g = start_server();
+    let port = g.port;
+    let token = format!("X-OpenLustre-Token: {TEST_TOKEN}");
+
+    // No token: the API and the page are refused; health still answers.
+    assert_eq!(raw(port, "GET /api/inspect HTTP/1.1\r\nHost: 127.0.0.1").0, 403);
+    assert_eq!(raw(port, "POST /api/edit/undo HTTP/1.1\r\nHost: 127.0.0.1").0, 403);
+    let (s, _, page) = raw(port, "GET / HTTP/1.1\r\nHost: 127.0.0.1");
+    assert_eq!(s, 403);
+    assert!(page.contains("launch link") && !page.contains("diagram-status"));
+    assert_eq!(raw(port, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1").0, 200);
+
+    // A cross-site request carrying the token anyway, and DNS rebinding.
+    let cross = format!("POST /api/edit/undo HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: https://evil.example\r\n{token}");
+    assert_eq!(raw(port, &cross).0, 403);
+    let rebound = format!("GET /api/inspect HTTP/1.1\r\nHost: evil.example:{port}\r\n{token}");
+    assert_eq!(raw(port, &rebound).0, 403);
+
+    // The launch link: a strict, HttpOnly cookie, then the page without the
+    // token in its address; every response is unframeable and sends no
+    // Referer.
+    let (s, head, _) = raw(port, &format!("GET /?token={TEST_TOKEN} HTTP/1.1\r\nHost: 127.0.0.1:{port}"));
+    assert_eq!(s, 303);
+    assert!(head.contains("Location: /\r\n"));
+    let cookie = format!("openlustre_studio_{port}={TEST_TOKEN}");
+    assert!(head.contains(&format!("Set-Cookie: {cookie}; Path=/; HttpOnly; SameSite=Strict")), "{head}");
+    let (s, head, page) = raw(port, &format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nCookie: {cookie}"));
+    assert_eq!(s, 200);
+    assert!(page.contains("diagram-status"));
+    for h in ["X-Frame-Options: DENY", "Referrer-Policy: no-referrer", "X-Content-Type-Options: nosniff"] {
+        assert!(head.contains(h), "{h} missing in {head}");
+    }
+    // The page's own requests: same origin, cookie.
+    let own = format!("GET /api/inspect HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: {cookie}");
+    assert_eq!(raw(port, &own).0, 200);
 }

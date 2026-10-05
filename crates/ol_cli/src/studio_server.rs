@@ -18,7 +18,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod access;
 mod sim_session;
+
+pub use access::{launch_token, Access};
 
 const STUDIO_UI_HTML: &str = include_str!("studio_ui.html");
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -53,6 +56,9 @@ pub struct ServerCtx {
     /// The last root compiled for C-in-the-loop, keyed by the model's
     /// semantic signature — so Reset / re-attach doesn't recompile.
     pub c_cache: std::sync::Mutex<Option<(u64, String, std::sync::Arc<crate::scenario::CompiledModel>)>>,
+    /// Who may send requests: this launch's token, loopback hosts, the
+    /// Studio's own origin (see `access`).
+    pub access: Access,
 }
 
 impl ServerCtx {
@@ -204,6 +210,18 @@ fn handle_connection(mut stream: TcpStream, ctx: &ServerCtx) -> std::io::Result<
 
     let header_str = std::str::from_utf8(&buf[..headers_end]).unwrap_or("");
     let (method, path) = parse_request_line(header_str);
+    // Who is asking, before reading a body or touching anything.
+    let (bare_path, query) = path.split_once('?').unwrap_or((&path, ""));
+    match ctx.access.check(&method, bare_path, query, header_str) {
+        access::Verdict::Allow => {}
+        access::Verdict::Enter(cookie) => {
+            let extra = format!("Location: /\r\nSet-Cookie: {cookie}\r\n");
+            return write_response_with(&mut stream, 303, "text/plain", &extra, b"");
+        }
+        access::Verdict::Deny(status, ctype, body) => {
+            return write_response(&mut stream, status, ctype, &body);
+        }
+    }
     let content_length = parse_content_length(header_str).unwrap_or(0).min(MAX_REQUEST_BYTES);
 
     let body_start = headers_end + 4;
@@ -483,9 +501,30 @@ fn write_response(
     ctype: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_response_with(stream, status, ctype, "", body)
+}
+
+/// Every response: not cached, not sniffed as another type, not framed by
+/// another page, not readable by other origins, and no `Referer` (the
+/// launch link's token) sent from the page to the sites it links to.
+const SECURITY_HEADERS: &str = "Cache-Control: no-store\r\n\
+    X-Content-Type-Options: nosniff\r\n\
+    X-Frame-Options: DENY\r\n\
+    Content-Security-Policy: frame-ancestors 'none'\r\n\
+    Cross-Origin-Resource-Policy: same-origin\r\n\
+    Referrer-Policy: no-referrer\r\n";
+
+/// [`write_response`] with `extra` header lines (each ending in CRLF).
+fn write_response_with(
+    stream: &mut TcpStream,
+    status: u16,
+    ctype: &str,
+    extra: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let reason = status_text(status);
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\n{SECURITY_HEADERS}{extra}Connection: close\r\n\r\n",
         len = body.len(),
     );
     stream.write_all(head.as_bytes())?;
@@ -496,7 +535,9 @@ fn write_response(
 fn status_text(s: u16) -> &'static str {
     match s {
         200 => "OK",
+        303 => "See Other",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
         500 => "Internal Server Error",

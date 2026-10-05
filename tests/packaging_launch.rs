@@ -11,6 +11,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 #[test]
 fn embedded_library_is_identical_to_the_on_disk_library() {
     let embedded = ol_stdlib::load_embedded().expect("embedded loads");
@@ -73,6 +76,7 @@ fn start_launch() -> LaunchGuard {
         .unwrap_or_else(|| real_home.join(".rustup"));
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "launch", "--no-open"])
         .args(["--port", "0"])
         .env("HOME", &home)
@@ -117,7 +121,7 @@ fn start_launch() -> LaunchGuard {
 fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     stream.shutdown(Shutdown::Write).ok();
     let mut raw = String::new();

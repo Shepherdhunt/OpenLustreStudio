@@ -10,6 +10,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 fn make_tempdir(tag: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let stamp = SystemTime::now()
@@ -107,6 +110,7 @@ fn cast_traces_match_between_ir_and_compiled_c() {
 
     let run = |args: &[&str]| -> (bool, String) {
         let out = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
             .args(["run", "-q", "-p", "ol_cli", "--"])
             .args(args)
             .output()
@@ -187,6 +191,7 @@ fn sized_integers_wrap_on_assignment_in_the_simulator_and_in_c() {
     std::fs::write(scen.join("overflow.csv"), "a,b\n200,100\n10,-100\n255,1\n0,127\n").unwrap();
     let run = |args: &[&str]| -> (bool, String) {
         let out = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
             .args(["run", "-q", "-p", "ol_cli", "--"])
             .args(args)
             .output()
@@ -250,6 +255,7 @@ fn start_server_on_workspace(tag: &str) -> ServerGuard {
     std::fs::create_dir_all(&ws).unwrap();
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "serve"])
         .arg(&ws)
         .args(["--port", "0"])
@@ -291,7 +297,7 @@ fn start_server_on_workspace(tag: &str) -> ServerGuard {
 fn request(port: u16, method: &str, path: &str, body: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len(),
     );
     stream.write_all(req.as_bytes()).ok()?;

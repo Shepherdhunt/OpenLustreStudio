@@ -1,282 +1,236 @@
-# OpenLustre Studio — goals review and SCADE-parity roadmap
+# OpenLustre Studio — roadmap
 
-Status as of the activate-if work (branch `claude/openlustre-studio-graphics-78hfg9`).
-This document checks the Studio against the goals the project set for itself
-(`README.md`, `implemenation_plan.md`), records where recent work landed, and
-proposes what to build next, in priority order.
+Status as of 2026-10-05 (main at 57cfc76, plus Studio access control).
+This document is the plan: where the Studio stands, what a gap review and a
+scale test found, and what to build next, in priority order.
+`docs/SCADE_GAP_ANALYSIS.md` is the earlier, June analysis, kept for its
+history log.
 
-## The two goal statements
+## Positioning (decided)
 
-1. **The project's own goal** (README, implementation plan): a graphical Lustre +
-   CoCoSpec workbench — *"the model is equations + contracts + modes +
-   evidence"* — whose headline differentiators are first-class contracts,
-   Kind 2 proof, and generated C-Lite provably equivalent to the simulated
-   model.
-2. **The working direction for this effort**: be Ansys-SCADE-like end to end —
-   design models graphically, have a code generator read the model and emit
-   C-Lite, compile and run it, and step/simulate the running model.
+OpenLustre Studio is a free tool for **demonstration and prototyping**, for
+the foreseeable future not a certified one: a way to work in the SCADE
+style — graphical model → simulation → generated C → proof → evidence —
+while waiting for Ansys SCADE, with the ability to carry the work into SCADE
+later (item 15). It ships for Windows, Ubuntu Linux and macOS (item 16).
+Qualification (DO-178C / DO-330) is out of scope.
 
-**Positioning (decided).** OpenLustre Studio is a free tool for
-demonstration and prototyping, for the foreseeable future not a certified
-one: a way to work in the SCADE style while waiting for Ansys SCADE, with
-the ability to carry the work into SCADE later (item 15). It ships for
-Windows, Ubuntu Linux and macOS (item 16).
-
-The two are compatible: SCADE's own value is exactly "graphical model →
-qualified code → evidence". But they weight things differently, and the
-review below shows the GUI has drifted toward (2) while the centre of (1) has
-no GUI at all.
+The project's own goal stays the centre: *the model is equations +
+contracts + modes + evidence*, with first-class contracts, Kind 2 proof, and
+generated C that provably behaves like the simulated model.
 
 ## Where things stand
 
-| Capability | CLI / engine | Studio GUI |
+| Capability | CLI / engine | Studio |
 |---|---|---|
-| Dataflow authoring (blocks, wires, typed ports) | ✅ | ✅ SCADE-style glyphs, orthogonal wires, zoom/pan, minimap, align/distribute, clipboard, export |
-| State machines (flat + hierarchical, operator-owned) | ✅ | ✅ textual editor, draggable chart, canvas block |
-| Conditional activation (activate-if) | ✅ clocked branches (frozen when inactive) + `last(v)` | ✅ editor, decision-tree chart, canvas block |
-| Type checking, function/operator rules | ✅ | ✅ errors mapped onto boxes and wires |
-| **CoCoSpec contracts: assume / guarantee / modes** | ✅ IR, checker (now type-checks clauses), CoCoSpec emit, observer-based runtime monitors | ✅ **contract editor: clause rows, mode table, CoCoSpec text, live checking** (was read-only) |
-| Lustre + CoCoSpec export | ✅ | ✅ Lustre pane |
-| C-Lite generation (selected root + closure) | ✅ `@trace` per equation, trace matrix, generation report (SHA-256) | ✅ Generate / C pane / save files; **click C ↔ select model element; generation report** |
-| Compile & run | ✅ host compiler, CSV driver, Makefile | ✅ host only; cross-compile shown as "roadmap" |
-| Stepping / simulation | ✅ batch + full trace; incremental `step_observed`; per-cycle input sequences | ✅ **server-side session: step / run N / breakpoints / stop on violation; live values, active state, fired branch and contract modes on the diagram; waveform with cycle review; the compiled C stepped in lockstep ("C in the loop")** (was replay-from-zero) |
-| IR ≡ compiled-C trace equivalence | ✅ `test run --backend both` | ✅ Tests dock (with decision + MC/DC coverage); **each run as a waveform against its golden, first divergence marked; replay in the simulator; live, cycle by cycle, in the Simulation dock** |
-| Kind 2 proof | ✅ adapter; bmc-ind / realizability / mode-coverage modes; structured counterexamples; runtime errors over machine integers | ✅ Prove / Realizability / Mode coverage, runtime-error group; counterexample as a waveform, replayable in the simulator; Kind 2 + Z3 installable from the Studio, bundled in Linux/macOS release archives, run in CI |
-| Evidence report | ✅ `openlustre evidence` (HTML + JSON, fails on FAIL) | ✅ Project ▸ Evidence Report (verdict, sections, full page, downloads) |
-| Imported C operators | ✅ manifests, wrappers, validation | ❌ no way to register or place one |
+| Dataflow authoring | ✅ | ✅ SCADE-style glyphs, orthogonal wires, zoom/pan, minimap, align/distribute, clipboard, undo/redo |
+| State machines (flat, hierarchical, operator-owned) | ✅ | ✅ textual editor, draggable chart, canvas block |
+| Conditional activation (activate-if), `last(v)` | ✅ clocked, frozen when inactive | ✅ editor, decision-tree chart |
+| Clocks (`when` / `merge`), arrays, `map` / `fold` | ✅ boolean clocks; stateless single-output iterators | ✅ |
+| Type and clock checking | ✅ | ✅ errors on boxes and wires |
+| Contracts: assume / guarantee / modes | ✅ checker, CoCoSpec, runtime monitors in sim and C | ✅ contract editor, mode table, live checking |
+| Import Lustre | ✅ | ✅ (errors carry no line/column yet) |
+| C generation | ✅ `@trace` per equation, trace matrix, generation report | ✅ C ↔ model navigation |
+| Compile & run | ✅ host compiler | ✅ host only (cross-compilation: item 7) |
+| Simulation | ✅ incremental, breakpoints, contract stops | ✅ live values, waveform, C in the loop |
+| Tests, coverage | ✅ golden traces on model **and** compiled C; decision coverage, unique-cause MC/DC | ✅ Tests dock |
+| Kind 2 proof | ✅ bmc-ind, realizability, mode coverage, runtime errors over machine integers | ✅ Verify dock, counterexample waveforms; bundled on Linux/macOS |
+| Evidence report | ✅ HTML + JSON | ✅ Project ▸ Evidence Report |
+| Imported C operators | ✅ manifests, wrappers | ❌ cannot be registered or placed (item 14) |
+| Downloads | ✅ Windows Setup.exe + zip, Ubuntu .deb + tarball, macOS .pkg + tarball (Apple Silicon, Intel), smoke-tested in CI | — |
+| Studio access control | ✅ per-launch token, Host and Origin checks (item 17) | ✅ |
+| Export to SCADE | ❌ (item 15) | ❌ |
 
-### Assessment
+### Scale (measured 2026-10-05)
 
-**On track:** the verification spine is genuinely strong — the IR simulator
-and compiled C agree byte for byte across every construct, including the new
-activations. The typed, strict IR, selective code generation, and graphical
-drafting (now close to SCADE for dataflow) all serve both goals.
+A generated model of 200 operators and about 5,000 equations (25× the PMS
+sample), on one Linux machine:
 
-**Drift:** the last several rounds went into drafting polish and SCADE
-control structures while the project's headline differentiator — contracts
-and modes — still cannot be touched from the GUI. The README says contracts
-"live beside the equations"; in the Studio they only live in the JSON file.
-Likewise the "evidence layer" of the plan has no output, and proving needs a
-tool most users (Windows installer; as far as we know Kind 2 publishes Linux
-and macOS builds only) won't have.
+| Step | Time |
+|---|---|
+| Import Lustre | 0.17 s |
+| Check | 0.07 s |
+| Generate C (19,000 lines) | 0.09 s |
+| Studio requests (tree, diagram, Lustre view) | ≤ 0.15 s |
+| Compile the C (`-O2`) | 6 s |
+| Simulate 2,000 cycles | 9.6 s (≈ 200 cycles/s; ≈ 1 µs per equation per cycle) |
+| Kind 2 (4,800 runtime-error checks, one run) | **no result in 10 min** |
 
-**Correctness debt found and fixed this round** (worth knowing because they
-were silent):
+Editing, checking and code generation scale; the simulator is usable but
+slow for long runs (item 24); proof does not scale past PMS-sized models
+(item 22).
 
-- An equation could assign an operator's **input** with no error — now
-  `E0022`.
-- Construct validation rejected a save if the owner had *any* type error, so
-  an operator fed by two constructs could never get its first one — now only
-  errors the edit *introduces* block a save.
-- Renaming or retyping a port did not propagate into the operator's state
-  machine (or activation) — it now does.
-- The canvas showed generated `__sm_*` / `__act_*` internals for any
-  operator owning a construct — constructs now render as single blocks.
-- Found by stepping the compiled C in lockstep with the simulator (item 6):
-  the simulator did not wrap sized integers on assignment (`uint8`
-  200 + 100 stayed 300; the C stores 44) — it now converts on store exactly
-  as C does; and it rejected enum-typed inputs outright — they now parse by
-  variant name.
-- Also found by it: `float32` was simulated in double precision, and a real
-  literal with an integral value (`0.0`) was emitted as a C *int* literal,
-  which silently kept neighbouring arithmetic in `float`. The simulator now
-  computes `float32` in single precision with C's promotion rules, real
-  literals are always C double literals, and both sides print reals with
-  one shortest round-trip algorithm (item 6b).
+## Done
 
-**Activation semantics now match SCADE** (item 4): branches are clocked and
-freeze when inactive; `last(v)` gives SCADE's `last 'v` for hold patterns.
-A model written for the earlier stage-1 semantics that used `pre v` inside a
-branch to mean "the previous cycle" should use `last(v)` instead.
+| # | Item | Notes |
+|---|---|---|
+| 1 | Contract editor + mode table | Building it found untyped contract clauses (now C0080), wrong library contracts, and stateless monitors (now observer nodes in sim and C). |
+| 2 | Stateful simulation session, live values on the diagram | Step / Run N / breakpoints / stop on violation. |
+| 3 | Waveform viewer | Live lanes, golden vs run, counterexamples; replay in the simulator. |
+| 4 | Clocked activation, `last(v)` | SCADE semantics: branches freeze when inactive. |
+| 5 | Model-to-code traceability | `@trace` per equation, trace matrix, generation report with SHA-256. |
+| 6, 6b | C in the loop; `float32` fidelity | Found that the simulator did not wrap sized integers and computed `float32` in double. |
+| 12 | Kind 2 provisioning | `kind2 doctor` / `install`; a dedicated Kind 2 view whose meaning matches the simulator and the C. |
+| 12b | Runtime errors over machine integers | Overflow, narrowing, division by zero, bounds, conversions — proved in the root's context. |
+| 13 | Evidence report | Per operator: checks, contract, proof, tests and coverage, model ≡ C, traceability. |
+| 16 | Downloads for Windows, Ubuntu and macOS | Found FMA contraction on ARM, Windows line endings, and Kind 2's Intel build needing Homebrew's ZeroMQ (now bundled). |
+| 17 | Studio access control | See below. |
 
+**17 — Studio access control (done 2026-10-05).** The Studio listened on
+127.0.0.1 only, but answered any request: a web page open in the same
+browser could edit the model, create folders, write generated files into
+any folder and start compiles (cross-site requests), and a page whose
+domain resolved to 127.0.0.1 could read the model (DNS rebinding). Now
+every request must address a loopback name (`Host`), come from the
+Studio's own page when a browser sends it (`Origin`), and carry the token
+drawn at each launch — a `SameSite=Strict`, `HttpOnly` cookie set by the
+launch link, or an `X-OpenLustre-Token` header for scripts
+(`OPENLUSTRE_STUDIO_TOKEN` fixes it). Responses forbid framing, sniffing,
+caching, cross-origin reads and `Referer`. Checked by unit tests, an
+end-to-end socket test, the installers' smoke tests on all three OSes, and
+in Chromium against an attacking page on another local port.
 
-## Recommendations
+## Next, in priority order
 
 Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 
-### P0 — close the gaps at the centre of both goals
+### P0 — before customers use it
 
-1. ✅ **Contract editor + mode table — done.** Contracts dialog with three
-   views (assume/guarantee rows, SCADE-style mode table, editable CoCoSpec
-   text), live dry-run checking that outlines offending rows, one contract
-   per operator with its interface kept in step with port edits.
-   *Correction to this plan:* the back end was **not** complete, as it
-   first said. Building the editor exposed that contract expressions were
-   never type-checked (now C0080), that five shipped library contracts
-   referenced undeclared names and one promised the opposite of its
-   block's behaviour (fixed, with ghost-variable support added to the
-   library format), and that both runtime monitors were stateless — `pre`
-   / `->` compiled to `1`, ghosts broke the C monitor's compile, and the
-   simulator skipped assumptions. Monitors now run each contract's
-   observer node in both the simulator and the generated C.
-2. ✅ **Stateful simulation session + live values on the diagram — done.**
-   A server-side session (its own thread holding the simulator's state)
-   replaces replay-from-zero stepping: Step runs one more cycle, Run N a
-   batch, and a run stops at a breakpoint condition (`cmd > 80`; stateless
-   expressions only, `pre` is refused) or at the first contract violation.
-   Every wire shows its current value, the active state and the fired
-   activation branch are highlighted on canvas blocks and in the chart
-   dialogs, and the contract chip shows the active modes and ✓ / violated
-   clauses. Model edits mark the session stale (a hash of the model with
-   layout stripped) and the next Step restarts it. The simulator gained
-   an incremental `step_observed` API that the batch CSV runner now uses
-   too, so the dock, `simulate` and the tests share one code path.
-3. ✅ **Waveform viewer — done.** One component, three uses. The
-   simulation session's cycles as live lanes (digital, stepped analog, bus,
-   and a contract-check status lane; stops marked), where picking a cycle
-   reviews it on the diagram and charts. Each test scenario's IR or C run
-   against its golden, the golden dashed underneath, differing cells
-   banded with the expected value and the first divergence marked. Kind 2
-   counterexamples, with the falsifying cycle marked and the text table
-   kept one click away. Scenarios and counterexamples replay in the live
-   simulator (`/api/sim/step` takes a per-cycle `sequence`), so a failure
-   can be stepped through on the diagram. Only the visible window is drawn,
-   so a 10000-cycle session redraws in milliseconds; a Table view shows
-   the same data for readers who don't want the chart.
-
-### P1 — SCADE semantics and code-generation quality
-
-4. ✅ **Clocked activation — done.** Each branch runs on its own nested
-   clock (`when not b1 … when gk`), every variable it reads is sampled onto
-   that clock by a local that holds while the branch is inactive, and the
-   outputs merge back — so `pre` / `->` / stateful calls inside a branch
-   freeze exactly as in SCADE. `last(v)` / `last(v, init)` provides SCADE's
-   `last 'v`. The simulator, the generated C (byte-identical traces, and in
-   lockstep under C in the loop) and the Lustre for Kind 2 (clocked locals
-   declared `x: int when c`) all run the same lowered clocks.
-5. ✅ **Model-to-code traceability — done.** Lowering records which owned
-   construct each equation came from; the generated C carries a one-line
-   ASCII `@trace` comment per equation (operator, diagram element, construct
-   role such as "branch Engaged computes cmd", model text); the trace matrix
-   gives each equation's line range; the generation report lists files with
-   SHA-256, operators (interface, step function, state fields, sub-instances,
-   constructs) and coverage. `emit-clite` writes `trace.json` and
-   `generation_report.{md,json}`; the Studio navigates C ↔ model both ways
-   and shows the report (Code ▸ Generation Report).
-6. ✅ **C-in-the-loop stepping — done.** A "C in the loop" toggle compiles
-   the simulated operator (reusing the build while the model is unchanged)
-   and runs its CSV driver as a child process, fed the same inputs each
-   cycle. Outputs and contract-monitor columns are compared every cycle
-   (enums by name, reals exactly — see 6b); the waveform draws the C
-   as each lane's reference, the watch table gains a C column, the diagram
-   shows "≠ C value" under a disagreeing output, and a Run stops at the
-   first divergence. Attaching mid-session replays the history first. It
-   found two simulator bugs on its first runs (above) and one open gap
-   (`float32`, above).
-6b. ✅ **Float32 fidelity — done.** The simulator has a single-precision
-   real: `float op float` computes in `float`; a `float64` operand or a real
-   literal promotes to `double` (C's usual arithmetic conversions); `if` /
-   `->` / `merge` take their branches' common type like `?:`; storing,
-   passing arguments, reading inputs and evaluating constants convert to
-   the declared type. The C emitter writes real literals as C double
-   literals (`0.0` used to come out as the int `0`), the CSV driver reads
-   `float32` inputs with `strtof`, and both sides print reals with one
-   shortest round-trip positional algorithm — so traces stay byte-identical
-   and C in the loop compares reals exactly. The integrator that drifted
-   now runs 10 000 cycles in lockstep; a filter / all-float / float64 /
-   cast / call mix matches over 3000 cycles (`tests/float_fidelity.rs`).
-7. **Target integration (M).** Cross-compilation toolchains (the Compile
-   dialog's disabled option), cyclic-task wrapper templates (bare-metal loop,
-   RTOS task), configurable symbol prefixes.
-
-### P2 — graphical depth
-
-8. **Auto-layout (M).** A layered, dependency-ordered "Arrange" for imported
-   Lustre and large operators; today new items stack in one column.
-9. **Graphical authoring of state machines and activations (L).** Draw
-   states, transitions and branches on the charts themselves (states already
-   drag and persist); keep the textual editors as the power path.
-10. **Canvas annotations, multiple diagrams per operator (S–M).**
-11. **Graphical contract/observer blocks (M)** — assume/guarantee placed on
-    the canvas, linked to contract clauses (after item 1).
-
-### P3 — evidence and tooling
-
-12. ✅ **Provision Kind 2 — done.** `openlustre kind2 doctor` finds Kind 2
-    and a solver (explicit path, env, tools folder, bundled, `PATH`) and
-    proves a sample property; `openlustre kind2 install` fetches the pinned
-    Kind 2 v2.2.0 + Z3 4.13.4 on Linux/macOS; release archives bundle them;
-    Windows gets WSL / Docker wrappers and guidance. CI installs the pair,
-    runs the Kind 2 conformance tests and proves every example. The Verify
-    dock shows the toolchain, proves with clause-level results, and runs
-    realizability and mode coverage. Running the real prover found that the
-    Lustre handed to Kind 2 had never parsed, and that Kind 2 cannot read
-    clocked locals and disagrees with C on `/`, `mod` and `int()`: the
-    prover now reads a dedicated Kind 2 view (contracts in node headers,
-    clock elimination checked against the clocked original, C-faithful
-    integer helpers). It also found a real gap in the example — its mode
-    table was not exhaustive — now fixed.
-12b. ✅ **Machine integers — done.** The proof no longer *assumes* that no
-    integer overflows: runtime-error checks (overflow at C's promoted width,
-    narrow stores, division by zero, index bounds, real → integer
-    conversion) are proved with the contract, in the context of the root —
-    SCADE Design Verifier's "runtime errors" analysis. Checks in callees are
-    passed up per call instance, so each is proved for the inputs its caller
-    can give it. On the PMS (then named SMS) they found an unbounded phase counter (an int32
-    overflow after 2³¹ cycles), now saturating; the other 59 hold.
-13. ✅ **Evidence report — done.** One document per operator — the plan's
-    "evidence layer": identification (interface, contract, model files'
-    SHA-256, a layout-independent fingerprint of the operator's slice),
-    static checks, the contract in CoCoSpec, the Kind 2 proof, tests with
-    decision and MC/DC coverage, model ≡ generated code (compiler identity,
-    flags, cycles compared), and traceability (generated files' SHA-256,
-    trace matrix). Each section is pass / gaps / fail / not run, with an
-    overall verdict. `openlustre evidence` writes standalone HTML (print to
-    PDF) and JSON and exits non-zero on FAIL; the Studio shows it under
-    Project ▸ Evidence Report.
-14. **Imported C operators in the GUI (M).** Register a manifest, place it as
-    a block, see its contract.
-
-### P4 — the bridge to SCADE, and shipping
-
-15. **Translate to SCADE (L).** Export a workspace as an Ansys SCADE Suite
-    project: operators, types and constants as SCADE textual models
-    (`.scade`, Scade 6 — itself a Lustre descendant), state machines and
-    activate-if blocks as SCADE's own constructs, contracts as comments or
-    observer operators, and the diagram layout where SCADE's graphical
-    format allows. Aim: a model prototyped here opens in SCADE and
-    regenerates with KCG, so demos and prototypes carry over. Needs a SCADE
-    installation to validate against; start with the textual export and a
-    round-trip test suite on the samples.
-16. ✅ **Downloads for Windows, Ubuntu and macOS — done.** One download
-    and installer per OS, built, installed and smoke-tested on that OS by
-    CI (`.github/workflows/package.yml`): a Setup.exe (and portable zip)
-    for Windows, a .deb (and tarball with `install.sh`) for Ubuntu, a .pkg
-    (and tarball) for macOS on Apple Silicon and Intel; the Linux and macOS
-    downloads bundle Kind 2. Running the suite on all three OSes found and
-    fixed two ways the generated C differed from the model (fused
-    multiply-add on ARM; line endings on Windows). Remaining: code signing
-    (Windows SmartScreen, macOS Gatekeeper/notarization) — a certificate
+18. **User documentation (M).** Today: the README and planning documents.
+    Needed: a getting-started tutorial (build an operator, simulate, test,
+    generate C, prove — 30 minutes), a PMS walkthrough, a reference for each
+    dock, the supported language with every error code (E0xxx, C0xxx), a
+    "coming from SCADE" page (pairs with item 15a), troubleshooting.
+19. **Model file format version (S).** `.wksc` files carry no version: a
+    format change in a later release would break or misread customers'
+    models. Add `format_version`, migrate older files on load, and keep
+    old files from every release as tests.
+20. **Automated Studio UI tests (M).** The Studio is a 7,500-line page with
+    no browser tests in CI; every UI check so far was by hand. A Playwright
+    suite (open the PMS, edit, simulate, test, generate, prove, evidence)
+    on all three OSes, using the Chromium the runners provide.
+21. **Release basics (S each).** A tagged release (`v0.1.0`; tags are
+    pushed from a maintainer's machine or GitHub's Releases page), a
+    CHANGELOG, SECURITY.md (how to report a vulnerability), issue
+    templates, `--version` naming the build (it prints `0.1.0` for every
+    dev build), the Windows installer's icon and a `.wksc` file association.
+    Code signing (Windows SmartScreen, macOS notarization) is a certificate
     cost, not code.
+31. **Studio UI hardening (M).** Models shared by others are untrusted
+    input: audit every place model text reaches the page (`innerHTML`) for
+    script injection, then move scripts out of inline handlers so a
+    Content-Security-Policy can forbid inline script. Item 17 keeps other
+    pages out; this keeps a malicious model from acting inside the page.
 
-### Deliberately not recommended now
+### P1 — the bridge to SCADE (item 15), timed to the SCADE licence
+
+15. **Export to SCADE (L).** A SCADE Suite licence is expected within six
+    months; the work splits so that everything not needing SCADE is ready
+    when it arrives.
+    - **15a — now, without SCADE:** a construct-by-construct mapping to
+      Scade 6 (types and constants; operators; `pre` / `->` / `fby`;
+      `last`; activate-if → `activate … if`; state machines → `automaton`,
+      strong and weak transitions; contracts → observer operators or
+      annotations; imported C → imported operators), written from the
+      published Scade 6 language reference; a **compatibility check** in
+      the Studio that flags anything with no SCADE equivalent, so
+      customers don't build into a dead end; a textual `.scade` exporter
+      for the dataflow subset first, then state machines and activations,
+      with golden-file tests on the PMS and release_logic samples.
+    - **15b — when the licence arrives:** run SCADE's checker and KCG on
+      every sample's export and fix what they reject; compare KCG's
+      generated C against ours on the samples' scenarios (the same
+      trace-equivalence test as model ≡ C); add the project file and the
+      diagram layout where SCADE's graphical format allows.
+    - **15c — later, if wanted:** import from SCADE (models that start in
+      SCADE and come here for demos).
+
+### P1 — proof and simulation at scale
+
+22. **Modular proofs (M–L).** Today one Kind 2 run checks the whole model,
+    with runtime-error checks lifted to the root per call; Kind 2's modular
+    and compositional modes are not used. Prove each operator on its own,
+    callees abstracted by their contracts; check runtime errors per
+    operator under its assumptions; run operators in parallel; cache
+    results by the per-operator fingerprint the evidence report already
+    computes, so an edit re-proves only what changed; report partial
+    results on timeout.
+23. **`prove` on a timeout with no results (S, bug).** When Kind 2 times out
+    before reporting anything, `openlustre prove` exits with "Kind 2
+    reported no properties"; it should list every check as unknown (timed
+    out), as it does when some results arrive.
+24. **Simulator speed (M).** The simulator interprets the model (≈ 1 µs per
+    equation per cycle). Run long batch tests on the compiled C (already
+    wired for C in the loop), or compile the model to a faster form.
+25. **Kind 2 on Windows (S–M).** No native Kind 2 build exists; a guided WSL
+    setup from the Verify dock (detect WSL, install Kind 2 + Z3 inside it,
+    point `OPENLUSTRE_KIND2` at the wrapper).
+
+### P2 — targets and code
+
+7. **Target integration (M).** Cross-compilation toolchains (the Compile
+   dialog's disabled option), cyclic-task templates (bare-metal loop, RTOS
+   task), configurable symbol prefixes. A demo on a real board (STM32,
+   Raspberry Pi) shows the whole chain.
+27. **Generated-code checks (M).** MISRA C on the generated code (cppcheck's
+    MISRA add-on) in CI with a deviation list; stack-usage and code-size
+    reports in the generation report.
+14. **Imported C operators in the Studio (M).** Register a manifest, place
+    it as a block, see its contract.
+
+### P2 — language and diagram depth (by customer demand)
+
+26. **Scade 6 language coverage (L in total).** Iterators beyond `map` /
+    `fold` over stateless single-output functions (`mapi`, `foldi`,
+    `mapfold`, partial iterators `mapw` / `foldw`, stateful iteration);
+    generic operators (type and size parameters); enumerated clocks;
+    state-machine signals and richer parallel regions; line and column in
+    Import Lustre errors. Item 15a's mapping shows which matter first for
+    export.
+8. **Auto-layout (M).** A layered arrangement for imported and large
+   operators — today a 200-call operator imports as one long column.
+9. **Drawing states, transitions and branches on the charts (L).** Keep the
+   textual editors as the power path.
+10. **Multiple diagrams per operator, annotations (S–M).**
+11. **Contract and observer blocks on the canvas (M).**
+
+### P3 — verification depth
+
+28. **Test generation (M).** Ask Kind 2 for scenarios that cover the MC/DC
+    conditions the tests miss; masking MC/DC for coupled conditions.
+29. **Requirements traceability (M).** Requirement objects (today:
+    contract clause names), ReqIF import / export, coverage per
+    requirement in the evidence report.
+30. **Later.** Semantic model diff and merge for git; a design-document
+    generator; FMU export for co-simulation.
+
+## Suggested order
+
+1. ✅ 17 Studio access control.
+2. 19 model format version, 23 the timeout bug — small, and they protect
+   customers' work and trust.
+3. 18 documentation and 20 UI tests — before wider demos.
+4. 15a SCADE mapping, compatibility check and textual export — ready
+   when the licence arrives (then 15b).
+5. 22 modular proofs — models bigger than the PMS.
+6. 31 UI hardening, 21 release basics.
+7. 7 target integration (a board demo), then the rest by what customers
+   ask for.
+
+### Deliberately not now
 
 - **Rewriting the GUI on Tauri + ReactFlow** (the plan's long-term stack).
-  The in-binary SPA is working, tested, and shipping; a stack switch now is
-  churn that delivers none of the items above.
+  The in-binary page works, is tested end to end through its API, and
+  ships on three OSes; item 20 gives it browser tests instead.
 
 ## Reference project
 
-[`examples/pms`](../examples/pms) — a drone Payload Management System built
-end to end in the Studio from an implementation plan — exercises the whole
-chain on a realistic design: Import Lustre, an owned state machine, an
+[`examples/pms`](../examples/pms) (its own repository,
+`Shepherdhunt/PayloadManagementSystem`) — a drone Payload Management System
+built end to end in the Studio: Import Lustre, a state machine, an
 activation decision tree, contracts on every operator, scenarios with full
-MC/DC, C equivalence, 171 Kind 2 proofs (60 of them runtime-error checks)
-and a PASS evidence report. Building
-it surfaced and fixed: edits and the contract live check not seeing the
-workspace's `types.json`; enum outputs in state machines; unreachable
-terminal branches in state-machine and activation lowering that no test
-could cover; the C test driver not reading or printing enum names; and a
-false C0021 warning on constants in assumptions.
-
-## Suggested next step
-
-Item 12 is done: proofs run for real — locally in one command, in the
-Studio, and in CI on every example — against a Kind 2 view whose meaning
-matches the simulator and the generated C.
-
-Item **7** (target integration: cross-compilation, cyclic-task wrappers) is
-the last P1 item, and item **9** (drawing states and branches directly on the
-charts) the biggest remaining graphical gap with SCADE. Proving over machine
-integers (12b) is done: the "no overflow" assumption is now something the
-proof checks.
+MC/DC, model ≡ C, 171 Kind 2 proofs (60 of them runtime-error checks) and
+a PASS evidence report. Growing it into a much larger sample (more
+stations and airframes, sensor redundancy, release safety, mode logic,
+multi-rate timing, flight-stack integration) is proposed; its size will
+also exercise items 22 and 24.

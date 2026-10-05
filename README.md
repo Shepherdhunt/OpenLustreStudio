@@ -269,6 +269,12 @@ openlustre studio launch                 # a welcome project in ~/OpenLustre
 openlustre studio launch --sample pms    # the Payload Management System sample
 ```
 
+The Studio answers only its own page: the link it opens carries a token
+drawn at each launch, and requests from other web pages are refused (see
+[`apps/studio_ui/README.md`](apps/studio_ui/README.md#openlustre-studio-ui)).
+If you close the tab while the Studio runs, open the link printed in its
+console again (or its address without the token, in the same browser).
+
 To build the downloads yourself: `packaging/linux/build.sh <version>`,
 `packaging/macos/build.sh <version> <aarch64|x86_64>`, or
 `packaging\windows\build-installer.ps1 -Version <version>`; each OS has a

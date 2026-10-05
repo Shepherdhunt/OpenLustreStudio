@@ -1189,9 +1189,13 @@ fn serve_studio(
     let listener = studio_server::bind(studio_server::loopback(port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let local = listener.local_addr()?;
-    let url = format!("http://{local}");
+    // The link carries this launch's token; without it the Studio refuses
+    // requests (other web pages must not drive it).
+    let token = studio_server::launch_token().map_err(anyhow::Error::msg)?;
+    let access = studio_server::Access::new(token, local.port());
+    let url = access.launch_url();
     println!("studio: serving {url} (model: {})", model.display());
-    println!("studio: ctrl-c to stop.");
+    println!("studio: open that link (it includes this launch's access token); ctrl-c to stop.");
     if open_browser {
         open_in_browser(&url);
     }
@@ -1213,6 +1217,7 @@ fn serve_studio(
         history: Default::default(),
         sim: Default::default(),
         c_cache: Default::default(),
+        access,
     };
     studio_server::serve(listener, ctx)?;
     Ok(())

@@ -1,6 +1,9 @@
 # OpenLustre Studio vs. Ansys SCADE Suite — gap analysis
 
-*Updated 2026-06-16.*
+*Updated 2026-06-16. Historical: kept for its log of what closed when (§6).
+Several gaps listed below have closed since (orthogonal wires, zoom/pan,
+copy/paste, MC/DC, the Kind 2 toolchain, downloads for three OSes). The
+current plan is [`scade-parity-roadmap.md`](scade-parity-roadmap.md).*
 
 OpenLustre Studio aims to be the open, SCADE-shaped workbench: author synchronous
 dataflow models graphically, check them, simulate them deterministically, prove

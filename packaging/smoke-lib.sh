@@ -10,13 +10,17 @@ check_installed() {  # openlustre command, label, installed examples folder
     mkdir -p "$WORK/home"
     HOME="$WORK/home" env -u OPENLUSTRE_TOOLS -u OPENLUSTRE_KIND2 -u OPENLUSTRE_Z3 "$OL" kind2 doctor | tee "$WORK/doctor.txt"
     grep -q "via bundled" "$WORK/doctor.txt"
-    HOME="$WORK/home" "$OL" studio launch --sample pms --no-open --port 8471 > "$WORK/serve.log" 2>&1 &
+    T=openlustre-smoke-token
+    HOME="$WORK/home" OPENLUSTRE_STUDIO_TOKEN=$T "$OL" studio launch --sample pms --no-open --port 8471 > "$WORK/serve.log" 2>&1 &
     PID=$!
     for _ in $(seq 1 50); do
-        curl -fs http://127.0.0.1:8471/api/inspect > /dev/null 2>&1 && break
+        curl -fs http://127.0.0.1:8471/api/health > /dev/null 2>&1 && break
         sleep 0.2
     done
-    curl -fs http://127.0.0.1:8471/ | grep -q "OpenLustre Studio" || { cat "$WORK/serve.log"; exit 1; }
+    # The Studio serves its launch token, and nothing to a request without it.
+    curl -fs -H "X-OpenLustre-Token: $T" http://127.0.0.1:8471/ | grep -q 'id="diagram-status"' || { cat "$WORK/serve.log"; exit 1; }
+    curl -fs -H "X-OpenLustre-Token: $T" http://127.0.0.1:8471/api/inspect > /dev/null
+    test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8471/api/inspect)" = 403
     kill $PID
     PMS="$WORK/home/OpenLustre/samples/pms"
     "$OL" check "$PMS/pms.wksc"

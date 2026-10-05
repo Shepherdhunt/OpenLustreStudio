@@ -10,6 +10,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 fn make_tempdir(tag: &str) -> PathBuf {
     use std::time::{SystemTime, UNIX_EPOCH};
     let stamp = SystemTime::now()
@@ -43,6 +46,7 @@ fn setup_project(tmp: &PathBuf) -> PathBuf {
 
 fn openlustre(args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--"])
         .args(args)
         .output()
@@ -113,6 +117,7 @@ fn a_long_scenario_runs_on_the_compiled_c() {
     assert!(ok, "record failed: {out}");
     // Run with a deadline: the bug showed as a hang, not a failure.
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "test", "run", model.to_str().unwrap(), "--scenarios"])
         .arg(&scen)
         .args(["--backend", "c"])
@@ -225,6 +230,7 @@ fn start_server() -> ServerGuard {
     let model = setup_project(&tmp);
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "serve"])
         .arg(&model)
         .arg("--port")
@@ -267,7 +273,7 @@ fn start_server() -> ServerGuard {
 fn request(port: u16, method: &str, path: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(req.as_bytes()).ok()?;
     stream.shutdown(Shutdown::Write).ok();

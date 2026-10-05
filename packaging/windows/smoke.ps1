@@ -21,18 +21,26 @@ function Check-Installed([string]$ol, [string]$label) {
     New-Item -ItemType Directory -Force $home2 | Out-Null
     $saved = $env:USERPROFILE
     $env:USERPROFILE = $home2
+    $token = "openlustre-smoke-token"
+    $env:OPENLUSTRE_STUDIO_TOKEN = $token
     try {
         $server = Start-Process $ol -ArgumentList "studio", "launch", "--sample", "pms", "--no-open", "--port", "8471" `
             -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work "serve.log") -RedirectStandardError (Join-Path $work "serve.err")
         $up = $false
         for ($i = 0; $i -lt 50 -and -not $up; $i++) {
-            try { Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8471/api/inspect" | Out-Null; $up = $true } catch { Start-Sleep -Milliseconds 200 }
+            try { Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8471/api/health" | Out-Null; $up = $true } catch { Start-Sleep -Milliseconds 200 }
         }
-        $page = (Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8471/").Content
+        # The Studio serves its launch token, and nothing to a request without it.
+        $auth = @{ "X-OpenLustre-Token" = $token }
+        $page = (Invoke-WebRequest -UseBasicParsing -Headers $auth "http://127.0.0.1:8471/").Content
+        Invoke-WebRequest -UseBasicParsing -Headers $auth "http://127.0.0.1:8471/api/inspect" | Out-Null
+        $refused = (Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck "http://127.0.0.1:8471/api/inspect").StatusCode
         Stop-Process $server
-        if (-not $up -or $page -notmatch "OpenLustre Studio") { Get-Content (Join-Path $work "serve.log"); throw "the Studio did not serve" }
+        if (-not $up -or $page -notmatch 'id="diagram-status"') { Get-Content (Join-Path $work "serve.log"); throw "the Studio did not serve" }
+        if ($refused -ne 403) { throw "the Studio answered a request without its token ($refused)" }
     } finally {
         $env:USERPROFILE = $saved
+        Remove-Item Env:OPENLUSTRE_STUDIO_TOKEN
     }
     $pms = Join-Path $home2 "OpenLustre\samples\pms"
     & $ol check (Join-Path $pms "pms.wksc"); Check "check"
