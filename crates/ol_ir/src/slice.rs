@@ -278,6 +278,7 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
         .cloned()
         .collect();
     Ok(Project {
+        format_version: project.format_version,
         name: project.name.clone(),
         packages,
         main: Some(root.to_string()),

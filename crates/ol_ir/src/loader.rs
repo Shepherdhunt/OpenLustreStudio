@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
+use crate::format::{ParseError, Syntax};
 use crate::project::Project;
 
 #[derive(Debug, Error)]
@@ -29,6 +30,12 @@ pub enum LoadError {
     UnsupportedExtension { path: String },
     #[error("cyclic include detected at {0}")]
     CyclicInclude(String),
+    #[error("{path}: {source}")]
+    Format {
+        path: String,
+        #[source]
+        source: crate::format::FormatError,
+    },
 }
 
 /// Load a `Project` from disk.
@@ -119,30 +126,18 @@ fn load_file_and_includes(
     Ok(project)
 }
 
+/// One model file: `.wksc` (the workspace file) and `.json` are JSON,
+/// `.ols` / `.yaml` / `.yml` YAML — the same `Project` schema, in a format
+/// whose version [`crate::format::parse`] checks (and upgrades if older).
 fn parse_single_file(path: &Path) -> Result<Project, LoadError> {
-    let data = std::fs::read_to_string(path).map_err(|e| LoadError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
-    match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("ols") | Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&data).map_err(|e| LoadError::Yaml {
-                path: path.display().to_string(),
-                source: e,
-            })
-        }
-        // `.wksc` is the workspace file — JSON content, same `Project` schema.
-        Some("json") | Some("wksc") => serde_json::from_str(&data).map_err(|e| LoadError::Json {
-            path: path.display().to_string(),
-            source: e,
-        }),
-        _ => Err(LoadError::UnsupportedExtension {
-            path: path.display().to_string(),
-        }),
-    }
+    let shown = || path.display().to_string();
+    let Some(syntax) = Syntax::of(path) else {
+        return Err(LoadError::UnsupportedExtension { path: shown() });
+    };
+    let data = std::fs::read_to_string(path).map_err(|e| LoadError::Io { path: shown(), source: e })?;
+    crate::format::parse(&data, syntax).map_err(|e| match e {
+        ParseError::Json(source) => LoadError::Json { path: shown(), source },
+        ParseError::Yaml(source) => LoadError::Yaml { path: shown(), source },
+        ParseError::Format(source) => LoadError::Format { path: shown(), source },
+    })
 }

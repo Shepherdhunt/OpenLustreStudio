@@ -1,6 +1,6 @@
 # OpenLustre Studio — roadmap
 
-Status as of 2026-10-05 (main at 57cfc76, plus Studio access control).
+Status as of 2026-10-05 (main at 83c88b9, plus the model format version).
 This document is the plan: where the Studio stands, what a gap review and a
 scale test found, and what to build next, in priority order.
 `docs/SCADE_GAP_ANALYSIS.md` is the earlier, June analysis, kept for its
@@ -39,6 +39,7 @@ generated C that provably behaves like the simulated model.
 | Imported C operators | ✅ manifests, wrappers | ❌ cannot be registered or placed (item 14) |
 | Downloads | ✅ Windows Setup.exe + zip, Ubuntu .deb + tarball, macOS .pkg + tarball (Apple Silicon, Intel), smoke-tested in CI | — |
 | Studio access control | ✅ per-launch token, Host and Origin checks (item 17) | ✅ |
+| Model file format | ✅ versioned; older formats upgraded, newer refused (item 19) | ✅ backup before an upgrading save |
 | Export to SCADE | ❌ (item 15) | ❌ |
 
 ### Scale (measured 2026-10-05)
@@ -75,6 +76,7 @@ slow for long runs (item 24); proof does not scale past PMS-sized models
 | 13 | Evidence report | Per operator: checks, contract, proof, tests and coverage, model ≡ C, traceability. |
 | 16 | Downloads for Windows, Ubuntu and macOS | Found FMA contraction on ARM, Windows line endings, and Kind 2's Intel build needing Homebrew's ZeroMQ (now bundled). |
 | 17 | Studio access control | See below. |
+| 19 | Model file format version | Every model file starts with `format_version` (now 1; files without one — 0.1.0 — are format 1). Older formats are upgraded in memory one migration at a time, newer ones refused with a clear message instead of misread; the save that upgrades a file keeps the old one as `<file>.format<N>.bak`. The 0.1.0 sample files are kept as fixtures whose scenarios must still pass (`docs/model-format.md`). |
 
 **17 — Studio access control (done 2026-10-05).** The Studio listened on
 127.0.0.1 only, but answered any request: a web page open in the same
@@ -101,10 +103,6 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
     generate C, prove — 30 minutes), a PMS walkthrough, a reference for each
     dock, the supported language with every error code (E0xxx, C0xxx), a
     "coming from SCADE" page (pairs with item 15a), troubleshooting.
-19. **Model file format version (S).** `.wksc` files carry no version: a
-    format change in a later release would break or misread customers'
-    models. Add `format_version`, migrate older files on load, and keep
-    old files from every release as tests.
 20. **Automated Studio UI tests (M).** The Studio is a 7,500-line page with
     no browser tests in CI; every UI check so far was by hand. A Playwright
     suite (open the PMS, edit, simulate, test, generate, prove, evidence)
@@ -207,8 +205,8 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 ## Suggested order
 
 1. ✅ 17 Studio access control.
-2. 19 model format version, 23 the timeout bug — small, and they protect
-   customers' work and trust.
+2. ✅ 19 model format version; 23 the timeout bug — small, and it keeps
+   long proofs from ending in an error.
 3. 18 documentation and 20 UI tests — before wider demos.
 4. 15a SCADE mapping, compatibility check and textual export — ready
    when the licence arrives (then 15b).

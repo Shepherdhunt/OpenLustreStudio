@@ -90,6 +90,10 @@ impl Package {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Project {
+    /// Written first in every model file: the format it is in (see
+    /// [`crate::format`]).
+    #[serde(default)]
+    pub format_version: crate::format::CurrentFormat,
     pub name: String,
     #[serde(default)]
     pub packages: Vec<Package>,

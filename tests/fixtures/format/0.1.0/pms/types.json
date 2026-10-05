@@ -1,0 +1,215 @@
+{
+  "name": "types",
+  "packages": [
+    {
+      "name": "user",
+      "types": [
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "StoreKind",
+            "variants": [
+              "Empty",
+              "MedKit",
+              "SensorPod",
+              "WaterPack",
+              "SupplyCrate",
+              "Unknown"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "StationStatus",
+            "variants": [
+              "Vacant",
+              "Loaded",
+              "Mismatch",
+              "Hung"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "SeqPhase",
+            "variants": [
+              "PhSafe",
+              "PhReady",
+              "PhFiring",
+              "PhJettison",
+              "PhVerify"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "Inhibit",
+            "variants": [
+              "Clear",
+              "NotArmed",
+              "OnGround",
+              "StationFault",
+              "LowAltitude",
+              "NoMatchingStore",
+              "WouldUnbalance"
+            ]
+          }
+        }
+      ],
+      "constants": [
+        {
+          "name": "ARM_X",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 150
+            }
+          }
+        },
+        {
+          "name": "ARM_Y",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 200
+            }
+          }
+        },
+        {
+          "name": "MASS_MEDKIT",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 1200
+            }
+          }
+        },
+        {
+          "name": "MASS_SENSORPOD",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 800
+            }
+          }
+        },
+        {
+          "name": "MASS_WATERPACK",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 1500
+            }
+          }
+        },
+        {
+          "name": "MASS_SUPPLYCRATE",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 2000
+            }
+          }
+        },
+        {
+          "name": "ROLL_LIMIT",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 250000
+            }
+          }
+        },
+        {
+          "name": "PITCH_LIMIT",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 400000
+            }
+          }
+        },
+        {
+          "name": "MIN_RELEASE_ALT",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 15
+            }
+          }
+        },
+        {
+          "name": "PULSE_CYCLES",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 3
+            }
+          }
+        },
+        {
+          "name": "VERIFY_CYCLES",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 5
+            }
+          }
+        }
+      ],
+      "nodes": [],
+      "contracts": [],
+      "imported_operators": [],
+      "state_machines": []
+    }
+  ],
+  "main": null,
+  "includes": []
+}

@@ -179,3 +179,7 @@ path = "pms_example.rs"
 [[test]]
 name = "runtime_errors"
 path = "runtime_errors.rs"
+
+[[test]]
+name = "model_format"
+path = "model_format.rs"

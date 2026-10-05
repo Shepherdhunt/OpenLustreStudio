@@ -1605,33 +1605,26 @@ fn build_diagram(
 /// state-machine lowering — still runs on the *read* path (`load`), so
 /// diagnostics reflect the complete picture.
 fn load_raw_path(path: &std::path::Path) -> Result<ol_ir::Project, String> {
+    use ol_ir::format::{ParseError, Syntax};
+    let syntax = Syntax::of(path).ok_or_else(|| format!("unsupported model extension: {}", path.display()))?;
     let data = std::fs::read_to_string(path)
         .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        // `.wksc` is the workspace file: JSON content, same `Project` schema.
-        Some("json") | Some("wksc") => serde_json::from_str(&data).map_err(|e| format!("JSON: {e}")),
-        Some("ols") | Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&data).map_err(|e| format!("YAML: {e}"))
-        }
-        other => Err(format!("unsupported model extension: {other:?}")),
-    }
+    ol_ir::format::parse(&data, syntax).map_err(|e| match e {
+        ParseError::Json(e) => format!("JSON: {e}"),
+        ParseError::Yaml(e) => format!("YAML: {e}"),
+        ParseError::Format(e) => format!("{}: {e}", path.display()),
+    })
 }
 
+/// Write `project` over `path` in the current model format — after keeping
+/// a copy of the file if it was in an older one (`<file>.format<N>.bak`).
 fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(), String> {
-    let text = match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("json") | Some("wksc") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
+    let text = match ol_ir::format::Syntax::of(path) {
+        Some(ol_ir::format::Syntax::Json) => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
         _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
     };
+    ol_ir::format::backup_before_upgrade(path)
+        .map_err(|e| format!("keeping a copy of {} before upgrading its format: {e}", path.display()))?;
     std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
