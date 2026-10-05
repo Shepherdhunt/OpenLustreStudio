@@ -112,7 +112,7 @@ fn generation_report_fingerprints_files_and_counts_coverage() {
 
 #[test]
 fn emit_clite_writes_the_trace_matrix_and_report() {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let tmp = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_traceability_{stamp}"));
     std::fs::create_dir_all(&tmp).unwrap();
     let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/release_logic/model/release_logic.json");

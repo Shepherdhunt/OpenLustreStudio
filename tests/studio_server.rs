@@ -330,3 +330,34 @@ fn the_studio_refuses_requests_without_its_token_or_from_other_pages() {
     let own = format!("GET /api/inspect HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: http://127.0.0.1:{port}\r\nCookie: {cookie}");
     assert_eq!(raw(port, &own).0, 200);
 }
+
+/// The Studio keeps serving when nobody reads its output any more (started
+/// from a launcher, or piped into a program that exited): its status lines
+/// must not make it fail. Its stdout is closed before it prints anything.
+#[test]
+fn the_studio_keeps_serving_with_its_output_closed() {
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap().local_addr().unwrap().port();
+    let model = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../examples/release_logic/model/release_logic.json");
+    let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
+        .args(["run", "-q", "-p", "ol_cli", "--", "studio", "serve"])
+        .arg(&model)
+        .args(["--port", &port.to_string()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("cargo run studio serve");
+    drop(child.stdout.take());
+    let g = ServerGuard { child, port };
+    let mut answered = None;
+    for _ in 0..600 {
+        answered = http_get(g.port, "/api/inspect");
+        if answered.is_some() {
+            break;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    let (s, _, _) = answered.expect("the Studio stopped when its output was closed");
+    assert_eq!(s, 200);
+}

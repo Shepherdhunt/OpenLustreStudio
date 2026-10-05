@@ -31,11 +31,7 @@ impl Drop for ServerGuard {
 }
 
 fn start_server_on_copy() -> ServerGuard {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_edit_{stamp}"));
     std::fs::create_dir_all(&tmp).unwrap();
     let model = tmp.join("model.json");
