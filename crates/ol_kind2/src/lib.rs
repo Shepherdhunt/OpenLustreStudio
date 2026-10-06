@@ -60,7 +60,7 @@ impl Default for Kind2Options {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Kind2Result {
     pub invocation: Vec<String>,
     pub exit_code: i32,

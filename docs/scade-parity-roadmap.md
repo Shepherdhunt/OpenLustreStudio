@@ -1,6 +1,6 @@
 # OpenLustre Studio — roadmap
 
-Status as of 2026-10-05 (main at 83c88b9, plus the model format version).
+Status as of 2026-10-06 (main at 0e916d9, plus the proof-timeout fix).
 This document is the plan: where the Studio stands, what a gap review and a
 scale test found, and what to build next, in priority order.
 `docs/SCADE_GAP_ANALYSIS.md` is the earlier, June analysis, kept for its
@@ -76,6 +76,7 @@ slow for long runs (item 24); proof does not scale past PMS-sized models
 | 13 | Evidence report | Per operator: checks, contract, proof, tests and coverage, model ≡ C, traceability. |
 | 16 | Downloads for Windows, Ubuntu and macOS | Found FMA contraction on ARM, Windows line endings, and Kind 2's Intel build needing Homebrew's ZeroMQ (now bundled). |
 | 17 | Studio access control | See below. |
+| 23 | A proof that runs out of time reads as unknown | Kind 2 reports only the properties it reached before its timeout — on a large model none, on the PMS with a short timeout as few as 4 of 171 — and that read as "Kind 2 reported no properties" or as fewer checks ("0 of 0 runtime-error checks hold"). The CLI, the Verify dock and the evidence report now list every runtime-error check Kind 2 did not report as unknown, name the contracts it never reached (their properties are numbered per call instance by Kind 2, so they cannot be listed before it does), and say what to try. |
 | 19 | Model file format version | Every model file starts with `format_version` (now 1; files without one — 0.1.0 — are format 1). Older formats are upgraded in memory one migration at a time, newer ones refused with a clear message instead of misread; the save that upgrades a file keeps the old one as `<file>.format<N>.bak`. The 0.1.0 sample files are kept as fixtures whose scenarios must still pass (`docs/model-format.md`). |
 
 **17 — Studio access control (done 2026-10-05).** The Studio listened on
@@ -153,10 +154,6 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
     results by the per-operator fingerprint the evidence report already
     computes, so an edit re-proves only what changed; report partial
     results on timeout.
-23. **`prove` on a timeout with no results (S, bug).** When Kind 2 times out
-    before reporting anything, `openlustre prove` exits with "Kind 2
-    reported no properties"; it should list every check as unknown (timed
-    out), as it does when some results arrive.
 24. **Simulator speed (M).** The simulator interprets the model (≈ 1 µs per
     equation per cycle). Run long batch tests on the compiled C (already
     wired for C in the loop), or compile the model to a faster form.
@@ -205,8 +202,7 @@ Sizes: **S** ≈ a session, **M** ≈ 2–3 sessions, **L** ≈ 4+.
 ## Suggested order
 
 1. ✅ 17 Studio access control.
-2. ✅ 19 model format version; 23 the timeout bug — small, and it keeps
-   long proofs from ending in an error.
+2. ✅ 19 model format version, ✅ 23 a timeout reads as unknown.
 3. 18 documentation and 20 UI tests — before wider demos.
 4. 15a SCADE mapping, compatibility check and textual export — ready
    when the licence arrives (then 15b).

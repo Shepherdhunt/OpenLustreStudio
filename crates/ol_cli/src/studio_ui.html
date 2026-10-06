@@ -4537,7 +4537,10 @@ async function proveRun(mode) {
       (fails ? ' · <span class="bad">✗ ' + fails + " failed</span>" : "") + (unk ? ' · <span class="unk">? ' + unk + " unknown</span>" : "") +
       ' <span class="build-note">— ' + escapeHTML(data.toolchain || "") + "</span></div>";
     if (data.timed_out && unk) {
-      html += '<div class="diag severity-Warning">Kind 2 stopped at the ' + escapeHTML(t) + ' s timeout: the unknown properties were neither proved nor refuted — raise the timeout, or (for a runtime error) bound the value, e.g. saturate a counter.</div>';
+      html += '<div class="diag severity-Warning">Kind 2 stopped at the ' + escapeHTML(t) + ' s timeout: the unknown properties were neither proved nor refuted' +
+        (data.not_reached ? " (" + data.not_reached + " runtime-error checks never reached)" : "") +
+        " — raise the timeout, or (for a runtime error) bound the value, e.g. saturate a counter." +
+        ((data.unreached_contracts || []).length ? " Not reached at all, so not listed: the properties of " + data.unreached_contracts.map(escapeHTML).join(", ") + "." : "") + "</div>";
     }
     html += '<table class="k2-table"><thead><tr><th>property</th><th>kind</th><th>clause</th><th>result</th><th></th></tr></thead><tbody>';
     const row = (p, i) => {
@@ -4576,6 +4579,10 @@ async function proveRun(mode) {
     if ((data.notes || []).length) {
       html += '<div class="k2-assume">The proof assumes: ' + data.notes.map(escapeHTML).join("; ") + ".</div>";
     }
+  } else if (data.timed_out && !(data.errors || []).length) {
+    html += '<div class="diag severity-Warning">Kind 2 stopped at the ' + escapeHTML(t) + " s timeout before settling any property — nothing was proved or refuted" +
+      ((data.unreached_contracts || []).length ? " (not reached: the properties of " + data.unreached_contracts.map(escapeHTML).join(", ") + ")" : "") +
+      ". Try: " + escapeHTML(data.timeout_advice || "a longer timeout") + ".</div>";
   } else if (!(data.errors || []).length) {
     html += "<p>No parseable property results.</p><pre>" + escapeHTML(data.stdout_tail || "") + "</pre>";
   }

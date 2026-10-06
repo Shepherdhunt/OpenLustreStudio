@@ -2053,8 +2053,10 @@ fn prove_run(
         timeout_seconds: timeout,
         ..Default::default()
     });
-    let result = ol_kind2::run_kind2(&lus_path, &opts).map_err(|e| e.to_string())?;
+    let mut result = ol_kind2::run_kind2(&lus_path, &opts).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&work);
+    // Stopped at the timeout, Kind 2 leaves out what it had not reached.
+    let unreached = crate::proof::complete(&mut result, &input, &project, &[]);
 
     let kind2_found = !(result.exit_code == -1 && result.stderr.contains("could not launch"));
     let properties: Vec<serde_json::Value> = result
@@ -2114,6 +2116,9 @@ fn prove_run(
         "notes": input.notes,
         "runtime_errors": input.checks.len(),
         "timed_out": result.timed_out,
+        "not_reached": unreached.checks,
+        "unreached_contracts": unreached.contracts,
+        "timeout_advice": crate::proof::timeout_advice(runtime_errors),
         "stdout_tail": stdout_tail,
         "hint": if kind2_found && result.errors.is_empty() { serde_json::Value::Null } else if !kind2_found {
             serde_json::Value::String(format!("kind2 not found — {}", guidance.first().cloned().unwrap_or_default()))

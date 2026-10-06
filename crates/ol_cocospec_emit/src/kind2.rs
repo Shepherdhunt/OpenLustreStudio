@@ -37,7 +37,7 @@ use ol_typecheck::ExprTyper;
 use crate::rte::{self, RteCheck};
 
 /// The generated Kind 2 input.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Kind2Input {
     pub text: String,
     /// What the proof assumes about the model, in plain words.

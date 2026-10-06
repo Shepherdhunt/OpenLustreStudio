@@ -183,3 +183,7 @@ path = "runtime_errors.rs"
 [[test]]
 name = "model_format"
 path = "model_format.rs"
+
+[[test]]
+name = "prove_timeout"
+path = "prove_timeout.rs"

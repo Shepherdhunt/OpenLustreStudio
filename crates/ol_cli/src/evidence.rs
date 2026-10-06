@@ -530,7 +530,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         _ => None,
     };
     let _ = std::fs::remove_dir_all(&work);
-    let result = match result {
+    let mut result = match result {
         Ok(r) => r,
         Err(e) => return (Status::NotRun, info(&format!("Kind 2 could not run: {e}"))),
     };
@@ -541,6 +541,13 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
     if let Some(e) = result.errors.first() {
         return (Status::Gaps, info(&format!("Kind 2 could not analyse the model: {e}")));
     }
+    // Stopped at the timeout, Kind 2 leaves out what it had not reached.
+    let unreached = crate::proof::complete(&mut result, &input, slice, &[]);
+    let not_reached = if unreached.contracts.is_empty() {
+        String::new()
+    } else {
+        format!("; not reached: the properties of {}", unreached.contracts.join(", "))
+    };
     // Runtime-error checks in property order (the root's own, then call by
     // call), after the contract's properties.
     let rte_no = |name: &str| input.check(name).and_then(|c| c.name.trim_start_matches("rte").parse::<usize>().ok());
@@ -591,7 +598,14 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
         realizability,
     };
     if info.properties.is_empty() {
-        info.note = "Kind 2 ran but reported no properties".into();
+        info.note = if result.timed_out {
+            format!(
+                "Kind 2 stopped at the timeout before settling any property — nothing was proved or refuted{not_reached} ({})",
+                crate::proof::timeout_advice(!input.checks.is_empty())
+            )
+        } else {
+            "Kind 2 ran but reported no properties".into()
+        };
         return (Status::Gaps, info);
     }
     let fails = result.properties.iter().filter(|p| p.outcome() == ol_kind2::Outcome::Fails).count();
@@ -619,7 +633,7 @@ fn prove(slice: &Project, root: &str, has_contract: bool, opts: Option<&Prove>) 
             )
         },
         if info.realizability.is_empty() { String::new() } else { format!("; contract {}", info.realizability) },
-        if result.timed_out && holds < n { "; Kind 2 stopped at the timeout" } else { "" },
+        if result.timed_out && holds < n { format!("; Kind 2 stopped at the timeout{not_reached}") } else { String::new() },
     );
     (status, info)
 }

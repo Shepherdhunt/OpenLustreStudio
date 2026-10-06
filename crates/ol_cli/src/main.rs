@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 mod evidence;
 mod lustre_import;
+mod proof;
 mod prover;
 mod scenario;
 mod studio_server;
@@ -1035,7 +1036,7 @@ fn cmd_prove(
         timeout_seconds: timeout,
         properties: properties.to_vec(),
     };
-    let result = ol_kind2::run_kind2(&lus_path, &toolchain.apply(opts))?;
+    let mut result = ol_kind2::run_kind2(&lus_path, &toolchain.apply(opts))?;
     println!("prove: invoked {}", result.invocation.join(" "));
     if result.exit_code == -1 && result.properties.is_empty() {
         for g in prover::guidance(&toolchain) {
@@ -1066,6 +1067,20 @@ fn cmd_prove(
         if result.properties.is_empty() {
             return Ok(());
         }
+    }
+    // Stopped at the timeout, Kind 2 leaves out what it had not reached.
+    let unreached = proof::complete(&mut result, &input, &project, properties);
+    let stopped = match timeout {
+        Some(t) => format!("Kind 2 stopped at the {t}s timeout"),
+        None => "Kind 2 stopped at its timeout".to_string(),
+    };
+    if result.properties.is_empty() && result.timed_out {
+        println!("prove: {stopped} before settling any property — nothing was proved or refuted");
+        if !unreached.contracts.is_empty() {
+            println!("prove: not reached: the contracts of {}", unreached.contracts.join(", "));
+        }
+        println!("prove: {}", proof::timeout_advice(emit_opts.runtime_errors));
+        anyhow::bail!("{stopped} before settling any property");
     }
     if result.properties.is_empty() {
         println!("(no parseable property results — raw stdout follows)");
@@ -1114,7 +1129,18 @@ fn cmd_prove(
         println!("prove: runtime errors — {ok} of {} checks hold (overflow, division by zero, bounds, conversion)", rte.len());
     }
     if result.timed_out && unknown > 0 {
-        println!("prove: Kind 2 stopped at the {}s timeout — the unknown properties were neither proved nor refuted", timeout.unwrap_or(0));
+        let not_reached = match unreached.checks {
+            0 => String::new(),
+            n => format!(" ({n} runtime-error check{} never reached)", if n == 1 { "" } else { "s" }),
+        };
+        println!("prove: {stopped} — the unknown properties were neither proved nor refuted{not_reached}");
+        if !unreached.contracts.is_empty() {
+            println!(
+                "prove: not reached at all, so not listed: the properties of {}",
+                unreached.contracts.join(", ")
+            );
+        }
+        println!("prove: {}", proof::timeout_advice(emit_opts.runtime_errors));
     }
     if fails > 0 || unknown > 0 {
         anyhow::bail!("not every property holds");
