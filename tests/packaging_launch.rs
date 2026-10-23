@@ -38,13 +38,18 @@ struct LaunchGuard {
     child: Child,
     port: u16,
     home: PathBuf,
+    /// Set by a test that reuses the home in a later launch: Drop kills the
+    /// server but leaves the directory (the next guard cleans it up).
+    no_remove: bool,
 }
 
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.home);
+        if !self.no_remove {
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
     }
 }
 
@@ -56,6 +61,12 @@ fn start_launch() -> LaunchGuard {
         .as_nanos();
     let home =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_home_{stamp}"));
+    start_launch_in(home)
+}
+
+/// Launch on an existing (fake) home — the recents list is per-user, so a
+/// fresh launch over the SAME home is the restart-under-test.
+fn start_launch_in(home: PathBuf) -> LaunchGuard {
     std::fs::create_dir_all(&home).unwrap();
 
     // Fake HOME so the welcome project lands in our temp dir — but keep
@@ -111,7 +122,7 @@ fn start_launch() -> LaunchGuard {
         }
         sleep(Duration::from_millis(50));
     }
-    LaunchGuard { child, port, home }
+    LaunchGuard { child, port, home, no_remove: false }
 }
 
 fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
@@ -119,7 +130,22 @@ fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
     let req =
         format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
-    stream.shutdown(Shutdown::Write).ok();
+    stream.shutdown(Shutdown::Write).ok()?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).ok()?;
+    let (head, payload) = raw.split_once("\r\n\r\n")?;
+    let status: u16 = head.lines().next()?.split_whitespace().nth(1)?.parse().ok()?;
+    Some((status, payload.to_string()))
+}
+
+fn http_post(port: u16, path: &str, body: &str) -> Option<(u16, String)> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        len = body.len(),
+    );
+    stream.write_all(req.as_bytes()).ok()?;
+    stream.shutdown(Shutdown::Write).ok()?;
     let mut raw = String::new();
     stream.read_to_string(&mut raw).ok()?;
     let (head, payload) = raw.split_once("\r\n\r\n")?;
@@ -128,18 +154,34 @@ fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
 }
 
 #[test]
-fn launch_creates_welcome_project_and_serves_the_embedded_palette() {
+fn launch_opens_the_welcome_page_then_a_new_workspace_serves_the_palette() {
     let g = start_launch();
 
-    // First-run experience: the welcome workspace was created under HOME.
+    // First-run experience: the welcome page, and NOTHING auto-created —
+    // the engineer picks what to open (VS Code / SCADE style).
     let welcome = g.home.join("OpenLustre/welcome.wksc");
-    assert!(welcome.exists(), "welcome workspace not created");
-
-    // The served project is the starter model, with the embedded 41-block
-    // palette merged — no --with-stdlib flag, no libraries/ checkout needed.
+    assert!(!welcome.exists(), "launch must not auto-create a project");
     let (s, body) = http_get(g.port, "/api/inspect").expect("inspect");
     assert_eq!(s, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["welcome"]["base"], g.home.join("OpenLustre").display().to_string());
+    assert!(!v["welcome"]["samples"].as_array().unwrap().is_empty(), "shipped samples listed");
+    assert!(!v["welcome"]["version"].as_str().unwrap_or("").is_empty(), "version reported");
+
+    // Creating a workspace from the welcome page switches to it and serves
+    // the embedded 41-block palette — no --with-stdlib flag, no libraries/
+    // checkout needed. The starter operator seeds the new project.
+    let dir = g.home.join("OpenLustre/First");
+    let (s, body) = http_post(
+        g.port,
+        "/api/workspace/new",
+        &serde_json::json!({ "path": dir }).to_string(),
+    )
+    .expect("workspace/new");
+    assert_eq!(s, 200, "new workspace: {body}");
+    assert!(dir.join("First.wksc").exists() || dir.join("project.json").exists(), "workspace seeded");
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["welcome"].is_null(), "a workspace is open now — no more welcome");
     assert_eq!(v["project"]["main"], "Heartbeat");
     let names: Vec<&str> = v["project"]["packages"]
         .as_array()
@@ -152,4 +194,56 @@ fn launch_creates_welcome_project_and_serves_the_embedded_palette() {
     assert!(names.contains(&"RisingEdge"), "embedded palette missing: {names:?}");
     assert!(names.contains(&"SRFlipFlop"), "embedded FSM block missing");
     assert_eq!(v["summary"]["errors"], 0, "starter project must be clean");
+
+    // A reload keeps the workspace (the welcome state is server-side).
+    let (s, body) = http_get(g.port, "/api/inspect").expect("inspect again");
+    assert_eq!(s, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["project"]["main"], "Heartbeat");
+}
+
+#[test]
+fn the_welcome_page_lists_the_last_four_workspaces_the_user_opened() {
+    // Open (and create) several workspaces in one session, then start a
+    // FRESH launch on the same home: the welcome page offers the latest
+    // four, most recent first, and nothing from anyone else's folders.
+    let mut g = start_launch();
+    let mut opened = Vec::new();
+    for name in ["One", "Two", "Three", "Four", "Five"] {
+        let dir = g.home.join("OpenLustre").join(name);
+        let (s, body) = http_post(
+            g.port,
+            "/api/workspace/new",
+            &serde_json::json!({ "path": dir }).to_string(),
+        )
+        .expect("workspace/new");
+        assert_eq!(s, 200, "{body}");
+        opened.push(dir.join(format!("{name}.wksc")).display().to_string());
+    }
+    let home = g.home.clone();
+    g.no_remove = true;
+    drop(g); // ends that server; a fresh launch starts on the same home
+
+    let g2 = start_launch_in(home);
+    let (s, body) = http_get(g2.port, "/api/inspect").expect("inspect");
+    assert_eq!(s, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["welcome"].is_object(), "fresh launch is on the welcome page");
+    let recent: Vec<&str> = v["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["path"].as_str())
+        .collect();
+    assert_eq!(
+        recent,
+        ["Five", "Four", "Three", "Two"]
+            .iter()
+            .map(|n| g2.home.join("OpenLustre").join(n).join(format!("{n}.wksc")).display().to_string())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        "the latest four, most recent first (the fifth-oldest drops off)"
+    );
 }

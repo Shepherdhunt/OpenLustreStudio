@@ -19,10 +19,18 @@ DIST="$ROOT/dist"
 mkdir -p "$DIST"
 
 cargo build --release --locked -p ol_cli
+# A cross-build (CARGO_BUILD_TARGET=x86_64-unknown-linux-gnu on an arm64
+# host) lands in target/<triple>/release — same outputs, native compile
+# speed, and stage.sh skips Kind 2's smoke proof because the host no longer
+# matches the packaged platform (CI's native runners still run it).
+BIN="target/release/openlustre"
+if [ -n "${CARGO_BUILD_TARGET:-}" ]; then
+    BIN="target/$CARGO_BUILD_TARGET/release/openlustre"
+fi
 
 # The tarball: the staged folder plus its installer.
 STAGE="$DIST/stage/$NAME"
-packaging/stage.sh target/release/openlustre linux-x86_64 "$STAGE" "$VERSION"
+packaging/stage.sh "$BIN" linux-x86_64 "$STAGE" "$VERSION"
 cp packaging/linux/install.sh packaging/linux/openlustre-studio.svg "$STAGE/"
 chmod 755 "$STAGE/install.sh"
 tar -C "$DIST/stage" -czf "$DIST/$NAME.tar.gz" "$NAME"

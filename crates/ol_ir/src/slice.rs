@@ -30,124 +30,142 @@ pub fn slice_for_root(project: &Project, root: &str) -> Result<Project, String> 
     let root = project.selected_node_name(root)
         .ok_or_else(|| format!("root node `{root}` not found in project"))?;
 
-    // --- 1. Node closure over calls (equations + contract expressions). ---
+    // --- 1–4 run as ONE fixpoint: a node's equations pull in the nodes they
+    //        call and the constants they name; a kept constant pulls in the
+    //        constants its value references AND the nodes its value calls
+    //        (`FROM_FUNCTION = Twice(BASE)` must keep `Twice`), so the two
+    //        closures feed each other until nothing grows. ---
     let mut kept_nodes: BTreeSet<String> = BTreeSet::new();
     let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back(root.to_string());
-    while let Some(name) = queue.pop_front() {
-        if !kept_nodes.insert(name.clone()) {
-            continue;
-        }
-        let Some(node) = project.find_node(&name) else {
-            continue; // unresolved call — typecheck reports it; nothing to slice
-        };
-        let mut enqueue_calls = |e: &Expr| {
-            e.visit(|sub| match sub {
-                Expr::Call { node: callee, .. } => queue.push_back(callee.clone()),
-                // An iterator names the function it applies — it must be kept
-                // (and emitted) just like a direct call.
-                Expr::Iterate { node: callee, .. } => queue.push_back(callee.clone()),
-                _ => {}
-            });
-        };
-        for eq in &node.equations {
-            enqueue_calls(&eq.rhs);
-        }
-        if let Some(cname) = &node.contract {
-            for expr in contract_exprs(project, cname) {
-                enqueue_calls(&expr);
-            }
-        }
-    }
-
-    // --- 2. Contract closure (kept nodes' contracts + their imports). ---
     let mut kept_contracts: BTreeSet<String> = BTreeSet::new();
-    let mut cqueue: VecDeque<String> = VecDeque::new();
-    for name in &kept_nodes {
-        if let Some(node) = project.find_node(name) {
-            if let Some(c) = &node.contract {
-                cqueue.push_back(c.clone());
+    let mut free_vars: BTreeSet<String> = BTreeSet::new();
+    let mut used_types: Vec<Type> = Vec::new();
+    let mut kept_consts: BTreeSet<String> = BTreeSet::new();
+    queue.push_back(root.to_string());
+    loop {
+        // 1. Node closure over calls (equations + contract expressions).
+        while let Some(name) = queue.pop_front() {
+            if !kept_nodes.insert(name.clone()) {
+                continue;
             }
-        }
-    }
-    while let Some(cname) = cqueue.pop_front() {
-        if !kept_contracts.insert(cname.clone()) {
-            continue;
-        }
-        if let Some(raw) = find_contract_raw(project, &cname) {
-            if let Some(imports) = raw.get("imports").and_then(|v| v.as_array()) {
-                for imp in imports {
-                    if let Some(target) = imp.get("contract").and_then(|v| v.as_str()) {
-                        cqueue.push_back(target.to_string());
-                    }
+            let Some(node) = project.find_node(&name) else {
+                continue; // unresolved call — typecheck reports it; nothing to slice
+            };
+            let mut enqueue_calls = |e: &Expr| {
+                e.visit(|sub| match sub {
+                    Expr::Call { node: callee, .. } => queue.push_back(callee.clone()),
+                    // An iterator names the function it applies — it must be kept
+                    // (and emitted) just like a direct call.
+                    Expr::Iterate { node: callee, .. } => queue.push_back(callee.clone()),
+                    _ => {}
+                });
+            };
+            for eq in &node.equations {
+                enqueue_calls(&eq.rhs);
+            }
+            if let Some(cname) = &node.contract {
+                for expr in contract_exprs(project, cname) {
+                    enqueue_calls(&expr);
                 }
             }
         }
-    }
 
-    // --- 3. Free variables across all kept expressions: feed constant and
-    //        enum-variant retention. ---
-    let mut free_vars: BTreeSet<String> = BTreeSet::new();
-    let mut used_types: Vec<Type> = Vec::new();
-    for name in &kept_nodes {
-        let Some(node) = project.find_node(name) else { continue };
-        for p in node.inputs.iter().chain(node.outputs.iter()) {
-            used_types.push(p.ty.clone());
-        }
-        for l in &node.locals {
-            used_types.push(l.ty.clone());
-        }
-        for eq in &node.equations {
-            for v in eq.rhs.free_vars() {
-                free_vars.insert(v);
+        // 2. Contract closure (kept nodes' contracts + their imports).
+        let mut cqueue: VecDeque<String> = VecDeque::new();
+        for name in &kept_nodes {
+            if let Some(node) = project.find_node(name) {
+                if let Some(c) = &node.contract {
+                    cqueue.push_back(c.clone());
+                }
             }
         }
-    }
-    for cname in &kept_contracts {
-        for expr in contract_exprs(project, cname) {
-            for v in expr.free_vars() {
-                free_vars.insert(v);
+        while let Some(cname) = cqueue.pop_front() {
+            if !kept_contracts.insert(cname.clone()) {
+                continue;
             }
-        }
-        // Ghost-var declared types participate in the type closure.
-        if let Some(raw) = find_contract_raw(project, cname) {
-            if let Some(ghosts) = raw.get("ghost_vars").and_then(|v| v.as_array()) {
-                for g in ghosts {
-                    if let Some(ty) = g.get("ty") {
-                        if let Ok(t) = serde_json::from_value::<Type>(ty.clone()) {
-                            used_types.push(t);
+            if let Some(raw) = find_contract_raw(project, &cname) {
+                if let Some(imports) = raw.get("imports").and_then(|v| v.as_array()) {
+                    for imp in imports {
+                        if let Some(target) = imp.get("contract").and_then(|v| v.as_str()) {
+                            cqueue.push_back(target.to_string());
                         }
                     }
                 }
             }
         }
-    }
 
-    // --- 4. Constant closure: name-referenced constants, then constants
-    //        their values reference, to fixpoint. ---
-    let mut kept_consts: BTreeSet<String> = BTreeSet::new();
-    loop {
-        let mut grew = false;
-        for pkg in &project.packages {
-            for c in &pkg.constants {
-                if kept_consts.contains(&c.name) {
-                    continue;
-                }
-                let referenced = free_vars.contains(&c.name)
-                    || kept_consts.iter().any(|k| {
-                        project_const_value_refs(project, k, &c.name)
-                    });
-                if referenced {
-                    kept_consts.insert(c.name.clone());
-                    used_types.push(c.ty.clone());
-                    for v in c.value.free_vars() {
-                        free_vars.insert(v);
-                    }
-                    grew = true;
+        // 3. Free variables across all kept expressions: feed constant and
+        //        enum-variant retention. ---
+        for name in &kept_nodes {
+            let Some(node) = project.find_node(name) else { continue };
+            for p in node.inputs.iter().chain(&node.outputs) {
+                used_types.push(p.ty.clone());
+            }
+            for l in &node.locals {
+                used_types.push(l.ty.clone());
+            }
+            for eq in &node.equations {
+                for v in eq.rhs.free_vars() {
+                    free_vars.insert(v);
                 }
             }
         }
-        if !grew {
+        for cname in &kept_contracts {
+            for expr in contract_exprs(project, cname) {
+                for v in expr.free_vars() {
+                    free_vars.insert(v);
+                }
+            }
+            // Ghost-var declared types participate in the type closure.
+            if let Some(raw) = find_contract_raw(project, cname) {
+                if let Some(ghosts) = raw.get("ghost_vars").and_then(|v| v.as_array()) {
+                    for g in ghosts {
+                        if let Some(ty) = g.get("ty") {
+                            if let Ok(t) = serde_json::from_value::<Type>(ty.clone()) {
+                                used_types.push(t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Constant closure: name-referenced constants, then constants
+        //        their values reference, to fixpoint; a constant's value may
+        //        also CALL a node, which re-enters the node closure above.
+        let mut grew = false;
+        loop {
+            let mut round = false;
+            for pkg in &project.packages {
+                for c in &pkg.constants {
+                    if kept_consts.contains(&c.name) {
+                        continue;
+                    }
+                    let referenced = free_vars.contains(&c.name)
+                        || kept_consts.iter().any(|k| {
+                            project_const_value_refs(project, k, &c.name)
+                        });
+                    if referenced {
+                        kept_consts.insert(c.name.clone());
+                        used_types.push(c.ty.clone());
+                        for v in c.value.free_vars() {
+                            free_vars.insert(v);
+                        }
+                        c.value.visit(|sub| match sub {
+                            Expr::Call { node: callee, .. } => queue.push_back(callee.clone()),
+                            Expr::Iterate { node: callee, .. } => queue.push_back(callee.clone()),
+                            _ => {}
+                        });
+                        round = true;
+                    }
+                }
+            }
+            grew |= round;
+            if !round {
+                break;
+            }
+        }
+        if queue.is_empty() && !grew {
             break;
         }
     }

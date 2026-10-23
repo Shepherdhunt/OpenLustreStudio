@@ -15,6 +15,35 @@
     grid-template-rows: 30px 28px 1fr var(--dock-h, 200px) 24px;
     height: 100vh; background: #ececec; color: #1e1e1e; font-size: 12px;
   }
+  /* The welcome page (VS Code / SCADE style): shown until a workspace is
+     opened, created, or a sample picked. Opaque, full-viewport, on top. */
+  #welcome { position: fixed; inset: 0; z-index: 60; display: none;
+    background: linear-gradient(160deg, #f7f9fc 0%, #e9eef5 100%); overflow: auto; }
+  #welcome.show { display: block; }
+  #welcome .welcome-inner { max-width: 860px; margin: 0 auto; padding: 7vh 32px 40px; }
+  #welcome .welcome-brand { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  #welcome .welcome-glyph { width: 52px; height: 52px; border-radius: 12px;
+    background: #2b579a; color: #fff; font-size: 30px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center; }
+  #welcome h1 { font-size: 30px; margin: 0; font-weight: 600; color: #1b3a68; }
+  #welcome .welcome-sub { color: #5a6a7c; font-size: 14px; margin: 2px 0 34px 66px; }
+  #welcome .welcome-cols { display: flex; gap: 48px; align-items: flex-start; }
+  #welcome .welcome-col { flex: 1; }
+  #welcome h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px;
+    color: #6b7785; border-bottom: 1px solid #d4dbe4; padding-bottom: 6px; }
+  #welcome .welcome-action { display: flex; align-items: center; gap: 10px;
+    padding: 9px 8px; border-radius: 6px; cursor: pointer; font-size: 14px; }
+  #welcome .welcome-action:hover { background: #e3ecf7; }
+  #welcome .welcome-action .wa-glyph { color: #2b579a; font-size: 16px; width: 20px;
+    text-align: center; }
+  #welcome .welcome-action .wa-note { display: block; color: #7a8794; font-size: 11px; }
+  #welcome .welcome-ws { padding: 8px 8px; border-radius: 6px; cursor: pointer; }
+  #welcome .welcome-ws:hover { background: #e3ecf7; }
+  #welcome .welcome-ws .ws-name { font-size: 14px; font-weight: 600; color: #24425f; }
+  #welcome .welcome-ws .ws-path { color: #7a8794; font-size: 11px;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  #welcome .welcome-status { margin: 18px 0 0 66px; color: #b0402f; font-size: 12px; min-height: 16px; }
+  #welcome .welcome-foot { margin: 40px 0 0 66px; color: #98a3af; font-size: 11px; }
   #titlebar {
     grid-column: 1 / -1; background: #2b579a; color: #fff;
     display: flex; align-items: center; gap: 10px; padding: 0 12px; font-size: 13px;
@@ -277,6 +306,24 @@
   svg .wire { stroke: #4a4a4a; stroke-width: 1.2; fill: none; }
   svg .wire:hover { stroke-width: 2.4; }
   svg .wire.invalid { stroke: #d11a1a; stroke-width: 2; stroke-dasharray: 7 4; }
+  /* View ▸ link data types: the pair a wire carries, red on disagreement. */
+  svg text.wire-type { fill: #5b6b7c; font-size: 9px; font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  svg text.wire-type.mismatch { fill: #d11a1a; font-weight: 700; }
+  /* Wide invisible twin of each wire: the grab target for shaping a link. */
+  svg .wire-hit { stroke: transparent; stroke-width: 11; fill: none; pointer-events: stroke; cursor: grab; }
+  svg circle.wire-handle { fill: #fff; stroke: #2b579a; stroke-width: 1.4; cursor: grab; }
+  svg circle.wire-handle:hover { fill: #2b579a; }
+  /* Rapid-add boxes at the foot of the operator's interface columns. */
+  svg rect.addbox { fill: #f6f9fc; stroke: #9db8d9; stroke-dasharray: 4 3; }
+  svg g.addbox:hover rect.addbox { fill: #e8f1fb; stroke: #2b579a; }
+  svg text.addbox-text { fill: #43608c; font-size: 11px; }
+  .op-additem { border: 1px dashed #9db8d9; border-radius: 4px; color: #43608c;
+                padding: 2px 6px; margin: 2px 0 6px; cursor: pointer; }
+  .op-additem:hover { background: #e8f1fb; border-color: #2b579a; }
+  .watch-val.fuzzed, .watch-val:disabled { background: #f2f4f6; color: #5a6a7a; }
+  .ct-scen-row { display: flex; gap: 6px; align-items: center; padding: 3px 0;
+                 border-bottom: 1px solid #edf1f5; }
+  .ct-scen-row .build-note { flex: 1; }
   svg .label { fill: #777; font-size: 9px; }
   /* Rubber-band selection rectangle (drag on empty canvas). */
   svg .marquee { fill: rgba(43,87,154,0.08); stroke: #2b579a; stroke-width: 1;
@@ -467,6 +514,37 @@
   <span class="main-node" id="main-node"></span>
 </div>
 
+<!-- The welcome page: nothing open yet — create, open, or pick a sample. -->
+<div id="welcome">
+  <div class="welcome-inner">
+    <div class="welcome-brand">
+      <div class="welcome-glyph">◈</div>
+      <h1>OpenLustre Studio</h1>
+    </div>
+    <div class="welcome-sub">Model synchronous dataflow software — draw it, simulate it, prove it, generate C.</div>
+    <div class="welcome-cols">
+      <div class="welcome-col">
+        <h2>Start</h2>
+        <div class="welcome-action" onclick="welcomeNewWorkspace()">
+          <span class="wa-glyph">＋</span>
+          <span>New Workspace…<span class="wa-note">a folder with a fresh <code class="inline">&lt;name&gt;.wksc</code>, types and scenarios</span></span>
+        </div>
+        <div class="welcome-action" onclick="openWorkspaceDialog()">
+          <span class="wa-glyph">📂</span>
+          <span>Open Workspace…<span class="wa-note">pick a <code class="inline">.wksc</code> from a folder — or type any path</span></span>
+        </div>
+        <div id="welcome-samples"></div>
+      </div>
+      <div class="welcome-col">
+        <h2>Recent</h2>
+        <div id="welcome-recent"></div>
+      </div>
+    </div>
+    <div class="welcome-status" id="welcome-status"></div>
+    <div class="welcome-foot" id="welcome-foot"></div>
+  </div>
+</div>
+
 <div id="menubar">
   <div class="menu" data-menu="file">
     <span class="menu-title">File</span>
@@ -540,11 +618,13 @@
           <option value="20">20 px</option>
         </select>
       </div>
-      <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="renderDiagram()"> show grid</label></div>
-      <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked> snap to grid</label></div>
-      <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="renderDiagram()"> wire labels</label></div>
-      <div class="mi keep-open"><label><input type="checkbox" id="wire-orth" checked onchange="renderDiagram()"> orthogonal wires</label></div>
-      <div class="mi keep-open"><label><input type="checkbox" id="mm-show" checked onchange="renderDiagram()"> minimap</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="grid-show" checked onchange="persistViewOptions(); renderDiagram()"> show grid</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="grid-snap" checked onchange="persistViewOptions()"> snap to grid</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="wire-labels" checked onchange="persistViewOptions(); renderDiagram()"> wire labels</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="wire-orth" checked onchange="persistViewOptions(); renderDiagram()"> orthogonal wires</label></div>
+      <div class="mi keep-open"><label title="Each link shows the data type it carries — source | expected at the far end, red where they disagree"><input type="checkbox" id="wire-types" onchange="persistViewOptions(); renderDiagram()"> link data types</label></div>
+      <div class="mi keep-open"><label title="Dragging, resizing or nudging a box onto another is refused (it slides along instead) — turn off to stack boxes freely"><input type="checkbox" id="block-overlaps" checked onchange="persistViewOptions()"> prevent overlapping boxes</label></div>
+      <div class="mi keep-open"><label><input type="checkbox" id="mm-show" checked onchange="persistViewOptions(); renderDiagram()"> minimap</label></div>
       <div class="menu-sep"></div>
       <div class="mi" onclick="zoomIn()">Zoom In <span class="shortcut">Ctrl+=</span></div>
       <div class="mi" onclick="zoomOut()">Zoom Out <span class="shortcut">Ctrl+−</span></div>
@@ -664,6 +744,13 @@
         <button onclick="simStop()">Stop</button>
         <label><input type="checkbox" id="sim-live" checked onchange="renderDiagram()"> live values on the diagram</label>
         <label title="Compile the generated C of the simulated operator and step it in lockstep with the model: its outputs are compared every cycle, and a Run stops where they first differ"><input type="checkbox" id="sim-cil" onchange="simSetC(this.checked)"> C in the loop</label>
+      </div>
+      <div class="sim-bar">
+        <span class="build-note">inputs:</span>
+        <label title="You type every input; they are held for each Step / Run"><input type="radio" name="sim-fuzz" value="manual" checked onchange="simFuzzChanged()"> manual</label>
+        <label title="A live run where every input is generated across the full range its data type allows — bools, whole integer spans, finite reals across the float range, enum variants, struct fields, array elements. Watch the diagram and waveform react"><input type="radio" name="sim-fuzz" value="range" onchange="simFuzzChanged()"> FUZZ range</label>
+        <label title="Bad-data injection: one input per cycle receives malformed text (out-of-range, NaN, wrong enum, broken syntax) while the rest stay valid; every refusal is reported — the input-validation contract under test"><input type="radio" name="sim-fuzz" value="bad" onchange="simFuzzChanged()"> FUZZ bad data</label>
+        <button onclick="simSaveScenario()" title="Save the session's inputs so far as a named TestScenario (scenarios/&lt;name&gt;.csv): replay it here, run it in Tests, keep it in the evidence report">Save TestScenario…</button>
       </div>
       <div id="sim-note" class="build-note">Build an operator, then Simulate (Build dock ▸ 2, or Simulation ▸ Run). Inputs hold their values until you change them.</div>
       <div class="sim-cols">
@@ -992,6 +1079,7 @@
         <span data-ct="clauses" class="active" onclick="ctShowTab('clauses')">Assume / Guarantee</span>
         <span data-ct="modes" onclick="ctShowTab('modes')">Mode table</span>
         <span data-ct="text" onclick="ctShowTab('text')">CoCoSpec text</span>
+        <span data-ct="scenarios" onclick="ctShowTab('scenarios')">TestScenarios</span>
       </div>
       <div id="ct-pane-clauses"></div>
       <div id="ct-pane-modes" style="display:none"></div>
@@ -1001,6 +1089,16 @@
           <button onclick="ctApplyText()">Apply text</button>
           <span class="build-note">CoCoSpec syntax; types use OpenLustre names (int32, float64 …). The Lustre pane shows the Kind 2 emission.</span>
         </div>
+      </div>
+      <div id="ct-pane-scenarios" style="display:none">
+        <p class="build-note">TestScenarios are named input vectors in <code class="inline">scenarios/</code> — a manual simulation or a FUZZ run you saved to repeat. They run in <strong>Run Test Scenarios</strong> (with their goldens, against the model and the compiled C) and appear in the evidence report.</p>
+        <div class="row">
+          <button class="primary" onclick="ctScenariosRefresh()">Refresh</button>
+          <button onclick="simSaveScenario()" title="Needs a running simulation — saves its inputs so far">Save current simulation…</button>
+          <button onclick="closeDialog(); showDock('tests'); loadTests(); testsRun()">Run all in Tests…</button>
+          <span class="build-note" id="ct-scen-note"></span>
+        </div>
+        <div id="ct-scenario-list"></div>
       </div>
       <div id="ct-diags" class="fsm-preview ct-diag"></div>
       <div class="row">
@@ -1095,6 +1193,10 @@ const state = {
   inspect: null, selectedNode: null,
   diagramStack: [], diagramData: null, diagPos: {}, drag: null, resize: null,
   selection: null, selected: [],
+  // Hand-shaped wires: "from|to|port" → [{x, y}, …] interior waypoints
+  // (loaded from the model's saved routes, edited by dragging). wirePt is the
+  // waypoint-grab gesture in progress.
+  wireRoutes: {}, wirePt: null,
   // Canvas view: zoom factor (viewBox scaling), plus the transient middle-drag
   // pan and rubber-band marquee gestures.
   view: { zoom: 1 }, pan: null, marquee: null, diagExtent: null,
@@ -1218,6 +1320,16 @@ function openPortDialog(side) {
       sel.value = state.selectedNode.name;
     }
   }
+}
+
+/// Open the variable dialog preset to `kind` for the operator whose canvas
+/// is open — the rapid add behind the canvas "+" boxes and the toolbox's
+/// Signals categories.
+function quickAddPort(kind) {
+  openPortDialog(kind);
+  const sel = document.getElementById("port-node");
+  const want = state.diagramData && state.diagramData.node;
+  if (want && [...sel.options].some(o => o.value === want)) sel.value = want;
 }
 
 // --- Bottom dock ---------------------------------------------------------------
@@ -1693,6 +1805,100 @@ async function importLustre() {
 
 // --- Project refresh -------------------------------------------------------------
 
+// --- The welcome page (no workspace open yet) --------------------------------
+
+/// Render the welcome page from a welcome-mode inspect answer: recent
+/// workspaces, the shipped samples, the version footer.
+function showWelcome(ins) {
+  const w = ins.welcome || {};
+  // Display paths relative to the user's home as `~` — the page reads the
+  // same on every machine, and never shows this machine's folders.
+  const home = String(w.base || "").replace(/\/OpenLustre$/, "");
+  const shown = p => home ? String(p).replace(home, "~") : String(p);
+  const host = document.getElementById("welcome-recent");
+  // The last few workspaces this user actually opened (most recent first);
+  // samples copy into ~/OpenLustre on first use, so a shared machine's demo
+  // never points at anyone else's folders.
+  const recent = ins.recent || [];
+  host.innerHTML = recent.length ? "" :
+    '<div class="welcome-ws"><span class="ws-name">Nothing opened yet</span>' +
+    '<span class="ws-path">the last workspaces you open appear here — the latest four</span></div>';
+  for (const ws of recent.slice(0, 4)) {
+    const d = document.createElement("div");
+    d.className = "welcome-ws";
+    d.innerHTML = '<span class="ws-name">' + escapeHTML(ws.name) + '</span>' +
+      '<span class="ws-path">' + escapeHTML(shown(ws.path)) + '</span>';
+    d.onclick = () => welcomeOpen(ws.path);
+    host.appendChild(d);
+  }
+  const samples = document.getElementById("welcome-samples");
+  samples.innerHTML = "";
+  const sampleLabel = { pnt: "the PNT OS demo", pms: "the PMS sample", release_logic: "the release-logic sample" };
+  for (const name of w.samples || []) {
+    const d = document.createElement("div");
+    d.className = "welcome-action";
+    d.innerHTML = '<span class="wa-glyph">◈</span><span>Open ' +
+      escapeHTML(sampleLabel[name] || ("the " + name + " sample")) +
+      '<span class="wa-note">copied to ~/OpenLustre/samples/' + escapeHTML(name) +
+      ' on first use — yours to edit</span></span>';
+    d.onclick = () => welcomeSample(name);
+    samples.appendChild(d);
+  }
+  document.getElementById("welcome-foot").textContent =
+    "OpenLustre Studio " + (w.version || "") + " · for demonstration and prototyping — not a qualified tool";
+  document.getElementById("welcome").classList.add("show");
+}
+
+function hideWelcome() {
+  document.getElementById("welcome").classList.remove("show");
+}
+
+function welcomeStatus(msg) {
+  document.getElementById("welcome-status").textContent = msg || "";
+}
+
+async function welcomeOpen(path) {
+  welcomeStatus("");
+  const resp = await fetch("/api/workspace/open", { method: "POST", body: JSON.stringify({ path }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    welcomeStatus("open failed: " + m);
+    return;
+  }
+  hideWelcome();
+  await switchedWorkspace("opened " + path);
+}
+
+/// New workspace from the welcome page — same endpoint as File ▸ New, with
+/// the welcome folder as the suggested destination.
+async function welcomeNewWorkspace() {
+  const base = (state.inspect && state.inspect.welcome && state.inspect.welcome.base) || "~/OpenLustre";
+  const dir = prompt("New workspace — destination folder\n(a <name>.wksc, types.json and scenarios/ are created inside):",
+    base.replace(/\/$/, "") + "/MyProject");
+  if (dir === null || !dir.trim()) return;
+  welcomeStatus("");
+  const resp = await fetch("/api/workspace/new", { method: "POST", body: JSON.stringify({ path: dir.trim() }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    welcomeStatus("new workspace failed: " + m);
+    return;
+  }
+  hideWelcome();
+  await switchedWorkspace("created workspace in " + dir.trim());
+}
+
+async function welcomeSample(name) {
+  welcomeStatus("");
+  const resp = await fetch("/api/workspace/sample", { method: "POST", body: JSON.stringify({ name }) });
+  if (!resp.ok) {
+    let m = await resp.text(); try { m = JSON.parse(m).error || m; } catch (_) {}
+    welcomeStatus("sample failed: " + m);
+    return;
+  }
+  hideWelcome();
+  await switchedWorkspace("opened the " + name + " sample");
+}
+
 async function refresh() {
   try {
     state.inspect = await fetchJSON("/api/inspect");
@@ -1702,6 +1908,9 @@ async function refresh() {
     return;
   }
   const ins = state.inspect;
+  // No workspace open: the welcome page IS the Studio until one is.
+  if (ins.welcome) { showWelcome(ins); return; }
+  hideWelcome();
   document.getElementById("project-name").textContent = ins.project.name;
   document.getElementById("main-node").textContent = ins.project.main ? "main: " + ins.project.main : "no main";
   document.getElementById("err-count").textContent = ins.summary.errors + " error" + (ins.summary.errors === 1 ? "" : "s");
@@ -1972,12 +2181,25 @@ document.addEventListener("keydown", ev => {
     deleteSelected();
     return;
   }
-  // Arrow keys nudge the selection one grid step (Shift: one pixel).
+  // Arrow keys nudge the selection one grid step (Shift: one pixel), with
+  // the same overlap guard as dragging.
   const arrow = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[ev.key];
   if (arrow && !ev.ctrlKey && !ev.metaKey && state.selected.length && state.diagramData) {
     ev.preventDefault();
     const step = ev.shiftKey ? 1 : gridPitch();
-    for (const id of state.selected) {
+    const ids = state.selected.filter(id => state.diagPos[id]);
+    if (overlapGuardOn()) {
+      const partners = overlapPartners(ids);
+      const blocked = groupHits(ids.map(id => {
+        const p = state.diagPos[id];
+        return { x: p.x + arrow[0] * step, y: p.y + arrow[1] * step, w: p.w, h: p.h };
+      }), partners).length > 0;
+      if (blocked) {
+        wireStatus("overlap prevented — View ▸ prevent overlapping boxes lets boxes cover each other");
+        return;
+      }
+    }
+    for (const id of ids) {
       const p = state.diagPos[id];
       if (p) {
         p.x = Math.max(0, p.x + arrow[0] * step);
@@ -2051,6 +2273,34 @@ function simRunN() {
   simAdvance(n, true);
 }
 
+/// The Simulation dock's input source: manual, or one of the FUZZ modes.
+function simFuzzMode() {
+  const r = document.querySelector('input[name="sim-fuzz"]:checked');
+  return r ? r.value : "manual";
+}
+
+function simFuzzChanged() {
+  const mode = simFuzzMode();
+  simWatchFuzzState();
+  if (mode === "range") {
+    setSimNote("warn", "FUZZ range: every input is generated across its data type's full range each cycle — Step / Run feed them live; watch the diagram and the waveform");
+  } else if (mode === "bad") {
+    setSimNote("warn", "FUZZ bad data: one input per cycle receives malformed text, the rest stay valid — every refusal is reported on its row (the input-validation contract under test)");
+  } else {
+    setSimNote("", "manual inputs — you type them, Step / Run hold them");
+  }
+}
+
+/// Generated inputs replace the watch table: keep the fields visible (they
+/// show what was fed) but read-only while a FUZZ mode is on.
+function simWatchFuzzState() {
+  const fuzzing = simFuzzMode() !== "manual";
+  document.querySelectorAll("#sim-watch-body .watch-val").forEach(inp => {
+    inp.disabled = fuzzing;
+    inp.classList.toggle("fuzzed", fuzzing);
+  });
+}
+
 function simRestart() { simStart(state.sim.session ? state.sim.session.root : undefined); }
 
 async function simStop() {
@@ -2073,6 +2323,45 @@ async function simStop() {
   setSimNote("", "simulation stopped" + (state.sim.rows.length ? " — its waveform stays until the next run" : ""));
   renderSimChip();
   if (state.diagramData) { renderDiagram(); renderContractChip(state.diagramData.node); }
+}
+
+/// Save the session's inputs so far as a named TestScenario — a manual run
+/// or a FUZZ one, kept as the same input-vector CSV `Run Test Scenarios`
+/// and the evidence report use, and replayable in the simulator.
+async function simSaveScenario() {
+  const s = state.sim;
+  if (!s.session) { setSimNote("err", "no simulation session — start one, run cycles, then save"); return; }
+  const rows = s.rows.filter(r => r.values);
+  if (!rows.length) { setSimNote("err", "run at least one cycle before saving the scenario"); return; }
+  const name = prompt("TestScenario name (saved as scenarios/<name>.csv —\nletters, digits, _ - . only):", "");
+  if (!name) return;
+  const t = name.trim();
+  if (!t) return;
+  // The CSV the scenario runner reads: the root's input names as the header,
+  // one row per run cycle (each cell the value text the session was fed —
+  // exactly what a FUZZ run generated).
+  const sigs = simSignals();
+  const cols = sigs.map((g, i) => ({ name: g.name, kind: g.kind, i }))
+    .filter(c => c.kind === "input");
+  const csv = [cols.map(c => c.name).join(",")]
+    .concat(rows.map(r => cols.map(c => r.values[c.i]).join(",")))
+    .join("\n") + "\n";
+  const save = async overwrite => {
+    const r = await fetch("/api/tests/save", { method: "POST",
+      body: JSON.stringify({ name: t, csv, overwrite }) });
+    const d = await r.json().catch(() => ({}));
+    return { ok: r.ok, d };
+  };
+  let { ok, d } = await save(false);
+  if (!ok && /already exists/.test(d.error || "")) {
+    if (confirm(d.error + "\n\nReplace it (and its recorded golden)?")) {
+      ({ ok, d } = await save(true));
+    }
+  }
+  if (!ok) { setSimNote("err", "save failed: " + (d.error || "unknown error")); return; }
+  setSimNote("ok", "TestScenario `" + t + "` saved — " + d.cycles + " cycle" + (d.cycles === 1 ? "" : "s") +
+    " · run it in Project ▸ Run Test Scenarios, replay it from Contracts ▸ TestScenarios");
+  if (document.getElementById("ct-scenario-list")) ctScenariosRefresh();
 }
 
 async function runSim(full) {
@@ -2343,6 +2632,11 @@ async function loadDiagram(nodeName, push) {
   if (d.grid) document.getElementById("grid-size").value = String(d.grid);
   document.getElementById("status-grid").textContent = "grid: " + gridPitch() + " px";
   state.diagPos = computePositions(d);
+  // Saved wire shapes: "from|to|port" → interior waypoints.
+  state.wireRoutes = {};
+  for (const [k, r] of Object.entries(d.wire_routes || {})) {
+    state.wireRoutes[k] = (r.pts || []).map(p => ({ x: p[0], y: p[1] }));
+  }
   // Drop a selection that no longer exists (deleted, renamed, other node).
   if (state.selection) {
     const known = new Set([
@@ -2357,6 +2651,7 @@ async function loadDiagram(nodeName, push) {
   renderDiagram();
   renderProps();
   renderProbes();
+  renderToolbox();   // the Signals categories follow the open operator
 }
 
 function renderCrumbs() {
@@ -2694,14 +2989,69 @@ function wireRoute(x1, y1, x2, y2, entry) {
           { x: x2 - s, y: my }, { x: x2 - s, y: y2 }, { x: x2, y: y2 }];
 }
 
-// The `d` attribute for one wire, honouring the View ▸ orthogonal toggle.
-function wirePathD(x1, y1, x2, y2, entry) {
+// The identity of one wire in the model's saved routes.
+function wireKey(from, to, port) {
+  return from + "|" + to + "|" + (port == null ? "" : port);
+}
+
+// The `d` attribute for one wire, honouring the View ▸ orthogonal toggle and
+// any waypoints the engineer dragged: endpoints stay pinned to their boxes,
+// the shaped middle keeps its drawn course.
+function wirePathD(x1, y1, x2, y2, entry, route) {
+  if (route && route.length) {
+    return roundedPath([{ x: x1, y: y1 }, ...route, { x: x2, y: y2 }]);
+  }
   const orth = document.getElementById("wire-orth");
   if (orth && !orth.checked && entry !== "top") {
     const mx = (x1 + x2) / 2;
     return "M " + x1 + " " + y1 + " C " + mx + " " + y1 + ", " + mx + " " + y2 + ", " + x2 + " " + y2;
   }
   return roundedPath(wireRoute(x1, y1, x2, y2, entry));
+}
+
+// --- Overlap guard (View ▸ prevent overlapping boxes, on by default) ---------
+
+function overlapGuardOn() {
+  const el = document.getElementById("block-overlaps");
+  return !el || el.checked;
+}
+
+// Do rects a and b ({x, y, w, h}) overlap? `gap` adds a breathing margin so
+// boxes can't end up kissing pixel-to-pixel either.
+function rectsOverlap(a, b, gap) {
+  const g = gap || 0, ah = a.h || DIAG.BOXH, bh = b.h || DIAG.BOXH;
+  return a.x < b.x + b.w + g && a.x + a.w + g > b.x &&
+         a.y < b.y + bh + g && a.y + ah + g > b.y;
+}
+
+// Which canvas boxes a candidate placement of the dragged group would newly
+// sit on. `ignore` holds the group itself plus anything it already overlapped
+// when the gesture started (so a stacked legacy layout can still be pulled
+// apart — the guard only refuses *creating* overlaps).
+function groupHits(moved, ignore) {
+  const hits = [];
+  for (const [id, p] of Object.entries(state.diagPos)) {
+    if (ignore.has(id)) continue;
+    const still = { x: p.x, y: p.y, w: p.w, h: p.h };
+    if (moved.some(m => rectsOverlap(m, still, 2))) hits.push(id);
+  }
+  return hits;
+}
+
+// Everything a set of boxes currently overlaps (plus the boxes themselves) —
+// the ignore set a move gesture starts with.
+function overlapPartners(ids) {
+  const ignore = new Set(ids);
+  const rects = ids.map(id => {
+    const p = state.diagPos[id];
+    return p ? { x: p.x, y: p.y, w: p.w, h: p.h } : null;
+  }).filter(Boolean);
+  for (const [id, p] of Object.entries(state.diagPos)) {
+    if (ignore.has(id)) continue;
+    const other = { x: p.x, y: p.y, w: p.w, h: p.h };
+    if (rects.some(r => rectsOverlap(r, other, 0))) ignore.add(id);
+  }
+  return ignore;
 }
 
 // The outline of one diagram item as SVG. Recognized operators draw as real
@@ -2900,6 +3250,7 @@ function renderDiagram() {
     svg += '<rect width="' + W + '" height="' + H + '" fill="url(#grid-major)" pointer-events="none"/>';
   }
   const showLabels = document.getElementById("wire-labels").checked;
+  const showTypes = document.getElementById("wire-types").checked;
   // Sources that fan out to several different variables (a multi-output block
   // or construct): their labels name different signals, so they go at the
   // destination end instead of stacking on the one source pin.
@@ -2922,11 +3273,42 @@ function renderDiagram() {
       const pin = eqPinGeom(w.to)[w.to_port];
       if (pin) { x2 = pin.x; y2 = pin.y; entry = pin.entry; }
     }
+    const key = wireKey(fromId, w.to, w.to_port);
+    const route = state.wireRoutes[key];
     const cls = w.invalid ? "wire invalid" : "wire";
     const destEq = d.equations.find(e => e.id === w.to);
     const dependencyTip = destEq ? expressionDependencyTip(destEq, w.from) : "";
-    svg += '<path class="' + cls + '" d="' + wirePathD(x1, y1, x2, y2, entry) + '">' +
-      (w.reason || dependencyTip ? '<title>' + escapeHTML(w.reason || dependencyTip) + '</title>' : '') + '</path>';
+    const shapeTip = w.reason || dependencyTip;
+    const pathD = wirePathD(x1, y1, x2, y2, entry, route);
+    // The invisible wide twin: grabbing a wire anywhere shapes it (drag lays
+    // a waypoint; clicking a waypoint removes it).
+    svg += '<path class="wire-hit" data-wire="' + escapeAttr(key) + '" d="' + pathD + '"><title>drag to shape this link · click a waypoint to remove it</title></path>';
+    svg += '<path class="' + cls + '" d="' + pathD + '" pointer-events="none">' +
+      (shapeTip ? '<title>' + escapeHTML(shapeTip) + '</title>' : '') + '</path>';
+    if (route && route.length) {
+      for (let wi = 0; wi < route.length; wi++) {
+        svg += '<circle class="wire-handle" data-wire="' + escapeAttr(key) + '" data-idx="' + wi +
+          '" cx="' + route[wi].x + '" cy="' + route[wi].y + '" r="4"/>';
+      }
+    }
+    // The variable this wire carries, and the type at each end.
+    const fromBlock = /^eq\d+$/.test(fromId) || isConstructId(fromId);
+    const carried = fromBlock ? w.to : w.from;
+    const tSrc = typeOf[carried] || "?";
+    const tDst = w.dst_type || tSrc;
+    if (showTypes && !live) {
+      const mismatch = !!w.dst_type && w.dst_type !== tSrc;
+      const mx = route && route.length
+        ? route[Math.floor((route.length - 1) / 2)].x
+        : (x1 + x2) / 2;
+      const my = (route && route.length
+        ? route[Math.floor((route.length - 1) / 2)].y
+        : (y1 + y2) / 2) - 7;
+      svg += '<text class="wire-type' + (mismatch ? " mismatch" : "") + '" x="' + mx + '" y="' + my +
+        '" text-anchor="middle"' + (mismatch ? '><title>type mismatch: source ' + escapeHTML(tSrc) +
+        ", destination expects " + escapeHTML(tDst) + "</title>" : ">") +
+        escapeHTML(tSrc + " | " + tDst) + '</text>';
+    }
     if (showLabels || live) {
       // The SCADE wire annotation: the carried variable and its type, seated
       // just past the source pin (so parallel wires keep their labels apart —
@@ -2934,8 +3316,7 @@ function renderDiagram() {
       // same text harmlessly). A block driving several variables labels each
       // wire at its destination end instead. While simulating, the label is
       // the variable's current value.
-      const fromBlock = /^eq\d+$/.test(w.from) || isConstructId(w.from);
-      const v = fromBlock ? w.to : w.from;
+      const v = carried;
       const t = typeOf[v] || "?";
       const atDest = fromBlock && fanOut[fromId] && fanOut[fromId].size > 1;
       const text = live ? v + " = " + (live[v] != null ? live[v] : "?") : v + ": " + t;
@@ -3037,6 +3418,24 @@ function renderDiagram() {
         (a.x + a.w) + ' ' + (a.y + (a.h || DIAG.BOXH) / 2) + ' L ' + state.wireDrag.x + ' ' + state.wireDrag.y + '"/>';
     }
   }
+  // Rapid add: a dashed "+" box at the foot of each interface column — one
+  // click opens the variable dialog preset to that side, for this operator.
+  {
+    const leftIds = [...d.inputs.map(p => p.name), ...(d.ghosts || []).map(g => g.name)];
+    const rightIds = d.outputs.map(p => p.name)
+      .concat(d.locals.map(l => l.name).filter(n => !collapsed.has(n)));
+    const foot = ids => ids.reduce((m, id) => {
+      const p = pos[id];
+      return p ? Math.max(m, p.y + (p.h || DIAG.BOXH)) : m;
+    }, 16);
+    const addBox = (x, y, w, side) =>
+      '<g class="addbox" data-addbox="' + side + '" style="cursor:pointer">' +
+      '<rect class="addbox" x="' + x + '" y="' + y + '" width="' + w + '" height="24" rx="4"/>' +
+      '<text class="addbox-text" x="' + (x + w / 2) + '" y="' + (y + 16) + '" text-anchor="middle">+ ' + side + '</text>' +
+      '<title>add an ' + side + ' to ' + escapeHTML(d.node) + '</title></g>';
+    svg += addBox(DIAG.X_IN, foot(leftIds) + 10, DIAG.INW, "input");
+    svg += addBox(DIAG.X_OUT, foot(rightIds) + 10, DIAG.OUTW, "output");
+  }
   // Rubber-band selection rectangle while marquee-dragging.
   if (state.marquee && state.marquee.moved) {
     const m = state.marquee;
@@ -3124,6 +3523,32 @@ function diagPointerDown(ev) {
     ev.preventDefault();
     return;
   }
+  // Grabbing a wire handle moves that waypoint (a click without a drag
+  // removes it).
+  if (ev.target.classList && ev.target.classList.contains("wire-handle")) {
+    state.wirePt = { key: ev.target.dataset.wire, idx: +ev.target.dataset.idx, moved: false, fromHandle: true };
+    ev.preventDefault();
+    return;
+  }
+  // Grabbing anywhere on a wire lays a new waypoint at the grab point; a
+  // click without a drag takes it right back out.
+  if (ev.target.classList && ev.target.classList.contains("wire-hit")) {
+    const key = ev.target.dataset.wire;
+    const pt = svgPoint(ev);
+    const pts = state.wireRoutes[key] || (state.wireRoutes[key] = []);
+    pts.push({ x: snap(Math.max(0, pt.x)), y: snap(Math.max(0, pt.y)) });
+    state.wirePt = { key, idx: pts.length - 1, moved: false, fromHandle: false };
+    renderDiagram();
+    ev.preventDefault();
+    return;
+  }
+  // The rapid-add boxes open the variable dialog preset to their side.
+  const addbox = ev.target.closest ? ev.target.closest("g.addbox") : null;
+  if (addbox) {
+    ev.preventDefault();
+    quickAddPort(addbox.dataset.addbox);
+    return;
+  }
   // Grabbing a pin starts a wire, not a move.
   if (ev.target.classList && ev.target.classList.contains("pin")) {
     const pt = svgPoint(ev);
@@ -3136,7 +3561,8 @@ function diagPointerDown(ev) {
     const rp = state.diagPos[ev.target.dataset.id];
     if (rp) {
       const pt = svgPoint(ev);
-      state.resize = { id: ev.target.dataset.id, ox: pt.x, oy: pt.y, w0: rp.w, h0: rp.h || DIAG.BOXH };
+      state.resize = { id: ev.target.dataset.id, ox: pt.x, oy: pt.y, w0: rp.w, h0: rp.h || DIAG.BOXH,
+                       partners: overlapPartners([ev.target.dataset.id]) };
       if (ev.target.setPointerCapture) ev.target.setPointerCapture(ev.pointerId);
       ev.preventDefault();
     }
@@ -3170,6 +3596,10 @@ function diagPointerDown(ev) {
     members,
     minOx: Math.min(...members.map(m => m.ox)),
     minOy: Math.min(...members.map(m => m.oy)),
+    // The overlap guard only refuses *new* overlaps: boxes already stacked
+    // (a legacy layout, or the guard was off) stay grabbable so they can be
+    // pulled apart.
+    partners: overlapPartners(group.filter(m => state.diagPos[m])),
   };
   ev.target.setPointerCapture && ev.target.setPointerCapture(ev.pointerId);
 }
@@ -3179,6 +3609,19 @@ function diagPointerMove(ev) {
     const host = document.getElementById("diagram-host");
     host.scrollLeft = state.pan.sl - (ev.clientX - state.pan.sx);
     host.scrollTop = state.pan.st - (ev.clientY - state.pan.sy);
+    return;
+  }
+  // Shaping a link: the grabbed waypoint follows the cursor (snapped).
+  if (state.wirePt) {
+    const pt = svgPoint(ev);
+    const pts = state.wireRoutes[state.wirePt.key];
+    const p = pts && pts[state.wirePt.idx];
+    if (p) {
+      const nx = snap(Math.max(0, pt.x)), ny = snap(Math.max(0, pt.y));
+      if (Math.abs(nx - p.x) + Math.abs(ny - p.y) > 1) state.wirePt.moved = true;
+      p.x = nx; p.y = ny;
+      renderDiagram();
+    }
     return;
   }
   if (state.wireDrag) {
@@ -3212,8 +3655,14 @@ function diagPointerMove(ev) {
     const pt = svgPoint(ev);
     const rp = state.diagPos[state.resize.id];
     if (rp) {
-      rp.w = Math.max(40, snap(state.resize.w0 + (pt.x - state.resize.ox)));
-      rp.h = Math.max(20, snap(state.resize.h0 + (pt.y - state.resize.oy)));
+      const w = Math.max(40, snap(state.resize.w0 + (pt.x - state.resize.ox)));
+      const h = Math.max(20, snap(state.resize.h0 + (pt.y - state.resize.oy)));
+      // The overlap guard also applies to resizing into a neighbour.
+      const blocked = overlapGuardOn() &&
+        groupHits([{ x: rp.x, y: rp.y, w, h }], state.resize.partners).length > 0;
+      rp.w = blocked ? rp.w : w;
+      rp.h = blocked ? rp.h : h;
+      if (blocked) wireStatus("overlap prevented — View ▸ prevent overlapping boxes lets boxes cover each other");
       rp.userW = true; rp.userH = true;
       renderDiagram();
     }
@@ -3224,13 +3673,30 @@ function diagPointerMove(ev) {
   const p = state.diagPos[state.drag.id];
   // The anchor snaps; members follow at their exact offsets, and the whole
   // group stops at the canvas edge together (no member squashes to 0,0).
+  const prevX = p.x, prevY = p.y;
   const nx = Math.max(-state.drag.minOx, snap(Math.max(0, pt.x - state.drag.dx)));
   const ny = Math.max(-state.drag.minOy, snap(Math.max(0, pt.y - state.drag.dy)));
   if (Math.abs(nx - p.x) + Math.abs(ny - p.y) > 3) state.drag.moved = true;
   if (state.drag.moved) {
+    let fx = nx, fy = ny;
+    if (overlapGuardOn()) {
+      const place = (X, Y) => state.drag.members.map(m => {
+        const mp = state.diagPos[m.id];
+        return mp ? { x: X + m.ox, y: Y + m.oy, w: mp.w, h: mp.h } : null;
+      }).filter(Boolean);
+      const free = ps => groupHits(ps, state.drag.partners).length === 0;
+      // The guard slides the group along one axis when the direct spot is
+      // taken, and holds it still when both are.
+      if (!free(place(nx, ny))) {
+        if (free(place(nx, prevY))) fy = prevY;
+        else if (free(place(prevX, ny))) fx = prevX;
+        else { fx = prevX; fy = prevY; }
+        wireStatus("overlap prevented — View ▸ prevent overlapping boxes lets boxes cover each other");
+      }
+    }
     for (const m of state.drag.members) {
       const mp = state.diagPos[m.id];
-      if (mp) { mp.x = nx + m.ox; mp.y = ny + m.oy; }
+      if (mp) { mp.x = fx + m.ox; mp.y = fy + m.oy; }
     }
     renderDiagram();
   }
@@ -3238,6 +3704,22 @@ function diagPointerMove(ev) {
 
 async function diagPointerUp(ev) {
   if (state.pan) { state.pan = null; return; }
+  // Releasing a shaped wire: save the route (a plain click removed a
+  // waypoint instead of dragging it — that removal is saved too).
+  if (state.wirePt) {
+    const wp = state.wirePt;
+    state.wirePt = null;
+    const pts = state.wireRoutes[wp.key] || [];
+    if (!wp.moved) {
+      if (wp.fromHandle) pts.splice(wp.idx, 1);   // click a handle: remove it
+      else if (pts.length) pts.pop();             // click a bare wire: undo the grab
+    }
+    if (pts.length > 8) pts.length = 8;
+    if (!pts.length) delete state.wireRoutes[wp.key];
+    renderDiagram();
+    saveLayout();
+    return;
+  }
   if (state.marquee) {
     const m = state.marquee;
     state.marquee = null;
@@ -3392,7 +3874,8 @@ async function completeWire(from, to) {
   }
 }
 
-// Persist the whole layout (positions + grid pitch) for the current node.
+// Persist the whole layout (positions + grid pitch + shaped wires) for the
+// current node.
 async function saveLayout() {
   if (!state.diagramData) return;
   const positions = {};
@@ -3403,9 +3886,13 @@ async function saveLayout() {
     if (p.wrap) e.wrap = true;
     positions[id] = e;
   }
+  const wires = {};
+  for (const [k, pts] of Object.entries(state.wireRoutes)) {
+    if (pts.length) wires[k] = { pts: pts.map(p => [Math.round(p.x), Math.round(p.y)]) };
+  }
   const r = await fetch("/api/edit/set_layout", {
     method: "POST",
-    body: JSON.stringify({ node: state.diagramData.node, positions, grid: gridPitch() }),
+    body: JSON.stringify({ node: state.diagramData.node, positions, grid: gridPitch(), wires }),
   });
   document.getElementById("diagram-status").textContent =
     r.ok ? "layout saved" : "layout not saved (" + await r.text() + ")";
@@ -3479,6 +3966,39 @@ async function loadToolbox() {
 function renderToolbox() {
   const host = document.getElementById("toolbox-body");
   host.innerHTML = "";
+  // The open operator's own interface — the default categories every
+  // operator is built from, each with a one-click add. (Inputs are what the
+  // environment feeds the operator — sensors in the modelling sense; the
+  // language has no separate sensor category.)
+  if (state.diagramData) {
+    const d = state.diagramData;
+    const det = document.createElement("details");
+    det.open = true;
+    const sum = document.createElement("summary");
+    sum.textContent = "Signals · " + d.node;
+    det.appendChild(sum);
+    for (const [label, kind, list] of [["Inputs", "input", d.inputs], ["Locals", "local", d.locals], ["Outputs", "output", d.outputs]]) {
+      const head = document.createElement("div");
+      head.textContent = label + " (" + list.length + ")";
+      head.style.cssText = "font-size:11px;color:#5a6a7a;margin:6px 0 2px;font-weight:600";
+      det.appendChild(head);
+      for (const p of list) {
+        const item = document.createElement("div");
+        item.className = "op-item";
+        item.textContent = p.name + " : " + typeName(p.type);
+        item.title = "select " + p.name + " on the canvas";
+        item.onclick = () => setSelection(p.name);
+        det.appendChild(item);
+      }
+      const add = document.createElement("div");
+      add.className = "op-additem";
+      add.textContent = "+ add " + kind;
+      add.title = "add a new " + kind + " to " + d.node;
+      add.onclick = () => quickAddPort(kind);
+      det.appendChild(add);
+    }
+    host.appendChild(det);
+  }
   // A State Machine is inserted into the *current* operator from here (SCADE
   // style): it becomes that operator's body. Selecting it (or dropping it on
   // the canvas) opens the textual editor bound to this operator.
@@ -5764,13 +6284,80 @@ function ctShowTab(tab) {
   if (ct.tab === "text" && tab !== "text" && ct.textDirty && !ctApplyText()) return;
   ct.tab = tab;
   document.querySelectorAll(".ct-tabs span").forEach(s => s.classList.toggle("active", s.dataset.ct === tab));
-  for (const t of ["clauses", "modes", "text"]) {
+  for (const t of ["clauses", "modes", "text", "scenarios"]) {
     document.getElementById("ct-pane-" + t).style.display = t === tab ? "" : "none";
   }
   if (tab === "text") {
     document.getElementById("ct-text").value = ctToText();
     ct.textDirty = false;
   }
+  if (tab === "scenarios") ctScenariosRefresh();
+}
+
+/// The TestScenarios tab: every scenario in `scenarios/`, replayable in the
+/// live simulator (a fresh session steps its cycles one input set at a time),
+/// deletable, and a hop to the golden-trace runner.
+async function ctScenariosRefresh() {
+  const host = document.getElementById("ct-scenario-list");
+  const note = document.getElementById("ct-scen-note");
+  if (!host) return;
+  host.innerHTML = '<span class="build-note">loading…</span>';
+  let d;
+  try { d = await fetchJSON("/api/tests"); } catch (e) {
+    host.innerHTML = '<span class="err">could not list scenarios: ' + escapeHTML(String(e)) + "</span>";
+    return;
+  }
+  note.textContent = (d.scenarios || []).length + " in " + d.scenarios_dir;
+  if (!(d.scenarios || []).length) {
+    host.innerHTML = '<p class="build-note">No scenarios yet — run a simulation (manual or FUZZ) and press <strong>Save TestScenario…</strong>, or Record Goldens in the Tests dock.</p>';
+    return;
+  }
+  host.innerHTML = "";
+  for (const sc of d.scenarios) {
+    const row = document.createElement("div");
+    row.className = "ct-scen-row";
+    const name = document.createElement("code");
+    name.textContent = sc.name;
+    row.appendChild(name);
+    const meta = document.createElement("span");
+    meta.className = "build-note";
+    meta.textContent = sc.has_golden ? "golden recorded" : "no golden yet";
+    row.appendChild(meta);
+    const replay = document.createElement("button");
+    replay.textContent = "Replay in simulation";
+    replay.title = "Start a fresh session and feed this scenario's inputs cycle by cycle";
+    replay.onclick = () => ctScenarioReplay(sc.name);
+    row.appendChild(replay);
+    const del = document.createElement("button");
+    del.textContent = "Delete";
+    del.onclick = async () => {
+      if (!confirm("Delete scenario `" + sc.name + "`" + (sc.has_golden ? " and its golden" : "") + "?")) return;
+      const r = await fetch("/api/tests/delete", { method: "POST", body: JSON.stringify({ name: sc.name }) });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        alert("delete failed: " + (e.error || r.status));
+        return;
+      }
+      ctScenariosRefresh();
+    };
+    row.appendChild(del);
+    host.appendChild(row);
+  }
+}
+
+/// Replay one scenario's inputs in the live simulator (against the project's
+/// main operator, exactly as the golden-trace runner sees it).
+async function ctScenarioReplay(name) {
+  let d;
+  try { d = await fetchJSON("/api/tests/one?name=" + encodeURIComponent(name)); }
+  catch (e) { alert("could not read scenario `" + name + "`: " + e); return; }
+  const seq = d.rows.map(cells => {
+    const o = {};
+    d.header.forEach((h, i) => { o[h] = cells[i]; });
+    return o;
+  });
+  closeDialog();
+  await simReplay(state.inspect?.project?.main, seq, "scenario " + name);
 }
 
 /// The contract as CoCoSpec text (OpenLustre type names).
@@ -6986,6 +7573,7 @@ async function simStart(node) {
   }
   Object.assign(state.sim, { session: d, running: true, last: null, violatedCycles: 0, rows: [], review: null, marks: [], c: null });
   simBuildWatchTable();
+  simWatchFuzzState();
   simWaveUpdate();
   document.getElementById("step-cycle").textContent = "0";
   document.getElementById("sim-monitor").innerHTML = d.monitored
@@ -7068,19 +7656,25 @@ function simMarkDivergence(cycle, row) {
 }
 
 /// Run `count` cycles with the held inputs (the breakpoint applies to Run).
+/// A FUZZ mode replaces the held inputs with generated ones server-side, so
+/// watch-table validation is skipped (the values shown are what was fed).
 async function simAdvance(count, withBreak) {
   if (!state.sim.session && !(await simStart())) return;
+  const fuzzMode = simFuzzMode();
   const inputs = {};
-  for (const s of simSignals().filter(s => s.kind === "input")) {
-    const v = simValidateInput(s, state.sim.values[s.name]);
-    if (!v.ok) { setSimNote("err", "input " + s.name + ": " + v.msg); return; }
-    inputs[s.name] = v.norm;
+  if (fuzzMode === "manual") {
+    for (const s of simSignals().filter(s => s.kind === "input")) {
+      const v = simValidateInput(s, state.sim.values[s.name]);
+      if (!v.ok) { setSimNote("err", "input " + s.name + ": " + v.msg); return; }
+      inputs[s.name] = v.norm;
+    }
   }
   // A Run stops where the C first departs from the model; once they have
   // diverged, runs carry on (the waveform bands every differing cycle).
   const c = state.sim.c;
   const req = { inputs, count, stop_on_violation: document.getElementById("sim-stop-viol").checked,
                 stop_on_divergence: !!c && c.divergedAt == null && count > 1 };
+  if (fuzzMode !== "manual") req.fuzz = { mode: fuzzMode };
   const brk = document.getElementById("sim-break").value.trim();
   if (withBreak && brk) req.break = brk;
   let r, d;
@@ -7105,14 +7699,16 @@ function simTake(d, req) {
   s.rows.push(...rows);
   if (s.rows.length > SIM_WAVE_ROWS) s.rows.splice(0, s.rows.length - SIM_WAVE_ROWS);
   s.violatedCycles += rows.filter(r => r.violations.length).length;
-  if (rows.length) {
-    const last = rows[rows.length - 1];
+  // Refused bad-data injections carry no values — the model never stepped.
+  const ranRows = rows.filter(r => r.values);
+  if (ranRows.length) {
+    const last = ranRows[ranRows.length - 1];
     const values = {};
     sigs.forEach((g, i) => values[g.name] = last.values[i]);
     s.last = { cycle: last.cycle, values, modes: last.modes || [], violations: last.violations || [],
                c: last.c, cDiff: last.c_diff };
   }
-  const firstDiff = rows.find(r => r.c_diff && r.c_diff.length);
+  const firstDiff = ranRows.find(r => r.c_diff && r.c_diff.length);
   if (firstDiff) simMarkDivergence(firstDiff.cycle, firstDiff);
   s.session.cycle = d.cycle;
   s.review = null; // stepping returns the diagram to the latest cycle
@@ -7130,13 +7726,35 @@ function simTake(d, req) {
   else if (last && last.cDiff && last.cDiff.length) {
     setSimNote("err", "cycle " + last.cycle + ": the compiled C differs from the model in " + last.cDiff.join(", "));
   } else setSimNote("", rows.length > 1 ? "ran " + rows.length + " cycles" : "");
+  // A FUZZ run: show the generated values in the watch table, and how the
+  // bad-data injections fared (refusals mark the waveform).
+  if (d.fuzz) {
+    const fed = [...rows].reverse().find(r => r.fuzz_inputs);
+    if (fed) {
+      for (const [name, text] of Object.entries(fed.fuzz_inputs)) {
+        const inp = document.querySelector('#sim-watch-body [data-port="' + CSS.escape(name) + '"]');
+        if (inp) { inp.value = text; state.sim.values[name] = text; }
+      }
+    }
+    for (const r of rows) {
+      if (r.fuzz_bad && r.fuzz_bad.outcome === "refused") {
+        s.marks.push({ cycle: r.cycle, label: "⛔ " + r.fuzz_bad.input + " ← " + r.fuzz_bad.text, cls: "break" });
+      } else if (r.fuzz_bad && r.fuzz_bad.outcome === "accepted") {
+        s.marks.push({ cycle: r.cycle, label: "⚠ accepted " + r.fuzz_bad.input + " ← " + r.fuzz_bad.text, cls: "diverge" });
+      }
+    }
+    if (s.marks.length > 50) s.marks.shift();
+    const refused = d.fuzz.refused || 0;
+    setSimNote(refused ? "warn" : "", "FUZZ " + d.fuzz.mode + " · seed " + d.fuzz.seed + " · " +
+      ranRows.length + " cycle" + (ranRows.length === 1 ? "" : "s") + " run" +
+      (refused ? " · " + refused + " bad input" + (refused === 1 ? "" : "s") + " refused (see the waveform marks)" : ""));
+  }
   if (d.c_error) {
     s.c = null;
     document.getElementById("sim-cil").checked = false;
     document.getElementById("sim-watch").classList.remove("cil");
     setSimNote("err", d.c_error);
   }
-  if (s.marks.length > 50) s.marks.shift();
   setSimStatus("SIMULATING " + s.session.root + " — cycle " + d.cycle);
   if (s.wave) s.wave.pinned = null;
   simWaveUpdate();
@@ -7734,6 +8352,34 @@ function dockToggleMax() {
   });
 })();
 
+// --- View options: the View menu's toggles persist, restored on open ------
+
+const VIEW_OPTION_IDS = ["grid-show", "grid-snap", "wire-labels", "wire-orth", "wire-types", "block-overlaps", "mm-show"];
+
+function persistViewOptions() {
+  try {
+    const saved = {};
+    for (const id of VIEW_OPTION_IDS) {
+      const el = document.getElementById(id);
+      if (el) saved[id] = el.checked;
+    }
+    localStorage.setItem("ols.viewOpts", JSON.stringify(saved));
+  } catch (_) {}
+}
+
+function restoreViewOptions() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("ols.viewOpts") || "{}");
+    for (const id of VIEW_OPTION_IDS) {
+      if (id in saved) {
+        const el = document.getElementById(id);
+        if (el) el.checked = !!saved[id];
+      }
+    }
+  } catch (_) {}
+}
+
+restoreViewOptions();
 refresh();
 loadToolbox();
 // Live-reload — the model file may be edited externally.

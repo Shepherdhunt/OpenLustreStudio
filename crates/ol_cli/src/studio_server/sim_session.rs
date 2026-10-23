@@ -37,18 +37,180 @@ pub struct RunReq {
     /// Cycles to run at most (ignored when `sequence` is given).
     pub count: usize,
     /// Stop after the first cycle on which this condition holds.
-    pub brk: Option<ol_ir::Expr>,
+    pub brk: Option<Breakpoint>,
     /// Stop after the first cycle with a contract violation.
     pub stop_on_violation: bool,
     /// Stop after the first cycle on which the C in the loop disagrees with
     /// the simulator.
     pub stop_on_divergence: bool,
+    /// FUZZ mode: generate every input's value instead of using `inputs` /
+    /// `sequence` (see [`FuzzCfg`]).
+    pub fuzz: Option<FuzzCfg>,
+}
+
+/// How a fuzzing run generates inputs (the Simulation dock's FUZZ toggle).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FuzzMode {
+    /// Valid values covering each input's full declared data-type range —
+    /// bools, every integer width across its whole span, finite reals across
+    /// the full float range (subnormals included), enum variants, struct
+    /// fields and array elements.
+    Range,
+    /// Bad-data injection: one input per cycle receives malformed value text
+    /// (out-of-range numbers, NaN, wrong enum names, broken struct syntax)
+    /// while the rest stay valid. The run reports how each injection was
+    /// refused — the input-validation contract under attack.
+    Bad,
+}
+
+impl FuzzMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FuzzMode::Range => "range",
+            FuzzMode::Bad => "bad",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct FuzzCfg {
+    pub mode: FuzzMode,
+    /// The generator seed; the same seed replays the same values, so a fuzz
+    /// finding can be saved as a TestScenario and repeated exactly.
+    pub seed: u64,
+}
+
+/// splitmix64 — small, deterministic, no dependencies.
+struct Rng(u64);
+
+impl Rng {
+    fn new(seed: u64) -> Rng {
+        Rng(seed)
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// A finite f32 from raw bits (NaN / ±Inf redrawn): the whole finite
+    /// float32 range, subnormals included.
+    fn f32_all(&mut self) -> f32 {
+        loop {
+            let v = f32::from_bits(self.next_u64() as u32);
+            if v.is_finite() {
+                return v;
+            }
+        }
+    }
+
+    /// A finite f64 from raw bits.
+    fn f64_all(&mut self) -> f64 {
+        loop {
+            let v = f64::from_bits(self.next_u64());
+            if v.is_finite() {
+                return v;
+            }
+        }
+    }
+}
+
+/// A valid value anywhere in `ty`'s declared range.
+fn fuzz_value(ty: &Type, project: &Project, rng: &mut Rng) -> Result<Value, String> {
+    Ok(match ty {
+        Type::Bool => Value::Bool(rng.next_u64() & 1 == 1),
+        Type::Int8 => Value::Int((rng.next_u64() & 0xFF) as u8 as i8 as i64),
+        Type::Int16 => Value::Int((rng.next_u64() & 0xFFFF) as u16 as i16 as i64),
+        Type::Int32 => Value::Int((rng.next_u64() & 0xFFFF_FFFF) as u32 as i32 as i64),
+        Type::Int64 => Value::Int(rng.next_u64() as i64),
+        // uint64 spans 0..=u64::MAX in the model, but simulator storage (and
+        // the JSON API) holds signed 64-bit — the supported span is sampled.
+        Type::Uint8 => Value::Int((rng.next_u64() & 0xFF) as i64),
+        Type::Uint16 => Value::Int((rng.next_u64() & 0xFFFF) as i64),
+        Type::Uint32 => Value::Int((rng.next_u64() & 0xFFFF_FFFF) as i64),
+        Type::Uint64 => Value::Int((rng.next_u64() & i64::MAX as u64) as i64),
+        Type::Float32 => Value::Float32(rng.f32_all()),
+        Type::Float64 => Value::Float(rng.f64_all()),
+        Type::Char => Value::Int((rng.next_u64() & 0xFF) as i64),
+        Type::Array { elem, len } => Value::Array(
+            (0..*len).map(|_| fuzz_value(elem, project, rng)).collect::<Result<_, _>>()?,
+        ),
+        Type::Named { name } => match project.packages.iter().find_map(|p| p.find_type(name)).map(|t| &t.body) {
+            Some(TypeBody::Enum(e)) => {
+                if e.variants.is_empty() {
+                    return Err(format!("enum `{name}` has no variants to sample"));
+                }
+                Value::Enum(e.variants[rng.next_u64() as usize % e.variants.len()].clone())
+            }
+            Some(TypeBody::Record { fields, .. }) => Value::Record(
+                fields
+                    .iter()
+                    .map(|f| Ok((f.name.clone(), fuzz_value(&f.ty, project, rng)?)))
+                    .collect::<Result<std::collections::BTreeMap<_, _>, String>>()?,
+            ),
+            Some(TypeBody::Alias { target, .. }) => fuzz_value(target, project, rng)?,
+            None => return Err(format!("type `{name}` is not declared in the model")),
+        },
+    })
+}
+
+/// One menu entry, chosen by the generator.
+fn pick_menu(menu: &[&str], rng: &mut Rng) -> String {
+    menu[rng.next_u64() as usize % menu.len()].to_string()
+}
+
+/// One malformed value text for `ty`, drawn from a per-type menu of classic
+/// bad inputs (out-of-range, wrong kind, broken syntax).
+fn bad_text(ty: &Type, project: &Project, rng: &mut Rng) -> String {
+    match ty {
+        Type::Bool => pick_menu(&["yes", "2", "", "TRUE OR FALSE"], rng),
+        Type::Int8 => pick_menu(&["128", "-129", "1.5", "abc", ""], rng),
+        Type::Int16 => pick_menu(&["32768", "-32769", "0x10", "12,5"], rng),
+        Type::Int32 => pick_menu(&["2147483648", "-2147483649", "4 GB", ""], rng),
+        Type::Int64 => pick_menu(&["9223372036854775808", "--5", "e3", ""], rng),
+        Type::Uint8 => pick_menu(&["256", "-1", "1.0", "0xFF", ""], rng),
+        Type::Uint16 => pick_menu(&["65536", "-2", "1e3", ""], rng),
+        Type::Uint32 => pick_menu(&["4294967296", "-3", "twelve", ""], rng),
+        Type::Uint64 => pick_menu(&["18446744073709551616", "-4", "6.02e23", ""], rng),
+        Type::Float32 | Type::Float64 => pick_menu(&["NaN", "Inf", "-Infinity", "1e999", "abc", ""], rng),
+        Type::Char => pick_menu(&["256", "-1", "abc", ""], rng),
+        Type::Array { len, .. } => {
+            if *len == 2 {
+                pick_menu(&["[1", "1;2", "[]", "[0;0;0]"], rng)
+            } else {
+                pick_menu(&["[1", "1;2", "[]", "[0;0]"], rng)
+            }
+        }
+        Type::Named { name } => match project.packages.iter().find_map(|p| p.find_type(name)).map(|t| &t.body) {
+            Some(TypeBody::Enum(_)) => pick_menu(&["", "NotAVariant", "maybe", "3"], rng),
+            Some(TypeBody::Record { .. }) => pick_menu(&["{x}", "{}", "null", "3", "{a=1;}", "[1;2]"], rng),
+            Some(TypeBody::Alias { target, .. }) => bad_text(target, project, rng),
+            None => "?undeclared".to_string(),
+        },
+    }
+}
+
+/// A checked, per-run namespace for a breakpoint. Its auxiliary project
+/// contains only the requested globals and their dependencies; the live
+/// model's constructor and state remain isolated from unrelated declarations.
+pub struct Breakpoint {
+    pub expr: ol_ir::Expr,
+    pub project: Project,
+    pub node: String,
 }
 
 struct RunOut {
     rows: Vec<serde_json::Value>,
     stopped: &'static str,
     error: Option<String>,
+    /// Cycles the simulator actually stepped (bad-data fuzz attempts that
+    /// were refused run nothing, so they don't advance the session).
+    cycles_run: usize,
+    /// FUZZ echo: `{mode, seed, injected, refused}` for the session note.
+    fuzz: Option<serde_json::Value>,
     /// The C in the loop failed (crashed, hung, or spoke an unexpected
     /// format) and was detached.
     c_error: Option<String>,
@@ -181,7 +343,7 @@ impl SimSession {
         let (rtx, rrx) = mpsc::channel();
         self.tx.send(Cmd::Run(req, rtx)).map_err(|_| ended())?;
         let out = rrx.recv().map_err(|_| ended())??;
-        self.cycle += out.rows.len();
+        self.cycle += out.cycles_run;
         if out.c_error.is_some() {
             self.c_columns = None;
         }
@@ -191,6 +353,7 @@ impl SimSession {
             "stopped": out.stopped,
             "error": out.error,
             "c_error": out.c_error,
+            "fuzz": out.fuzz,
         }))
     }
 
@@ -256,17 +419,56 @@ impl Runner<'_> {
     /// Step with the held (or sequenced) inputs, record every cycle, stop
     /// early on a breakpoint, a violation or a C divergence (as asked). Every
     /// cycle's inputs are parsed before the first one runs, so a bad value
-    /// anywhere in a sequence runs nothing.
+    /// anywhere in a sequence runs nothing. A FUZZ mode replaces the held /
+    /// sequenced inputs with generated ones (see [`FuzzMode`]); in bad-data
+    /// mode a refused injection is recorded and the model is not stepped.
     fn run(&mut self, req: RunReq) -> Result<RunOut, String> {
+        // Resolve requested constants before the first main cycle. This is a
+        // separate evaluator: breakpoint-only globals never enter model state.
+        let breakpoint_sim = req.brk.as_ref().map(|b| Sim::new(&b.project, &b.node))
+            .transpose().map_err(|e| format!("breakpoint: {e}"))?;
+        let mut rng = req.fuzz.map(|c| Rng::new(c.seed));
         let empty = BTreeMap::new();
-        let plan: Vec<&BTreeMap<String, String>> = if req.sequence.is_empty() {
+        let plan: Vec<&BTreeMap<String, String>> = if req.sequence.is_empty() || req.fuzz.is_some() {
             vec![&empty; req.count]
         } else {
             req.sequence.iter().collect()
         };
+        // Bad-data fuzzing: what each cycle injected and what became of it.
+        #[derive(Clone)]
+        enum Inject {
+            None,
+            Accepted { name: String, text: String },
+            Refused { name: String, text: String, error: String },
+        }
+        let mut injected = vec![Inject::None; plan.len()];
         let mut cycles_inputs = Vec::with_capacity(plan.len());
         for (k, over) in plan.iter().enumerate() {
-            let at = if req.sequence.is_empty() { String::new() } else { format!("step {k}: ") };
+            let at = if req.sequence.is_empty() || req.fuzz.is_some() { String::new() } else { format!("step {k}: ") };
+            if let (Some(cfg), Some(rng)) = (req.fuzz, rng.as_mut()) {
+                // FUZZ generates every input's value; held/sequenced text is ignored.
+                let mut inputs = BTreeMap::new();
+                for p in &self.sim.node.inputs {
+                    let v = fuzz_value(&p.ty, self.project, rng)?;
+                    inputs.insert(p.name.clone(), v);
+                }
+                if cfg.mode == FuzzMode::Bad && !self.sim.node.inputs.is_empty() {
+                    // One input per cycle receives malformed text; the rest stay valid.
+                    let p = &self.sim.node.inputs[k % self.sim.node.inputs.len()];
+                    let text = bad_text(&p.ty, self.project, rng);
+                    match self.sim.parse_input(&p.name, &text) {
+                        Ok(v) => {
+                            inputs.insert(p.name.clone(), v);
+                            injected[k] = Inject::Accepted { name: p.name.clone(), text };
+                        }
+                        Err(error) => {
+                            injected[k] = Inject::Refused { name: p.name.clone(), text, error: error.to_string() };
+                        }
+                    }
+                }
+                cycles_inputs.push(inputs);
+                continue;
+            }
             for name in req.inputs.keys().chain(over.keys()) {
                 if !self.sim.node.inputs.iter().any(|p| p.name == *name) {
                     return Err(format!("{at}unexpected input `{name}` for `{}`", self.sim.node.name));
@@ -287,8 +489,23 @@ impl Runner<'_> {
                 break;
             }
         }
-        let mut out = RunOut { rows: Vec::new(), stopped: "count", error: None, c_error: None };
+        let mut out = RunOut { rows: Vec::new(), stopped: "count", error: None, cycles_run: 0,
+                               fuzz: req.fuzz.map(|c| serde_json::json!({"mode": c.mode.as_str(), "seed": c.seed})),
+                               c_error: None };
+        let mut refused = 0usize;
         for k in 0..plan.len() {
+            // A refused bad-data injection ran nothing; report it and move on.
+            if let Inject::Refused { name, text, error } = &injected[k] {
+                refused += 1;
+                out.rows.push(serde_json::json!({
+                    "cycle": self.cycle,
+                    "values": serde_json::Value::Null,
+                    "modes": [],
+                    "violations": [],
+                    "fuzz_bad": { "input": name, "text": text, "outcome": "refused", "error": error },
+                }));
+                continue;
+            }
             let inputs = &cycles_inputs[k.min(cycles_inputs.len() - 1)];
             let obs = match self.sim.step_observed(inputs) {
                 Ok(o) => o,
@@ -307,6 +524,20 @@ impl Runner<'_> {
                 "modes": obs.active_modes,
                 "violations": obs.violations,
             });
+            // FUZZ rows carry what was actually fed, so a run can be replayed
+            // and a finding saved as a TestScenario.
+            if req.fuzz.is_some() {
+                row["fuzz_inputs"] = serde_json::json!(
+                    self.sim.node.inputs.iter()
+                        .map(|p| (p.name.clone(), inputs.get(&p.name).map(Value::to_csv).unwrap_or_default()))
+                        .collect::<BTreeMap<_, _>>()
+                );
+                if let Inject::Accepted { name, text } = &injected[k] {
+                    row["fuzz_bad"] = serde_json::json!({
+                        "input": name, "text": text, "outcome": "accepted",
+                    });
+                }
+            }
             let mut diverged = false;
             if let Some(c) = self.c.as_mut() {
                 match c.step(&line, &ir_cells) {
@@ -327,6 +558,7 @@ impl Runner<'_> {
                 self.history_full = true;
             }
             out.rows.push(row);
+            out.cycles_run += 1;
             self.cycle += 1;
             if req.stop_on_divergence && diverged {
                 out.stopped = "divergence";
@@ -337,7 +569,7 @@ impl Runner<'_> {
                 return Ok(out);
             }
             if let Some(b) = &req.brk {
-                match self.sim.eval_condition(b, &values) {
+                match breakpoint_sim.as_ref().unwrap().eval_condition(&b.expr, &values) {
                     Ok(true) => {
                         out.stopped = "break";
                         return Ok(out);
@@ -354,6 +586,9 @@ impl Runner<'_> {
                 out.stopped = "c_error";
                 return Ok(out);
             }
+        }
+        if let Some(meta) = out.fuzz.as_mut() {
+            meta["refused"] = serde_json::json!(refused);
         }
         Ok(out)
     }

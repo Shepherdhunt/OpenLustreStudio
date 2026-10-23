@@ -78,6 +78,19 @@ pub struct NodePos {
     pub wrap: bool,
 }
 
+/// A hand-shaped wire: the interior waypoints the engineer dragged, in path
+/// order. The endpoints stay pinned to their boxes — the GUI prepends the
+/// source pin and appends the destination pin — so moving a box keeps its
+/// wires attached while the shaped middle stays where it was drawn.
+///
+/// Keys in [`DiagramLayout::wires`] use the Studio's wire identity
+/// `from|to|port` (port empty for wires into plain variable boxes).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct WireRoute {
+    #[serde(default)]
+    pub pts: Vec<(f64, f64)>,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct DiagramLayout {
     /// Free-form layout hints used by the GUI; ignored by the compiler.
@@ -92,6 +105,10 @@ pub struct DiagramLayout {
     /// `None` falls back to the GUI default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grid: Option<u32>,
+    /// Hand-shaped wires (their dragged waypoints), keyed `from|to|port`.
+    /// Absent means the wire keeps its automatic routing.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub wires: std::collections::BTreeMap<String, WireRoute>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

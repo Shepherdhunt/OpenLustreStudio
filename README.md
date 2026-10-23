@@ -248,14 +248,16 @@ and the layout persists into the model file.
 
 Each OS has its own download, with an installer (from the repository's
 Releases page, or from the latest run of the **package** workflow under
-Actions ▸ package ▸ Artifacts):
+Actions ▸ package ▸ Artifacts). The workflow's **bundle** job also packs
+all of them into one shareable file — `OpenLustreStudio-<v>-installers.tar.gz`
+— when you want a single download that covers every OS.
 
 | OS | Installer | Or |
 |---|---|---|
 | **Windows** 10/11, x64 | `OpenLustreStudio-<v>-windows-x86_64-Setup.exe` — a setup wizard; installs for you (no admin rights) or for everyone, adds Start Menu shortcuts and, optionally, `openlustre` to PATH; uninstall from Settings ▸ Apps | `…-windows-x86_64.zip`: portable, unzip and run |
 | **Ubuntu** 22.04+ (and Debian-based), x64 | `openlustre-studio_<v>_amd64.deb` — `sudo apt install ./openlustre-studio_<v>_amd64.deb` | `…-linux-x86_64.tar.gz`: unpack, `./install.sh` (per user; `--system` for everyone; `--uninstall`) |
-| **macOS** 13+, Apple Silicon | `…-macos-arm64.pkg` — double-click (the download is not signed: right-click ▸ Open the first time) | `…-macos-arm64.tar.gz`: unpack, `./install.sh` |
-| **macOS** 13+, Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` |
+| **macOS** 13+, Apple Silicon | `…-macos-arm64.dmg` — open it and drag "OpenLustre Studio" onto the Applications folder | `…-macos-arm64.pkg`: double-click installer, or `…-macos-arm64.tar.gz` + `./install.sh` |
+| **macOS** 13+, Intel | `…-macos-x86_64.dmg` (drag & drop) | `…-macos-x86_64.pkg`, `…-macos-x86_64.tar.gz` |
 
 Every download carries the Studio, the 41-block library, and the samples;
 the Linux and macOS ones also bundle the Kind 2 prover and Z3, so proving
@@ -270,14 +272,31 @@ Studio opens in your browser, with its log in a console window (close it to
 stop the Studio). From a terminal:
 
 ```bash
-openlustre studio launch                 # a welcome project in ~/OpenLustre
-openlustre studio launch --sample pms    # the Payload Management System sample
+openlustre studio launch                 # the welcome page: create / open a
+                                         # workspace, or pick a shipped sample
+openlustre studio launch --sample pms    # straight to the PMS sample
+openlustre studio launch --sample pnt    # straight to the PNT OS demo
 ```
 
-To build the downloads yourself: `packaging/linux/build.sh <version>`,
-`packaging/macos/build.sh <version> <aarch64|x86_64>`, or
-`packaging\windows\build-installer.ps1 -Version <version>`; each OS has a
-`smoke` script that installs the result and checks it.
+To build the downloads yourself: `packaging/linux/build.sh <version>` (or
+`packaging/linux/build-in-docker.sh <version>` from any machine with
+Docker — on a Mac it cross-compiles the amd64 package in an Ubuntu 22.04
+container), `packaging/macos/build.sh <version> <aarch64|x86_64>` (also
+writes the drag-and-drop `.dmg`), or `packaging\windows\build-installer.ps1
+-Version <version>` (needs Inno Setup on Windows — in CI). Then
+`packaging/bundle.sh <version>` packs whatever `dist/` holds into
+`OpenLustreStudio-<v>-installers.tar.gz`, with a WHERE-TO-GET note for any
+OS you didn't build; each OS has a `smoke` script that installs the result
+and checks it. CI's `bundle` job does all of this on all three OSes and
+uploads the complete tarball.
+
+To share the source itself — alongside the GitHub page, or instead of it —
+`packaging/source-tarball.sh [version]` writes
+`dist/openlustre-studio-<version>-src.tar.gz`: the working tree (tracked
+files plus new unignored ones, uncommitted edits included; `target/`, `dist/`
+and other ignored files never ship), with a `VERSION` inside. Untar it
+anywhere with a Rust toolchain and `cargo build --release -p ol_cli` gives
+the same `openlustre` binary.
 
 ## The workflow
 

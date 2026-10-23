@@ -168,8 +168,9 @@ pub fn check_project(project: &Project) -> CheckReport {
         }
     }
 
-    check_constants(project, &tctx, &mut diags);
-
+    // Node signatures come first: a constant's value may call a function
+    // (`FROM_FUNCTION = Twice(BASE)`), and its typecheck resolves that call
+    // against the same signature map the nodes use.
     let mut signatures: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
     for n in project.all_nodes() {
         if signatures
@@ -185,6 +186,8 @@ pub fn check_project(project: &Project) -> CheckReport {
             );
         }
     }
+
+    check_constants(project, &signatures, &tctx, &mut diags);
 
     for n in project.all_nodes() {
         check_node(n, &signatures, &tctx, &mut diags);
@@ -256,7 +259,12 @@ fn strip_condact(e: &mut Expr) {
     }
 }
 
-fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagnostic>) {
+fn check_constants(
+    project: &Project,
+    sigs: &HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)>,
+    tctx: &TypeContext,
+    diags: &mut Vec<Diagnostic>,
+) {
     // Synthesize a tiny anonymous node that lets us reuse infer_expr_type for
     // constant-value typechecking. Const RHS can reference other constants
     // and enum variants but nothing in `env`.
@@ -272,7 +280,6 @@ fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagno
         probes: Vec::new(),
     };
     let empty_env: BTreeMap<String, Type> = BTreeMap::new();
-    let empty_sigs: HashMap<String, (Vec<Port>, Vec<Port>, NodeKind)> = HashMap::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for pkg in &project.packages {
@@ -297,7 +304,7 @@ fn check_constants(project: &Project, tctx: &TypeContext, diags: &mut Vec<Diagno
             if let Some(inferred) = infer_expr_type(
                 &c.value,
                 &empty_env,
-                &empty_sigs,
+                sigs,
                 &dummy_node,
                 diags,
                 &ctx,

@@ -131,6 +131,24 @@ assert.equal(JSON.stringify(context.computePositions(plainDiagram)), withDetails
 assert.equal(JSON.stringify(diagram), beforeDiagram);
 console.log("studio_diagram_ui: checks passed (operands, nested paths, aliases, selection, escaping, clipping, inspectability, preserved layout)");
 
+// --- Newer canvas helpers: wire identities and overlap geometry -------------
+for (const name of ["wireKey", "rectsOverlap", "overlapGuardOn"]) {
+  const match = html.match(new RegExp("^function " + name + "\\([^]*?^}", "m"));
+  assert.ok(match, "embedded helper exists: " + name);
+  vm.runInContext(match[0], context);
+}
+assert.equal(context.wireKey("x", "eq0", 1), "x|eq0|1");
+assert.equal(context.wireKey("eq0", "y", undefined), "eq0|y|");
+assert.ok(context.rectsOverlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 5, y: 5, w: 10, h: 10 }, 0));
+assert.ok(!context.rectsOverlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 12, y: 0, w: 10, h: 10 }, 0), "clear horizontally");
+assert.ok(!context.rectsOverlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 12, y: 0, w: 10, h: 10 }, 2), "gap margin respected");
+assert.ok(context.rectsOverlap({ x: 0, y: 0, w: 10, h: 10 }, { x: 11, y: 0, w: 10, h: 10 }, 2), "gap margin closes in");
+element("block-overlaps").checked = true; // a real checkbox defaults the guard on
+assert.equal(context.overlapGuardOn(), true, "guard defaults to on");
+element("block-overlaps").checked = false;
+assert.equal(context.overlapGuardOn(), false, "guard follows the View toggle");
+console.log("studio_diagram_ui: wire keys and overlap geometry checked");
+
 if (process.argv[2]) {
   const actual = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
   const sensorEq = actual.equations.find(e => e.lhs.includes("sensor_ok"));

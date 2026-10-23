@@ -1,0 +1,351 @@
+{
+  "name": "types",
+  "packages": [
+    {
+      "name": "user",
+      "types": [
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "FixType",
+            "variants": [
+              "NoFix",
+              "Fix2D",
+              "Fix3D"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "Health",
+            "variants": [
+              "SrcOk",
+              "SrcSuspect",
+              "SrcFault"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "PvtStatus",
+            "variants": [
+              "PvtInvalid",
+              "PvtAcquiring",
+              "PvtFused",
+              "PvtCoasting",
+              "PvtHold"
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "Enum",
+            "name": "Alert",
+            "variants": [
+              "AlertNone",
+              "AlertSensor",
+              "AlertTimeout",
+              "AlertIntegrity"
+            ]
+          }
+        }
+      ],
+      "constants": [
+        {
+          "name": "SATS_MIN",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 4
+            }
+          }
+        },
+        {
+          "name": "HDOP_MAX",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 250
+            }
+          }
+        },
+        {
+          "name": "VEL_STEP_MAX_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 2.0
+            }
+          }
+        },
+        {
+          "name": "POS_DISAGREE_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 10.0
+            }
+          }
+        },
+        {
+          "name": "V_DISAGREE_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 15.0
+            }
+          }
+        },
+        {
+          "name": "POS_MAX_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 10000.0
+            }
+          }
+        },
+        {
+          "name": "POS_SAT_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 12000.0
+            }
+          }
+        },
+        {
+          "name": "PROTECT_FUSED_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 10.0
+            }
+          }
+        },
+        {
+          "name": "PROTECT_COAST_M",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 120.0
+            }
+          }
+        },
+        {
+          "name": "Q_POS",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 0.05
+            }
+          }
+        },
+        {
+          "name": "R_GNSS",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 4.0
+            }
+          }
+        },
+        {
+          "name": "Q_ALT",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 0.02
+            }
+          }
+        },
+        {
+          "name": "R_GNSS_Z",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 9.0
+            }
+          }
+        },
+        {
+          "name": "R_BARO",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 25.0
+            }
+          }
+        },
+        {
+          "name": "P_FLOOR",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 0.25
+            }
+          }
+        },
+        {
+          "name": "P_CEIL",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 100.0
+            }
+          }
+        },
+        {
+          "name": "R_MIN",
+          "ty": {
+            "kind": "Float32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Float",
+              "value": 1.0
+            }
+          }
+        },
+        {
+          "name": "CONVERGE_CYCLES",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 20
+            }
+          }
+        },
+        {
+          "name": "COAST_BUDGET_CYCLES",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 50
+            }
+          }
+        },
+        {
+          "name": "DRIFT_WINDOW_CYCLES",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 60
+            }
+          }
+        },
+        {
+          "name": "HOLDOVER_MAX_S",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 10
+            }
+          }
+        },
+        {
+          "name": "TOW_MAX_S",
+          "ty": {
+            "kind": "Int32"
+          },
+          "value": {
+            "expr": "Const",
+            "lit": {
+              "lit": "Int",
+              "value": 604800
+            }
+          }
+        }
+      ],
+      "nodes": [],
+      "contracts": [],
+      "imported_operators": [],
+      "state_machines": []
+    }
+  ],
+  "main": null,
+  "includes": []
+}

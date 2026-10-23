@@ -4,7 +4,7 @@
 #   openlustre                    the program (Studio, CLI, code generator)
 #   tools/bin/kind2, tools/bin/z3 the prover, for the download's platform
 #   tools/kind2-docker.sh         Kind 2 through Docker, as a fallback
-#   examples/pms, examples/release_logic   the samples (`studio launch --sample`)
+#   examples/pms, release_logic, pnt      the samples (`studio launch --sample`)
 #   README.md, LICENSE, VERSION
 #
 #   packaging/stage.sh <openlustre> <os-arch> <dir> <version>
@@ -31,7 +31,7 @@ chmod 755 "$DIR/openlustre"
 cp "$ROOT/tools/kind2-docker.sh" "$DIR/tools/"
 chmod 755 "$DIR/tools/kind2-docker.sh"
 
-for ex in pms release_logic; do
+for ex in pms release_logic pnt; do
     mkdir -p "$DIR/examples/$ex"
     (cd "$ROOT/examples/$ex" && git ls-files -z -- . ':!:.github' | xargs -0 tar -cf - --) \
         | tar -xf - -C "$DIR/examples/$ex"

@@ -173,6 +173,34 @@ fn expected(path: &str, ty: &Type, detail: &str) -> String {
     format!("input `{path}`: expected {}; {detail}", type_name(ty))
 }
 
+/// The inclusive span a declared integer type accepts (uint64 spans 0..=2⁶³−1
+/// in simulator storage; wider values are explicitly unsupported). Inputs
+/// outside their declared width are refused — the generated C would silently
+/// wrap them, and a diagrammed uint8 must never be fed 300.
+fn int_range(ty: &Type) -> Option<(i64, i64)> {
+    match ty {
+        Type::Int8 => Some((i8::MIN as i64, i8::MAX as i64)),
+        Type::Int16 => Some((i16::MIN as i64, i16::MAX as i64)),
+        Type::Int32 => Some((i32::MIN as i64, i32::MAX as i64)),
+        Type::Int64 => Some((i64::MIN, i64::MAX)),
+        Type::Uint8 => Some((0, u8::MAX as i64)),
+        Type::Uint16 => Some((0, u16::MAX as i64)),
+        Type::Uint32 => Some((0, u32::MAX as i64)),
+        Type::Uint64 => Some((0, i64::MAX)),
+        _ => None,
+    }
+}
+
+/// An integer already parsed as i64, checked against its declared width.
+fn checked_int(v: i64, ty: &Type, path: &str) -> Result<Value, String> {
+    if let Some((lo, hi)) = int_range(ty) {
+        if v < lo || v > hi {
+            return Err(expected(path, ty, &format!("{v} is outside the declared range; enter an integer from {lo} to {hi}")));
+        }
+    }
+    Ok(Value::Int(v))
+}
+
 fn parse_text(raw: &str, ty: &Type, project: &Project, path: &str, depth: usize) -> Result<Value, String> {
     depth_ok(depth, path)?;
     let raw = raw.trim();
@@ -186,8 +214,9 @@ fn parse_text(raw: &str, ty: &Type, project: &Project, path: &str, depth: usize)
             .ok_or_else(|| expected(path, ty, "enter a finite float32 number; NaN, infinity and overflow are unsupported inputs")),
         Type::Float64 => raw.parse::<f64>().ok().filter(|v| v.is_finite()).map(Value::Float)
             .ok_or_else(|| expected(path, ty, "enter a finite float64 number; NaN, infinity and overflow are unsupported inputs")),
-        t if t.is_integer() => raw.parse::<i64>().map(Value::Int)
-            .map_err(|_| expected(path, ty, "enter an integer representable as signed 64-bit; larger uint64 inputs are unsupported")),
+        t if t.is_integer() => raw.parse::<i64>()
+            .map_err(|_| expected(path, ty, "enter an integer representable as signed 64-bit; larger uint64 inputs are unsupported"))
+            .and_then(|v| checked_int(v, ty, path)),
         Type::Char => raw.parse::<u8>().map(|v| Value::Int(v as i64))
             .map_err(|_| expected(path, ty, "enter a character byte as an integer from 0 to 255")),
         Type::Array { elem, len } => {
@@ -259,9 +288,9 @@ fn parse_json(value: &Json, ty: &Type, project: &Project, path: &str, depth: usi
             .ok_or_else(|| expected(path, ty, "JSON value must be a finite float32 number; strings, NaN, infinity and overflow are unsupported inputs")),
         Type::Float64 => value.as_f64().filter(|v| v.is_finite()).map(Value::Float)
             .ok_or_else(|| expected(path, ty, "JSON value must be a finite float64 number; strings, NaN and infinity are unsupported inputs")),
-        t if t.is_integer() => value.as_i64().map(Value::Int).ok_or_else(|| {
+        t if t.is_integer() => value.as_i64().ok_or_else(|| {
             expected(path, ty, "JSON value must be an integer representable as signed 64-bit; strings, fractions and larger uint64 inputs are unsupported")
-        }),
+        }).and_then(|v| checked_int(v, ty, path)),
         Type::Char => value.as_u64().filter(|v| *v <= 255).map(|v| Value::Int(v as i64))
             .ok_or_else(|| expected(path, ty, "JSON value must be a character byte from 0 to 255")),
         Type::Array { elem, len } => {

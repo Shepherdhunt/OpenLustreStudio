@@ -496,7 +496,7 @@ impl<'a> Sim<'a> {
         let values: Vec<bool> = if obs.signals.is_empty() {
             Vec::new()
         } else {
-            let out = step_instance(usize::MAX, &obs.node, args, &mut self.observer_calls, self.project, &mut None)?;
+            let out = step_instance(usize::MAX, &obs.node, args, &mut self.observer_calls, self.project, &mut None, &self.consts)?;
             let items = match out {
                 Value::Tuple(items) => items,
                 single => vec![single],
@@ -1170,7 +1170,7 @@ fn eval(
                     let mut out = Vec::with_capacity(n);
                     for k in 0..n {
                         let args: Vec<Value> = arrs.iter().map(|a| a[k].clone()).collect();
-                        out.push(call_function_values(callee, args, project, cov)?);
+                        out.push(call_function_values(callee, args, project, cov, &constants_from_env(env, project))?);
                     }
                     Ok(Value::Array(out))
                 }
@@ -1182,7 +1182,7 @@ fn eval(
                     let mut acc =
                         eval(seed, env, state, call_states, project, site_clocks, cov)?;
                     for elem in &arrs[0] {
-                        acc = call_function_values(callee, vec![acc, elem.clone()], project, cov)?;
+                        acc = call_function_values(callee, vec![acc, elem.clone()], project, cov, &constants_from_env(env, project))?;
                     }
                     Ok(acc)
                 }
@@ -1194,11 +1194,13 @@ fn eval(
 /// Invoke a stateless function with already-computed argument values — the
 /// per-element call an iterator makes. Mirrors the `Function` branch of
 /// [`eval_call`] but takes `Value`s instead of argument expressions.
+/// `consts` is this cycle's evaluated project constants.
 fn call_function_values(
     callee: &NodeDef,
     arg_values: Vec<Value>,
     project: &Project,
     cov: &mut Option<Coverage>,
+    consts: &BTreeMap<String, Value>,
 ) -> Result<Value, SimError> {
     if arg_values.len() != callee.inputs.len() {
         return Err(SimError::EvalError(format!(
@@ -1208,16 +1210,7 @@ fn call_function_values(
             arg_values.len()
         )));
     }
-    let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
-    for pkg in &project.packages {
-        for c in &pkg.constants {
-            let mut ts = State::default();
-            let mut tc: HashMap<usize, State> = HashMap::new();
-            if let Ok(v) = eval(&c.value, &callee_env, &mut ts, &mut tc, project, None, &mut None) {
-                callee_env.insert(c.name.clone(), fit_to(&c.ty, v, project));
-            }
-        }
-    }
+    let mut callee_env: BTreeMap<String, Value> = consts.clone();
     for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
         // Passing an argument converts it like an assignment to the input.
         callee_env.insert(p.name.clone(), fit_to(&p.ty, v, project));
@@ -1276,13 +1269,32 @@ fn eval_call(
         arg_values.push(eval(a, env, state, call_states, project, site_clocks, cov)?);
     }
     // The call-site key is the address of the `Expr::Call` node — stable for
-    // Sim's lifetime.
-    step_instance(call_expr as *const Expr as usize, callee, arg_values, call_states, project, cov)
+    // Sim's lifetime. The caller's env carries this cycle's constants.
+    step_instance(call_expr as *const Expr as usize, callee, arg_values, call_states, project, cov, env)
+}
+
+/// The already-evaluated constants a callee body sees, picked out of the
+/// caller's environment by the project's constant names. The Sim evaluates
+/// constants once per cycle in declaration order — re-evaluating them per
+/// call would recurse forever when a constant is defined by a function call
+/// (`FROM_FUNCTION = Twice(BASE)` evaluates the call, which would re-enter
+/// the constants).
+fn constants_from_env(env: &BTreeMap<String, Value>, project: &Project) -> BTreeMap<String, Value> {
+    let mut out = BTreeMap::new();
+    for pkg in &project.packages {
+        for c in &pkg.constants {
+            if let Some(v) = env.get(&c.name) {
+                out.insert(c.name.clone(), v.clone());
+            }
+        }
+    }
+    out
 }
 
 /// Run one cycle of node instance `key` (its state lives in
 /// `call_states[key]`) on already-evaluated inputs, returning its output
 /// (a tuple for several outputs). Shared by calls and contract observers.
+/// `consts` is this cycle's evaluated project constants (declaration order).
 fn step_instance(
     key: usize,
     callee: &NodeDef,
@@ -1290,30 +1302,10 @@ fn step_instance(
     call_states: &mut HashMap<usize, State>,
     project: &Project,
     cov: &mut Option<Coverage>,
+    consts: &BTreeMap<String, Value>,
 ) -> Result<Value, SimError> {
-
-    // Project-wide constants are visible inside every callee body. We
-    // re-evaluate them here rather than threading a state through every eval
-    // — constants don't use temporal operators or calls, so the throwaway
-    // state/call_states never matter.
-    let mut callee_env: BTreeMap<String, Value> = BTreeMap::new();
-    for pkg in &project.packages {
-        for c in &pkg.constants {
-            let mut throw_state = State::default();
-            let mut throw_calls: HashMap<usize, State> = HashMap::new();
-            if let Ok(v) = eval(
-                &c.value,
-                &callee_env,
-                &mut throw_state,
-                &mut throw_calls,
-                project,
-                None,
-                &mut None,
-            ) {
-                callee_env.insert(c.name.clone(), v);
-            }
-        }
-    }
+    // Project-wide constants are visible inside every callee body.
+    let mut callee_env: BTreeMap<String, Value> = consts.clone();
     for (p, v) in callee.inputs.iter().zip(arg_values.into_iter()) {
         // Passing an argument converts it like an assignment to the input.
         callee_env.insert(p.name.clone(), fit_to(&p.ty, v, project));

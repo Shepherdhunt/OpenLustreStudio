@@ -37,7 +37,7 @@ pub use clocks::{infer_clocks, node_uses_clocks, Clock, ClockError, ClockInfo};
 pub use declock::{declock_node, declock_project, default_expr, DeclockError};
 pub use diag::{Diagnostic, Severity, SourceSpan};
 pub use expr::{BinOp, Expr, FieldInit, IterKind, Literal, UnaryOp};
-pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe};
+pub use node::{DiagramLayout, Equation, Local, NodeDef, NodeKind, NodePos, Port, Probe, WireRoute};
 pub use order::evaluation_order;
 pub use project::{ConstDef, ConstructKind, ConstructOrigin, Package, Project, TypeDef, TypeBody, EnumDef, RecordField};
 pub use slice::slice_for_root;

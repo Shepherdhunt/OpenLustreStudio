@@ -1,9 +1,17 @@
 OpenLustre Studio for macOS
 ===========================
 
-Needs macOS 13 (Ventura) or later. Two ways to install (pick the download
+Needs macOS 13 (Ventura) or later. Three ways to install (pick the download
 for your Mac's chip: arm64 for Apple Silicon M1/M2/M3/M4, x86_64 for
 Intel):
+
+  .dmg      Open it and drag "OpenLustre Studio" onto the Applications
+            folder in the same window — the standard macOS install. macOS
+            may say it "can't be opened because it is from an unidentified
+            developer" (the download is not signed by Apple): right-click
+            the .dmg, choose Open, then Open again. Dragging installs the
+            apps; run the install.sh you see beside the folder afterwards
+            if you also want the `openlustre` terminal command.
 
   .pkg      Double-click it. macOS may say it "can't be opened because it
             is from an unidentified developer" (the download is not signed

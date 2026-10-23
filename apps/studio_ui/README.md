@@ -9,6 +9,17 @@ openlustre studio serve path/to/model.ols --with-stdlib libraries --port 8181
 # studio: serving http://127.0.0.1:8181 (model: path/to/model.ols)
 ```
 
+Started with **no model** (`openlustre studio launch`, or `studio serve`
+with no argument — what the installed apps run), the Studio opens on a
+**welcome page** (VS Code / SCADE style): create a workspace, open one from
+the recent list (`~/OpenLustre` and its subfolders, `GET /api/inspect`
+answers `welcome` + `workspaces`), or pick a shipped sample — the PMS, the PNT OS demo and
+release-logic (`POST /api/workspace/sample {name}` copies it to
+`~/OpenLustre/samples` and opens it; samples never point at the machine they
+were built on). The Recent column lists the last four workspaces this user
+opened (`~/OpenLustre/recent.json`), not a folder scan. `POST /api/workspace/{open,new}` clear the welcome state; File ▸
+New/Open Workspace keep working afterwards.
+
 Open the printed URL in any browser to get the Project Explorer, the
 diagnostics panel, the generated Lustre and C-Lite views, and a
 simulation runner — no JS toolchain, no separate install, no Node, no
@@ -25,6 +36,22 @@ The dataflow canvas is a SCADE-style drafting surface:
 - **Orthogonal wires** — rounded-corner Manhattan routing (with a
   feedback loop-around for backward wires), source-anchored
   `name: type` annotations, and a View-menu toggle back to curves.
+  Links are also **shapeable**: grab a wire anywhere and drag to lay a
+  waypoint (up to 8), drag the round handles to reroute, click a handle to
+  remove it. Shapes persist into the model file per wire
+  (`/api/edit/set_layout` `wires`, served back by `/api/diagram` as
+  `wire_routes`) while the endpoints stay pinned to their boxes.
+- **Link data types** — the View menu's *link data types* toggle (off by
+  default) labels every wire `source | expected` — `uint8 | uint8` on a
+  clean link, `uint16 | uint8` in red where a connection's source and the
+  type its destination expects disagree (call and library-block pins carry
+  their expected parameter type, served as `dst_type` on the wire).
+- **Overlap guard** — *prevent overlapping boxes* (View menu, **on by
+  default**): dragging, resizing or arrow-key-nudging a box onto another is
+  refused — the move slides along one axis instead, so no two boxes ever
+  sit on top of each other. Boxes already stacked (a layout drawn with the
+  guard off) can still be pulled apart: only *new* overlaps are prevented.
+  Turn the toggle off to stack freely.
 - **Expression details** — the panel above the canvas shows each operation's
   ordered operand expressions and their types, full field/index paths, and
   the declared named struct sources (including resolved aliases). Select a
@@ -38,6 +65,12 @@ The dataflow canvas is a SCADE-style drafting surface:
 - **Selection** — rubber-band marquee on empty canvas, ctrl-click
   toggling, group dragging of the whole selection, arrow-key nudging
   (grid-step; Shift for 1 px), delete of everything selected.
+- **Rapid interface editing** — the toolbox heads with the open
+  operator's own Signals: Inputs, Locals and Outputs, each listed with
+  its type and a one-click **+ add** under it; the canvas carries dashed
+  **+ input / + output** boxes at the foot of its interface columns
+  (inputs are what the environment feeds the operator — sensors in the
+  modelling sense; the language has no separate sensor category).
 - **Layout tools** — align lefts/rights/tops/bottoms/centers and
   distribute horizontally/vertically, from the Diagram menu or the
   canvas right-click menu; positions persist into the model file.
@@ -61,8 +94,10 @@ textual machine updates.
 
 Contracts are edited in the Contracts dialog (Project ▸ Contracts,
 Insert ▸ Contract, the tree, an operator's right-click menu, or the chip
-beside the diagram's operator name): clause rows, a mode table, and a
-CoCoSpec text view over the same clauses. `/api/contract` serves them,
+beside the diagram's operator name): clause rows, a mode table, a
+CoCoSpec text view over the same clauses, and a TestScenarios tab (the
+project's saved simulation scenarios — replay them, delete them, or
+save the running session as a new one). `/api/contract` serves them,
 `/api/contract/check` dry-runs an edit (introduced errors, every
 diagnostic about the contract, its CoCoSpec text), and
 `/api/edit/{add,update,remove}_contract` save them; the interface is
@@ -154,6 +189,36 @@ per cycle, with `inputs` filling any gaps — which is how a test scenario
 or a Kind 2 counterexample is replayed in the session. Every step of the
 sequence is parsed before any runs, so a bad value runs nothing (the
 error names the step).
+
+**FUZZ modes** replace the held inputs with generated ones (radio buttons
+in the Simulation dock): `POST /api/sim/step {"fuzz": {"mode":
+"range"|"bad", "seed": n}}`. *Range* generates every input across its
+data type's full span each cycle — bools, every integer width across its
+whole range, finite reals across the full float range (subnormals
+included), enum variants, struct fields, array elements — and each row
+carries `fuzz_inputs` (what was actually fed). *Bad data* gives one input
+per cycle malformed text (out-of-range numbers, NaN, wrong enum names,
+broken struct syntax) while the rest stay valid; a refused injection is
+reported on its row as `fuzz_bad {input, text, outcome, error}` and the
+model is not stepped (the response's `fuzz.refused` counts them, and the
+cycle counter only advances on cycles that ran). The same seed replays
+the same values, so a FUZZ finding can be saved as a TestScenario and
+repeated exactly.
+
+**TestScenarios** are named input vectors in `scenarios/` — a manual run
+or a FUZZ one kept to repeat. *Save TestScenario…* in the Simulation
+dock (`POST /api/tests/save {name, csv, overwrite?}`) writes the
+session's inputs so far as the same CSV the golden-trace runner uses;
+`GET /api/tests/one?name=` reads one back for replay
+(`POST /api/tests/delete` removes it). The Contracts dialog's
+TestScenarios tab lists them: replay in a live session, delete, or hop
+to *Run Test Scenarios* — saved scenarios join the golden-trace tests and
+the evidence report.
+
+The View menu's toggles (grid, snap, wire labels, orthogonal wires, link
+data types, the overlap guard, the minimap) persist in the browser and
+are restored when the Studio reopens — the diagram opens the way it was
+last left.
 
 The waveform viewer draws three sources. The session's rows, kept by the
 client (the newest 10000 cycles). `POST /api/tests/run`'s `traces`: per

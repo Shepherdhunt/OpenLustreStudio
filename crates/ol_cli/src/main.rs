@@ -282,7 +282,9 @@ enum StudioCmd {
     /// rest of the CLI exposes; the model is re-loaded on every request so
     /// external edits are picked up by a page refresh.
     Serve {
-        model: PathBuf,
+        /// Model (or workspace folder) to serve. Omitted: the welcome page —
+        /// open or create a workspace from the browser.
+        model: Option<PathBuf>,
         #[arg(long, default_value_t = 8181)]
         port: u16,
         /// Use this on-disk block library instead of the one embedded in the
@@ -298,9 +300,9 @@ enum StudioCmd {
         scenarios: Option<PathBuf>,
     },
     /// Desktop entry point: start the Studio and open it in the default
-    /// browser. With no model argument, opens (creating on first run) a
-    /// starter project in `~/OpenLustre/welcome.json`. This is the command
-    /// installer shortcuts run.
+    /// browser. With no model argument, opens the welcome page: create a
+    /// workspace, open one from the list, or pick a shipped sample. This is
+    /// the command installer shortcuts run.
     Launch {
         /// Model to open; defaults to ~/OpenLustre/welcome.json.
         model: Option<PathBuf>,
@@ -435,7 +437,7 @@ fn main() -> Result<()> {
                 with_stdlib,
                 no_stdlib,
                 scenarios,
-            } => serve_studio(&model, port, with_stdlib, no_stdlib, scenarios, false),
+            } => serve_studio(model.as_deref(), port, with_stdlib, no_stdlib, scenarios, false),
             StudioCmd::Launch {
                 model,
                 port,
@@ -1221,7 +1223,7 @@ pub(crate) fn load_for_studio(
 }
 
 fn serve_studio(
-    model: &Path,
+    model: Option<&Path>,
     port: u16,
     with_stdlib: Option<PathBuf>,
     no_stdlib: bool,
@@ -1233,26 +1235,46 @@ fn serve_studio(
     // not-yet-created workspace seeds the starter operator so a double-clicked
     // shortcut always opens something runnable; `openlustre new --empty` is the
     // path to a blank project.
-    let model = &resolve_workspace(model, false)?;
+    //
+    // No model at all is the welcome page: the UI starts with nothing open
+    // (VS Code / SCADE style) and switches once a workspace is opened,
+    // created, or a sample picked — File ▸ New/Open Workspace work too.
     let use_embedded = with_stdlib.is_none() && !no_stdlib;
-    // Eagerly load once to surface configuration errors before starting the
-    // server — better to fail fast than to spin up a UI that only ever shows
-    // errors.
-    let _ = load_for_studio(model, with_stdlib.as_deref(), use_embedded)
-        .with_context(|| format!("loading model {}", model.display()))?;
-
-    let scenarios = scenarios.unwrap_or_else(|| {
-        model
-            .parent()
-            .unwrap_or(Path::new("."))
-            .join("scenarios")
-    });
+    let welcome = std::sync::atomic::AtomicBool::new(model.is_none());
+    let (model, scenarios) = match model {
+        Some(model) => {
+            let model = &resolve_workspace(model, false)?;
+            // Eagerly load once to surface configuration errors before starting
+            // the server — better to fail fast than to spin up a UI that only
+            // ever shows errors.
+            let _ = load_for_studio(model, with_stdlib.as_deref(), use_embedded)
+                .with_context(|| format!("loading model {}", model.display()))?;
+            let scenarios = scenarios.unwrap_or_else(|| {
+                model
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("scenarios")
+            });
+            studio_server::record_recent(model);
+            (model.to_path_buf(), scenarios)
+        }
+        None => {
+            let base = studio_server::home_dir().join("OpenLustre");
+            std::fs::create_dir_all(&base)
+                .with_context(|| format!("creating {}", base.display()))?;
+            (base.clone(), base.join("scenarios"))
+        }
+    };
 
     let listener = studio_server::bind(studio_server::loopback(port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let local = listener.local_addr()?;
     let url = format!("http://{local}");
-    println!("studio: serving {url} (model: {})", model.display());
+    if welcome.load(std::sync::atomic::Ordering::Relaxed) {
+        println!("studio: serving {url} (welcome page — open or create a workspace, or pick a sample)");
+    } else {
+        println!("studio: serving {url} (model: {})", model.display());
+    }
     println!("studio: ctrl-c to stop.");
     if open_browser {
         open_in_browser(&url);
@@ -1262,14 +1284,15 @@ fn serve_studio(
     let types_file = model
         .parent()
         .map(|p| p.join("types.json"))
-        .filter(|p| p.exists() && Some(p.as_path()) != Some(model));
+        .filter(|p| p.exists() && Some(p.as_path()) != Some(&model));
 
     let ctx = studio_server::ServerCtx {
         workspace: std::sync::Mutex::new(studio_server::Workspace {
-            model: model.to_path_buf(),
+            model,
             scenarios,
             types_file,
         }),
+        welcome,
         with_stdlib,
         use_embedded,
         history: Default::default(),
@@ -1362,11 +1385,9 @@ fn cmd_studio_launch(
     no_stdlib: bool,
     no_open: bool,
 ) -> Result<()> {
-    let model = match model {
-        Some(m) => m,
-        None => welcome_project_path()?,
-    };
-    serve_studio(&model, port, with_stdlib, no_stdlib, None, !no_open)
+    // With no model the Studio opens on its welcome page: create a
+    // workspace, open one from the list, or pick a shipped sample.
+    serve_studio(model.as_deref(), port, with_stdlib, no_stdlib, None, !no_open)
 }
 
 /// Where the samples shipped with this program may be: `examples/` next to
@@ -1382,7 +1403,21 @@ fn sample_dirs() -> Vec<PathBuf> {
 /// A shipped sample's working copy, `~/OpenLustre/samples/<name>`: copied
 /// on first use (an installed copy is read-only, and the Studio writes into
 /// the project folder), and reused after that so edits are kept.
-fn sample_workspace(name: &str) -> Result<PathBuf> {
+pub(crate) fn sample_names() -> Vec<String> {
+    let mut names: Vec<String> = sample_dirs()
+        .iter()
+        .filter_map(|d| std::fs::read_dir(d).ok())
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub(crate) fn sample_workspace(name: &str) -> Result<PathBuf> {
     let dirs = sample_dirs();
     let valid = !name.is_empty() && !name.contains(['/', '\\']) && !name.starts_with('.');
     let Some(src) = dirs.iter().map(|d| d.join(name)).find(|d| valid && d.is_dir()) else {
@@ -1445,30 +1480,6 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// `~/OpenLustre/welcome.json`, created from a starter model on first run so
-/// double-clicking the installed shortcut always opens something editable.
-fn welcome_project_path() -> Result<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
-        .context("could not determine the home directory (HOME / USERPROFILE)")?;
-    let dir = home.join("OpenLustre");
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating {}", dir.display()))?;
-    // Back-compat: keep using an existing welcome.json; otherwise the default
-    // workspace is a `welcome.wksc` file.
-    let legacy = dir.join("welcome.json");
-    if legacy.exists() {
-        return Ok(legacy);
-    }
-    let path = dir.join("welcome.wksc");
-    if !path.exists() {
-        let project = starter_project();
-        std::fs::write(&path, serde_json::to_string_pretty(&project)?)
-            .with_context(|| format!("writing {}", path.display()))?;
-        println!("studio: created starter workspace at {}", path.display());
-    }
-    Ok(path)
-}
 
 /// An empty project: one `user` package, no operators, no `main`. The Studio
 /// opens it as a blank canvas — add operators from Insert ▸ Operator or by

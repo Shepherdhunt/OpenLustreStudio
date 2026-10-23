@@ -1399,11 +1399,14 @@ fn simulation_constructor_uses_checked_slice_and_preflights_retained_constant_ty
     assert_eq!(step["stopped"], "break");
     assert_eq!(step["rows"][0]["values"], serde_json::json!(["3", "11"]));
     let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":3},"break":"unused = 99"}"#).unwrap();
+    assert_eq!(status, 200, "valid breakpoint-only globals remain available: {body}");
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["stopped"], "break");
+    let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":3},"break":"missing_global = 99"}"#).unwrap();
     assert_eq!(status, 400);
-    assert!(body.contains("unused") && body.contains("not a signal, constant or enum value in the simulation"), "{body}");
+    assert!(body.contains("missing_global") && body.contains("not a signal, constant or enum value in the simulation"), "{body}");
     let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":4}}"#).unwrap();
     assert_eq!(status, 200, "invalid breakpoint runs no cycle and can be corrected: {body}");
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["cycle"], 2);
+    assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["cycle"], 3);
     for (root, constant, reason) in [
         ("UsesAlias", "bad_alias", "type nesting exceeds 64"),
         ("UsesStruct", "bad_struct", "type nesting exceeds 64"),
@@ -1418,4 +1421,100 @@ fn simulation_constructor_uses_checked_slice_and_preflights_retained_constant_ty
     let (status, body) = request(g.port, "POST", "/api/sim/step", r#"{"inputs":{"x":4}}"#).unwrap();
     assert_eq!(status, 200, "healthy root remains runnable after rejected constants: {body}");
     assert_eq!(serde_json::from_str::<serde_json::Value>(&body).unwrap()["cycle"], 1);
+}
+
+#[test]
+fn breakpoint_globals_preserve_enum_dependencies_shadowing_and_reject_bad_requested_values_before_cycles() {
+    let tmp = make_tempdir("breakpoint_globals");
+    let model = tmp.join("breakpoint-globals.wksc");
+    let expr = |text: &str| serde_json::to_value(ol_stdlib::parse_expr(text).unwrap()).unwrap();
+    let constant = |name: &str, ty: serde_json::Value, text: &str| serde_json::json!({"name":name,"ty":ty,"value":expr(text)});
+    let int32 = serde_json::json!({"kind":"Int32"});
+    let mut project = serde_json::json!({"name":"breakpoint-globals","main":"Healthy","packages":[{"name":"p",
+        "types":[
+            {"body":{"kind":"Enum","name":"UnusedMode","variants":["UnusedIdle","UnusedBusy"]}},
+            {"body":{"kind":"Alias","name":"Self","target":{"kind":"Named","name":"Self"}}},
+            {"body":{"kind":"Record","name":"Loop","fields":[{"name":"child","ty":{"kind":"Named","name":"Loop"}}]}}
+        ],
+        "constants":[
+            constant("BASE_THRESHOLD",int32.clone(),"7"),
+            constant("CHAIN_THRESHOLD",int32.clone(),"BASE_THRESHOLD + 1"),
+            constant("THRESHOLD",int32.clone(),"7"),
+            constant("TRIGGER",int32.clone(),"THRESHOLD + 1"),
+            constant("FROM_FUNCTION",int32.clone(),"Twice(BASE_THRESHOLD)"),
+            constant("GLOBAL_MODE",serde_json::json!({"kind":"Named","name":"UnusedMode"}),"UnusedIdle"),
+            constant("BAD_ALIAS",serde_json::json!({"kind":"Named","name":"Self"}),"0"),
+            constant("BAD_STRUCT",serde_json::json!({"kind":"Named","name":"Loop"}),"0"),
+            constant("BAD_HUGE",serde_json::json!({"kind":"Array","elem":{"kind":"Bool"},"len":u32::MAX}),"0"),
+            constant("VALUE_A",int32.clone(),"VALUE_B"),
+            constant("VALUE_B",int32.clone(),"VALUE_A"),
+            constant("BAD_UNKNOWN",int32.clone(),"MISSING_DEPENDENCY"),
+            constant("BAD_TYPE",int32.clone(),"true"),
+            constant("SHADOWED",serde_json::json!({"kind":"Named","name":"Self"}),"0")
+        ],
+        "nodes":[
+            {"name":"Healthy","kind":"Function","inputs":[{"name":"x","ty":int32}],
+                "outputs":[{"name":"y","ty":int32}],"equations":[{"lhs":["y"],"rhs":expr("x")}]},
+            {"name":"Shadows","kind":"Function","inputs":[{"name":"x","ty":int32}],
+                "outputs":[{"name":"y","ty":int32},{"name":"THRESHOLD","ty":int32},{"name":"SHADOWED","ty":int32},{"name":"UnusedIdle","ty":int32}],
+                "equations":[{"lhs":["y"],"rhs":expr("x")},{"lhs":["THRESHOLD"],"rhs":expr("10")},
+                    {"lhs":["SHADOWED"],"rhs":expr("10")},{"lhs":["UnusedIdle"],"rhs":expr("10")}]},
+            {"name":"Twice","kind":"Function","inputs":[{"name":"n","ty":int32}],
+                "outputs":[{"name":"r","ty":int32}],"equations":[{"lhs":["r"],"rhs":expr("n + n")}]}
+        ]
+    }]});
+    std::fs::write(&model, serde_json::to_string_pretty(&project).unwrap()).unwrap();
+    let g = start_server(tmp, &model);
+    for (condition, input) in [
+        ("y >= THRESHOLD",7), ("y >= CHAIN_THRESHOLD",8),
+        ("UnusedIdle = UnusedIdle",0), ("GLOBAL_MODE = UnusedIdle and y >= THRESHOLD",7),
+        ("y = FROM_FUNCTION",14)
+    ] {
+        post_ok(g.port,"/api/sim/start",r#"{"node":"Healthy"}"#);
+        let (status,body)=request(g.port,"POST","/api/sim/step",&serde_json::json!({"inputs":{"x":input},"count":5,"break":condition}).to_string()).unwrap();
+        assert_eq!(status,200,"{condition}: {body}");
+        let step:serde_json::Value=serde_json::from_str(&body).unwrap();
+        assert_eq!(step["stopped"],"break","{condition}: {step}");
+        assert_eq!(step["cycle"],1);
+        assert_eq!(step["rows"][0]["values"],serde_json::json!([input.to_string(),input.to_string()]));
+    }
+    for condition in ["THRESHOLD = 10","TRIGGER = 8 and THRESHOLD = 10","SHADOWED = 10","UnusedIdle = 10"] {
+        post_ok(g.port,"/api/sim/start",r#"{"node":"Shadows"}"#);
+        let (status,body)=request(g.port,"POST","/api/sim/step",&serde_json::json!({"inputs":{"x":0},"count":5,"break":condition}).to_string()).unwrap();
+        assert_eq!(status,200,"signal values shadow globals and enum variants: {condition}: {body}");
+        let step:serde_json::Value=serde_json::from_str(&body).unwrap();
+        assert_eq!(step["stopped"],"break");
+        assert_eq!(step["cycle"],1);
+    }
+    for (condition,reason) in [
+        ("BAD_ALIAS = BAD_ALIAS","type nesting exceeds 64"),
+        ("BAD_STRUCT = BAD_STRUCT","type nesting exceeds 64"),
+        ("BAD_HUGE[0]","shape exceeds 10000 values"),
+        ("VALUE_A = 0","constant dependency cycle"),
+        ("BAD_UNKNOWN = 0","MISSING_DEPENDENCY"),
+        ("BAD_TYPE = 0","constant `BAD_TYPE`"),
+        ("x + THRESHOLD","mismatch")
+    ] {
+        post_ok(g.port,"/api/sim/start",r#"{"node":"Healthy"}"#);
+        let (status,body)=request(g.port,"POST","/api/sim/step",&serde_json::json!({"inputs":{"x":7},"break":condition}).to_string()).unwrap();
+        assert_eq!(status,400,"unsupported requested breakpoint: {condition}: {body}");
+        assert!(body.contains(reason),"{condition}: {body}");
+        assert_eq!(request(g.port,"GET","/api/health","").unwrap().0,200);
+        let (status,body)=request(g.port,"POST","/api/sim/step",r#"{"inputs":{"x":7},"break":"y >= THRESHOLD"}"#).unwrap();
+        assert_eq!(status,200,"corrected breakpoint recovers: {body}");
+        let step:serde_json::Value=serde_json::from_str(&body).unwrap();
+        assert_eq!(step["cycle"],1,"bad breakpoint never advances state");
+        assert_eq!(step["stopped"],"break");
+    }
+    // Per-run namespaces use fresh model semantics, and an active run becomes
+    // stale when a breakpoint-only constant changes just like any model edit.
+    project["packages"][0]["constants"][2]["value"]=expr("9");
+    std::fs::write(&model,serde_json::to_string_pretty(&project).unwrap()).unwrap();
+    assert_eq!(request(g.port,"POST","/api/sim/step",r#"{"inputs":{"x":9},"break":"y >= THRESHOLD"}"#).unwrap().0,409);
+    post_ok(g.port,"/api/sim/start",r#"{"node":"Healthy"}"#);
+    let (status,body)=request(g.port,"POST","/api/sim/step",r#"{"inputs":{"x":9},"break":"THRESHOLD = 9"}"#).unwrap();
+    assert_eq!(status,200,"reset resolves current constant values: {body}");
+    let step:serde_json::Value=serde_json::from_str(&body).unwrap();
+    assert_eq!(step["cycle"],1);
+    assert_eq!(step["stopped"],"break");
 }

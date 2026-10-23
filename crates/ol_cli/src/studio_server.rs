@@ -42,6 +42,10 @@ pub struct Workspace {
 pub struct ServerCtx {
     /// The active workspace; swapped by the File menu's New / Open.
     pub workspace: std::sync::Mutex<Workspace>,
+    /// True while the Studio was started with no workspace (`studio launch`
+    /// with no model): the UI shows the welcome page until a workspace is
+    /// opened, created, or a sample is picked.
+    pub welcome: std::sync::atomic::AtomicBool,
     pub with_stdlib: Option<PathBuf>,
     /// Merge the library embedded in this binary when no on-disk
     /// `--with-stdlib` directory was given (the deployed-app default).
@@ -75,6 +79,7 @@ impl ServerCtx {
         let types = parent.join("types.json");
         let types_file = (types.exists() && types != model).then_some(types);
         let scenarios = parent.join("scenarios");
+        record_recent(&model);
         *self.workspace.lock().unwrap() = Workspace { model, scenarios, types_file };
         let mut h = self.history.lock().unwrap();
         h.undo.clear();
@@ -245,10 +250,27 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
             (200, "text/html; charset=utf-8", STUDIO_UI_HTML.as_bytes().to_vec())
         }
         ("GET", "/api/health") => (200, "text/plain; charset=utf-8", b"ok".to_vec()),
-        ("GET", "/api/inspect") => match build_inspect(ctx) {
-            Ok(body) => (200, "application/json", body.into_bytes()),
-            Err(e) => (500, "application/json", json_error(&e).into_bytes()),
-        },
+        ("GET", "/api/inspect") => {
+            // The welcome page: no workspace yet, so report that (plus the
+            // workspace list to offer) instead of a model inspection.
+            if ctx.welcome.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut value = serde_json::json!({
+                    "schema_version": 1,
+                    "welcome": {
+                        "base": home_dir().join("OpenLustre").display().to_string(),
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "samples": crate::sample_names(),
+                    },
+                });
+                value["recent"] = serde_json::json!(recent_workspaces());
+                (200, "application/json", value.to_string().into_bytes())
+            } else {
+                match build_inspect(ctx) {
+                    Ok(v) => (200, "application/json", v.into_bytes()),
+                    Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+                }
+            }
+        }
         ("GET", "/api/diagram") => match build_diagram(ctx, &parse_query(query)) {
             Ok(body) => (200, "application/json", body.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
@@ -306,15 +328,27 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         }
         ("POST", "/api/edit/add_node") => add_node_response(ctx, body),
         ("GET", "/api/tests") => match tests_list(ctx) {
-            Ok(b) => (200, "application/json", b.into_bytes()),
-            Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+            Ok(v) => (200, "application/json", v.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("GET", "/api/tests/one") => match tests_one(ctx, &parse_query(query)) {
+            Ok(v) => (200, "application/json", v.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
         ("POST", "/api/tests/run") => match tests_run(ctx) {
-            Ok(b) => (200, "application/json", b.into_bytes()),
+            Ok(v) => (200, "application/json", v.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
         ("POST", "/api/tests/record") => match tests_record(ctx) {
-            Ok(b) => (200, "application/json", b.into_bytes()),
+            Ok(v) => (200, "application/json", v.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/tests/save") => match tests_save(ctx, body) {
+            Ok(v) => (200, "application/json", v.into_bytes()),
+            Err(e) => (400, "application/json", json_error(&e).into_bytes()),
+        },
+        ("POST", "/api/tests/delete") => match tests_delete(ctx, body) {
+            Ok(v) => (200, "application/json", v.into_bytes()),
             Err(e) => (400, "application/json", json_error(&e).into_bytes()),
         },
         ("POST", "/api/evidence") => json_response(evidence_response(ctx, body)),
@@ -427,6 +461,7 @@ fn route(method: &str, path: &str, body: &[u8], ctx: &ServerCtx) -> (u16, &'stat
         },
         ("POST", "/api/workspace/open") => workspace_open_response(ctx, body),
         ("POST", "/api/workspace/new") => workspace_new_response(ctx, body),
+        ("POST", "/api/workspace/sample") => workspace_sample_response(ctx, body),
         ("POST", "/api/workspace/save") => workspace_save_response(ctx),
         ("POST", "/api/edit/set_operation_inputs") => {
             apply_edit_response(ctx, body, edit_set_operation_inputs)
@@ -1027,6 +1062,22 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
             Some(text) => Some(parse_breakpoint(&project, session, text)?),
         };
         let flag = |k: &str| req.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
+        // FUZZ mode (the Simulation dock's toggle): `{"mode": "range"|"bad",
+        // "seed": n?}` — generated inputs replace the held ones.
+        let fuzz = match req.get("fuzz") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => {
+                let mode = match v.get("mode").and_then(|m| m.as_str()) {
+                    Some("range") => sim_session::FuzzMode::Range,
+                    Some("bad") => sim_session::FuzzMode::Bad,
+                    other => return Err(format!("fuzz.mode must be \"range\" or \"bad\", got {other:?}")),
+                };
+                Some(sim_session::FuzzCfg {
+                    mode,
+                    seed: v.get("seed").and_then(|s| s.as_u64()).unwrap_or(0x4F4C_5F46_555A),
+                })
+            }
+        };
         session.run(sim_session::RunReq {
             inputs,
             sequence,
@@ -1034,6 +1085,7 @@ fn sim_step_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8
             brk,
             stop_on_violation: flag("stop_on_violation"),
             stop_on_divergence: flag("stop_on_divergence"),
+            fuzz,
         })
     })())
 }
@@ -1044,8 +1096,7 @@ fn parse_breakpoint(
     project: &ol_ir::Project,
     session: &sim_session::SimSession,
     text: &str,
-) -> Result<ol_ir::Expr, String> {
-    let project = project.slice_for_root(&session.root).map_err(|e| format!("breakpoint: {e}"))?;
+) -> Result<sim_session::Breakpoint, String> {
     let expr = ol_stdlib::parse_expr(text).map_err(|e| format!("breakpoint: {e}"))?;
     if expr.contains_temporal() {
         return Err("breakpoint: a condition is about the current cycle — `pre` / `->` aren't allowed".into());
@@ -1066,7 +1117,138 @@ fn parse_breakpoint(
     if let Some(v) = expr.free_vars().into_iter().find(|v| !known.contains(v)) {
         return Err(format!("breakpoint: `{v}` is not a signal, constant or enum value in the simulation of `{}`", session.root));
     }
-    Ok(expr)
+    // Signals shadow globals while evaluating a condition. Rename only the
+    // synthetic node's signal references so slicing does not retain a bad
+    // global with the same name. The actual condition keeps its authored names.
+    let root = project.find_node(&session.root).ok_or("breakpoint: simulated operator not found")?;
+    // A condition must be Boolean — say so by name rather than leaking the
+    // synthetic node's internals.
+    {
+        let typer = ol_typecheck::ExprTyper::new(project);
+        let env = ol_typecheck::ExprTyper::env(root);
+        if let Some(ty) = typer.type_of(root, &env, &expr) {
+            if !matches!(ty, ol_ir::Type::Bool) {
+                return Err(format!(
+                    "breakpoint: type mismatch — the condition must be bool, this one is {}",
+                    type_str(&ty)
+                ));
+            }
+        }
+    }
+    let mut source = project.clone();
+    source.resolution = None; // Compiler-resolved names remain; this node is transient.
+    let mut names: std::collections::BTreeSet<String> = known.into_iter().collect();
+    names.extend(project.all_nodes().map(|n| n.name.clone()));
+    let fresh = |names: &mut std::collections::BTreeSet<String>, prefix: &str| {
+        let mut name = prefix.to_string();
+        let mut suffix = 0;
+        while !names.insert(name.clone()) {
+            suffix += 1;
+            name = format!("{prefix}_{suffix}");
+        }
+        name
+    };
+    let node_name = fresh(&mut names, "__studio_breakpoint");
+    let output = fresh(&mut names, "__studio_condition");
+    let referenced: std::collections::BTreeSet<_> = expr.free_vars().into_iter().collect();
+    let mut renamed = std::collections::BTreeMap::new();
+    let inputs = root.inputs.iter().chain(&root.outputs).map(|p| (&p.name, &p.ty))
+        .chain(root.locals.iter().map(|p| (&p.name, &p.ty)))
+        .filter(|(name, _)| referenced.contains(*name))
+        .map(|(name, ty)| {
+            let alias = fresh(&mut names, "__studio_signal");
+            renamed.insert(name.clone(), alias.clone());
+            ol_ir::Port { name: alias, ty: ty.clone() }
+        }).collect();
+    let mut inspected = expr.clone();
+    inspected.walk_mut(&mut |e| {
+        let name = match e {
+            ol_ir::Expr::Var { name } => Some(name),
+            ol_ir::Expr::When { clock, .. } | ol_ir::Expr::Merge { clock, .. } => Some(clock),
+            _ => None,
+        };
+        if let Some(name) = name {
+            if let Some(alias) = renamed.get(name) { *name = alias.clone(); }
+        }
+    });
+    source.packages.push(ol_ir::Package {
+        name: "__studio_breakpoint".into(),
+        nodes: vec![ol_ir::NodeDef {
+            name: node_name.clone(), kind: ol_ir::NodeKind::Operator, inputs,
+            outputs: vec![ol_ir::Port { name: output.clone(), ty: ol_ir::Type::Bool }],
+            locals: vec![], equations: vec![ol_ir::Equation { lhs: vec![output], rhs: inspected }],
+            contract: None, diagram: Default::default(), probes: vec![],
+        }],
+        ..Default::default()
+    });
+    // Copy constant expressions into inspection-only locals to include calls
+    // from those expressions in the normal node/type/constant slice closure.
+    // These equations never run; the auxiliary evaluator reads constants and
+    // the original condition directly, retaining declaration-order semantics.
+    let mut expanded = std::collections::BTreeSet::new();
+    let slice = loop {
+        let slice = source.slice_for_root(&node_name).map_err(|e| format!("breakpoint: {e}"))?;
+        let additions: Vec<_> = slice.packages.iter().flat_map(|p| &p.constants)
+            .filter(|c| expanded.insert(c.name.clone())).cloned().collect();
+        if additions.is_empty() { break slice; }
+        let node = &mut source.packages.last_mut().unwrap().nodes[0];
+        for constant in additions {
+            let local = fresh(&mut names, "__studio_constant");
+            node.locals.push(ol_ir::Local { name: local.clone(), ty: constant.ty });
+            node.equations.push(ol_ir::Equation { lhs: vec![local], rhs: constant.value });
+        }
+    };
+    check_breakpoint_constant_cycles(&slice)?;
+    for constant in slice.packages.iter().flat_map(|p| &p.constants) {
+        ol_sim::simulation_type_size(&constant.ty, &slice)
+            .and_then(|_| ol_sim::input_schema(&constant.ty, &slice).map(|_| ()))
+            .map_err(|e| format!("breakpoint constant `{}`: {e}", constant.name))?;
+    }
+    for node in slice.all_nodes() {
+        for (name, ty) in node.inputs.iter().chain(&node.outputs).map(|p| (&p.name, &p.ty))
+            .chain(node.locals.iter().map(|p| (&p.name, &p.ty)))
+        {
+            ol_sim::simulation_type_size(ty, &slice)
+                .and_then(|_| ol_sim::input_schema(ty, &slice).map(|_| ()))
+                .map_err(|e| format!("breakpoint signal `{}.{name}`: {e}", node.name))?;
+        }
+    }
+    let report = ol_typecheck::check_project(&slice);
+    if let Some(error) = report.errors().next() {
+        return Err(format!("breakpoint: {}", error.message));
+    }
+    Ok(sim_session::Breakpoint { expr, project: slice, node: node_name })
+}
+
+/// Detect value-dependency cycles without recursively following constants.
+/// Unreferenced declarations have already been removed from this namespace.
+fn check_breakpoint_constant_cycles(project: &ol_ir::Project) -> Result<(), String> {
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
+    let constants: Vec<_> = project.packages.iter().flat_map(|p| &p.constants).collect();
+    let names: BTreeSet<_> = constants.iter().map(|c| c.name.clone()).collect();
+    let mut pending = BTreeMap::new();
+    let mut users: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for constant in constants {
+        let deps: Vec<_> = constant.value.free_vars().into_iter().filter(|v| names.contains(v)).collect();
+        pending.insert(constant.name.clone(), deps.len());
+        for dependency in deps { users.entry(dependency).or_default().push(constant.name.clone()); }
+    }
+    let mut ready: VecDeque<_> = pending.iter().filter(|(_, count)| **count == 0).map(|(name, _)| name.clone()).collect();
+    while let Some(name) = ready.pop_front() {
+        pending.remove(&name);
+        if let Some(names) = users.get(&name) {
+            for name in names {
+                if let Some(count) = pending.get_mut(name) {
+                    *count -= 1;
+                    if *count == 0 { ready.push_back(name.clone()); }
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        return Err(format!("breakpoint: constant dependency cycle involving {}", pending.keys().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")));
+    }
+    Ok(())
 }
 
 /// POST /api/sim/c `{on}` — put the generated C of the simulated root in
@@ -1559,6 +1741,30 @@ fn build_diagram(
         // each free variable is one input pin (global constants are inlined,
         // not pins). Bound pins carry a wire from their source variable;
         // unbound (ghost) pins render red on the block itself.
+        //
+        // For a call, each pin also learns the type its argument position
+        // expects — the callee's parameter type. The View ▸ link data types
+        // label then reads `source | expected` and turns red where they
+        // disagree (a miscast connection the typechecker reports). Pins of
+        // plain operations expect exactly their variable's own type.
+        let mut pin_expected: Vec<Option<ol_ir::Type>> = Vec::new();
+        if let ol_ir::Expr::Call { node: callee, args } = &eq.rhs {
+            let mut seen: Vec<String> = Vec::new();
+            for (j, arg) in args.iter().enumerate() {
+                let param = project
+                    .find_node(callee)
+                    .and_then(|n| n.inputs.get(j))
+                    .map(|p| p.ty.clone());
+                for v in arg.free_vars() {
+                    if seen.contains(&v) || globals.contains(&v) {
+                        continue;
+                    }
+                    seen.push(v.clone());
+                    pin_expected.push(param.clone());
+                }
+            }
+        }
+        let expected_at = |port: usize| pin_expected.get(port).cloned().flatten();
         let mut reads: Vec<String> = Vec::new();
         let mut input_pins: Vec<serde_json::Value> = Vec::new();
         for v in eq.rhs.free_vars() {
@@ -1568,9 +1774,13 @@ fn build_diagram(
             let port = input_pins.len();
             if known.contains(v.as_str()) {
                 reads.push(v.clone());
-                wires.push(serde_json::json!({
+                let mut wire = serde_json::json!({
                     "from": v.clone(), "to": eq_id, "to_port": port,
-                }));
+                });
+                if let Some(t) = expected_at(port) {
+                    wire["dst_type"] = serde_json::json!(type_str(&t));
+                }
+                wires.push(wire);
                 input_pins.push(serde_json::json!({ "name": v, "bound": true }));
             } else {
                 let why = ghost_reasons
@@ -1735,6 +1945,7 @@ fn build_diagram(
         "kind": format!("{:?}", node.kind),
         "positions": node.diagram.positions,
         "grid": node.diagram.grid,
+        "wire_routes": node.diagram.wires,
         "inputs": node.inputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
         "outputs": node.outputs.iter().map(|p| port_json(&p.name, &p.ty)).collect::<Vec<_>>(),
         "locals": node.locals.iter()
@@ -2158,6 +2369,29 @@ fn tests_run(ctx: &ServerCtx) -> Result<String, String> {
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
 
+/// GET /api/tests/one?name=N — one scenario's input vector as
+/// `{name, header, rows}` (rows = the raw CSV cells), for replay in a
+/// simulation session. At most 10 000 rows.
+fn tests_one(ctx: &ServerCtx, query: &std::collections::HashMap<String, String>) -> Result<String, String> {
+    let req = serde_json::json!({ "name": query.get("name").map(String::as_str).unwrap_or("") });
+    let name = scenario_name(&req)?;
+    let path = ctx.scenarios().join(format!("{name}.csv"));
+    let csv = std::fs::read_to_string(&path)
+        .map_err(|_| format!("scenario `{name}` does not exist"))?;
+    let mut lines = csv.lines();
+    let header: Vec<String> = lines.next().unwrap_or("").split(',').map(str::to_string).collect();
+    let rows: Vec<Vec<String>> = lines.take(10_000)
+        .map(|l| l.split(',').map(str::to_string).collect())
+        .collect();
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "name": name,
+        "header": header,
+        "rows": rows,
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
 fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
     let project = load(ctx)?;
     let node = main_node(&project)?;
@@ -2169,6 +2403,87 @@ fn tests_record(ctx: &ServerCtx) -> Result<String, String> {
             "golden": path.display().to_string(),
         })).collect::<Vec<_>>(),
     });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// A TestScenario name as it lives in `scenarios/`: one path-safe component,
+/// so a save can never escape the directory or hide a golden file.
+fn scenario_name(req: &serde_json::Value) -> Result<String, String> {
+    let name = req
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .ok_or("missing string field `name`")?;
+    let ok = !name.is_empty()
+        && name.len() <= 80
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+        && !name.starts_with('.')
+        && !name.ends_with(".golden");
+    if !ok {
+        return Err("scenario name: 1–80 characters of letters, digits, `_`, `-`, `.` (not starting with a dot)".into());
+    }
+    Ok(name.to_string())
+}
+
+/// POST /api/tests/save `{name, csv, overwrite?}` — save a TestScenario: a
+/// simulation the engineer ran (by hand or in a FUZZ mode), kept as the same
+/// input-vector CSV `Run Test Scenarios` and the evidence report use. The
+/// header must be the simulated operator's input names, one row per cycle.
+fn tests_save(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
+    let req: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let name = scenario_name(&req)?;
+    let csv = req
+        .get("csv")
+        .and_then(|v| v.as_str())
+        .ok_or("missing string field `csv` (the scenario's input vector)")?;
+    if csv.lines().next().map(str::trim).unwrap_or("").is_empty() {
+        return Err("the scenario needs a header row of input names".into());
+    }
+    if csv.len() > 2_000_000 {
+        return Err("the scenario exceeds 2 MB — split it into smaller ones".into());
+    }
+    let path = ctx.scenarios().join(format!("{name}.csv"));
+    if path.exists() && !req.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Err(format!(
+            "scenario `{name}` already exists — enable overwrite to replace it (and its golden)"
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("creating the scenarios folder: {e}"))?;
+    }
+    std::fs::write(&path, csv).map_err(|e| format!("writing `{}`: {e}", path.display()))?;
+    // A replaced scenario's recorded golden no longer belongs to it.
+    let golden = ctx.scenarios().join(format!("{name}.golden.csv"));
+    if req.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(false) && golden.exists() {
+        let _ = std::fs::remove_file(&golden);
+    }
+    let value = serde_json::json!({
+        "schema_version": 1,
+        "saved": name,
+        "path": path.display().to_string(),
+        "cycles": csv.lines().count().saturating_sub(1),
+    });
+    Ok(serde_json::to_string(&value).unwrap_or_default())
+}
+
+/// POST /api/tests/delete `{name}` — remove a scenario and its golden.
+fn tests_delete(ctx: &ServerCtx, body: &[u8]) -> Result<String, String> {
+    let req: serde_json::Value =
+        serde_json::from_slice(body).map_err(|e| format!("invalid JSON: {e}"))?;
+    let name = scenario_name(&req)?;
+    let csv = ctx.scenarios().join(format!("{name}.csv"));
+    let golden = ctx.scenarios().join(format!("{name}.golden.csv"));
+    if !csv.exists() && !golden.exists() {
+        return Err(format!("scenario `{name}` does not exist"));
+    }
+    if csv.exists() {
+        std::fs::remove_file(&csv).map_err(|e| format!("removing `{}`: {e}", csv.display()))?;
+    }
+    if golden.exists() {
+        let _ = std::fs::remove_file(&golden);
+    }
+    let value = serde_json::json!({ "schema_version": 1, "deleted": name });
     Ok(serde_json::to_string(&value).unwrap_or_default())
 }
 
@@ -2301,7 +2616,8 @@ fn prove_run(
 
 /// Persist free-form canvas positions (and optionally the grid pitch) for a
 /// node: `{ "node": "...", "positions": { "id": {"x": .., "y": ..}, ... },
-/// "grid": 8 }`. Each position may also carry optional `w`/`h` (a user-set box
+/// "grid": 8, "wires": { "from|to|port": {"pts": [[x, y], ...]} } }`. Each
+/// position may also carry optional `w`/`h` (a user-set box
 /// size) and `wrap` (a per-box text-wrap flag); absent means automatic sizing.
 fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Result<(), String> {
     let node_name = req
@@ -2321,6 +2637,36 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
                 .ok_or("grid must be an integer between 1 and 256")? as u32,
         ),
     };
+    // Optional hand-shaped wires: `from|to|port` → interior waypoints.
+    let mut wire_routes = std::collections::BTreeMap::new();
+    if let Some(wires) = req.get("wires").filter(|v| !v.is_null()) {
+        let wires = wires
+            .as_object()
+            .ok_or("`wires` must be an object keyed by wire id")?;
+        for (key, route) in wires {
+            let pts_json = route
+                .get("pts")
+                .and_then(|v| v.as_array())
+                .ok_or_else(|| format!("wire `{key}`: missing array field `pts`"))?;
+            if pts_json.len() > 8 {
+                return Err(format!("wire `{key}`: at most 8 waypoints"));
+            }
+            let mut pts = Vec::with_capacity(pts_json.len());
+            for p in pts_json {
+                let pair = p
+                    .as_array()
+                    .filter(|a| a.len() == 2)
+                    .ok_or_else(|| format!("wire `{key}`: waypoints are [x, y] pairs"))?;
+                let coord = |v: &serde_json::Value| {
+                    v.as_f64()
+                        .filter(|c| c.is_finite() && (-5000.0..=100_000.0).contains(c))
+                        .ok_or_else(|| format!("wire `{key}`: waypoint coordinate out of range"))
+                };
+                pts.push((coord(&pair[0])?, coord(&pair[1])?));
+            }
+            wire_routes.insert(key.clone(), ol_ir::WireRoute { pts });
+        }
+    }
     let mut map = std::collections::BTreeMap::new();
     for (id, pos) in positions {
         let x = pos.get("x").and_then(|v| v.as_f64()).ok_or("position missing x")?;
@@ -2338,6 +2684,10 @@ fn edit_set_layout(project: &mut ol_ir::Project, req: &serde_json::Value) -> Res
             if grid.is_some() {
                 n.diagram.grid = grid;
             }
+            // An empty `pts` clears a wire's shape (back to automatic routing);
+            // the rest replace whatever shape the key had.
+            n.diagram.wires.retain(|k, _| !wire_routes.contains_key(k));
+            n.diagram.wires.extend(wire_routes.iter().filter(|(_, r)| !r.pts.is_empty()).map(|(k, r)| (k.clone(), r.clone())));
             return Ok(());
         }
     }
@@ -5024,11 +5374,65 @@ fn add_expression_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
 
 // --- Workspace: New / Open / Save (File menu) -------------------------------
 
-fn home_dir() -> PathBuf {
+pub(crate) fn home_dir() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// How many recently-opened workspaces are remembered (the welcome page
+/// shows the latest four).
+const RECENT_MAX: usize = 8;
+
+/// The per-user recents file: `~/OpenLustre/recent.json`, a JSON array of
+/// workspace paths, most recent first.
+fn recent_file() -> PathBuf {
+    home_dir().join("OpenLustre").join("recent.json")
+}
+
+fn read_recent() -> Vec<String> {
+    std::fs::read_to_string(recent_file())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Record `path` as the most recently opened workspace (moved to the front,
+/// duplicates removed, capped). Best-effort: a read-only home just means no
+/// recents.
+pub(crate) fn record_recent(path: &std::path::Path) {
+    let mut recent: Vec<String> = read_recent()
+        .into_iter()
+        .filter(|p| std::path::Path::new(p) != path)
+        .collect();
+    recent.insert(0, path.display().to_string());
+    recent.truncate(RECENT_MAX);
+    let file = recent_file();
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&file, serde_json::to_vec(&recent).unwrap_or_default());
+}
+
+/// The workspaces to offer on the welcome page: the latest few that still
+/// exist, most recent first.
+const RECENT_SHOW: usize = 4;
+fn recent_workspaces() -> Vec<serde_json::Value> {
+    read_recent()
+        .into_iter()
+        .take(RECENT_SHOW)
+        .filter_map(|path| {
+            let p = std::path::Path::new(&path);
+            if !p.is_file() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "name": p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string(),
+                "path": path,
+            }))
+        })
+        .collect()
 }
 
 /// List `.wksc` workspaces discoverable under a base directory (the base and
@@ -5098,6 +5502,7 @@ fn workspace_open_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, 
         return bad(&format!("cannot open workspace: {e:#}"));
     }
     ctx.switch_workspace(resolved);
+    ctx.welcome.store(false, std::sync::atomic::Ordering::Relaxed);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),
@@ -5125,6 +5530,35 @@ fn workspace_new_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, V
         Err(e) => return bad(&format!("{e:#}")),
     };
     ctx.switch_workspace(resolved);
+    ctx.welcome.store(false, std::sync::atomic::Ordering::Relaxed);
+    match build_inspect(ctx) {
+        Ok(b) => (200, "application/json", b.into_bytes()),
+        Err(e) => (500, "application/json", json_error(&e).into_bytes()),
+    }
+}
+
+/// Open a sample shipped with the program (`pms`, `release_logic`): copied
+/// on first use to ~/OpenLustre/samples and opened from there — the welcome
+/// page's equivalent of `studio launch --sample`.
+fn workspace_sample_response(ctx: &ServerCtx, body: &[u8]) -> (u16, &'static str, Vec<u8>) {
+    let bad = |m: &str| (400, "application/json", json_error(m).into_bytes());
+    let req: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(e) => return bad(&format!("bad JSON: {e}")),
+    };
+    let name = match req.get("name").and_then(|v| v.as_str()) {
+        Some(s) => s.to_string(),
+        None => return bad("missing string field `name`"),
+    };
+    let resolved = match crate::sample_workspace(&name) {
+        Ok(p) => p,
+        Err(e) => return bad(&format!("{e:#}")),
+    };
+    if let Err(e) = crate::load_for_studio(&resolved, ctx.with_stdlib.as_deref(), ctx.use_embedded) {
+        return bad(&format!("cannot open sample: {e:#}"));
+    }
+    ctx.switch_workspace(resolved);
+    ctx.welcome.store(false, std::sync::atomic::Ordering::Relaxed);
     match build_inspect(ctx) {
         Ok(b) => (200, "application/json", b.into_bytes()),
         Err(e) => (500, "application/json", json_error(&e).into_bytes()),

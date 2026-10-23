@@ -1,16 +1,21 @@
 #!/bin/sh
 # Build the macOS downloads of OpenLustre Studio into dist/, for one CPU:
 #
+#   openlustre-studio-<version>-macos-<arch>.dmg      open it, drag the app
+#                                                     folder onto Applications
 #   openlustre-studio-<version>-macos-<arch>.pkg      double-click to install
 #   openlustre-studio-<version>-macos-<arch>.tar.gz   unpack, ./install.sh
 #
 #   packaging/macos/build.sh <version> <aarch64|x86_64>
 #
-# Both install an "OpenLustre Studio" folder in Applications with two apps —
-# "OpenLustre Studio" and "PMS Sample" — and put `openlustre` on the PATH.
-# The program, Kind 2 + Z3 for that CPU and the samples live inside
-# OpenLustre Studio.app. Runs on a Mac (Apple Silicon builds both CPUs).
-# Not signed or notarized: see packaging/macos/README-macos.txt.
+# All three install an "OpenLustre Studio" folder in Applications with two
+# apps — "OpenLustre Studio" and "PMS Sample". The .pkg and ./install.sh
+# also put `openlustre` on the PATH; a drag-and-drop copy from the .dmg
+# doesn't, so install.sh sits next to the folder inside the .dmg for the
+# command (and per-user installs). The program, Kind 2 + Z3 for that CPU
+# and the samples live inside OpenLustre Studio.app. Runs on a Mac (Apple
+# Silicon builds both CPUs). Not signed or notarized: the .dmg and .pkg
+# may need right-click ▸ Open the first time — see README-macos.txt.
 
 set -eu
 VERSION="${1:?usage: packaging/macos/build.sh <version> <aarch64|x86_64>}"
@@ -95,6 +100,19 @@ cp packaging/macos/install.sh packaging/macos/README-macos.txt "$TAR/"
 chmod 755 "$TAR/install.sh"
 tar -C "$WORK/tar" -czf "$DIST/$NAME.tar.gz" "$NAME"
 
+# The .dmg: the drag-and-drop install — open it, drag "OpenLustre Studio"
+# onto the Applications folder in the same window. install.sh and the README
+# sit beside the folder: the command-line `openlustre` link (and per-user
+# installs) come from running it, for whoever wants more than the apps.
+DMGROOT="$WORK/dmg"
+mkdir -p "$DMGROOT"
+cp -R "$FOLDER" "$DMGROOT/"
+cp packaging/macos/install.sh packaging/macos/README-macos.txt "$DMGROOT/"
+chmod 755 "$DMGROOT/install.sh"
+ln -s /Applications "$DMGROOT/Applications"
+hdiutil create -volname "OpenLustre Studio" -srcfolder "$DMGROOT" -ov -format UDZO "$DIST/$NAME.dmg" > /dev/null
+echo "dmg: $DIST/$NAME.dmg"
+
 # The .pkg: installs the folder into /Applications and links the command.
 PKGROOT="$WORK/pkgroot"
 mkdir -p "$PKGROOT/Applications" "$WORK/scripts"
@@ -110,6 +128,9 @@ chmod 755 "$WORK/scripts/postinstall"
 pkgbuild --analyze --root "$PKGROOT" "$WORK/components.plist"
 i=0
 while /usr/libexec/PlistBuddy -c "Print :$i" "$WORK/components.plist" > /dev/null 2>&1; do
+    # Newer pkgbuild --analyze omits BundleIsRelocatable; Add creates the
+    # key, Set only changes one that exists.
+    /usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$WORK/components.plist" 2>/dev/null || \
     /usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$WORK/components.plist"
     i=$((i + 1))
 done

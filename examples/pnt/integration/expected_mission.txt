@@ -1,0 +1,30 @@
+t=  0.00 s #   0  boot: sources fault/ok/ok
+t=  2.00 s #  20  alert: integrity
+t=  2.00 s #  20  time: synced (tow=3602, holdover=0)
+t=  2.10 s #  21  status: acquiring (x=102.0, y=50.8, alt=50.2, tow=3602, prot=0)
+t=  2.10 s #  21  alert: none
+t=  4.00 s #  40  status: fused (x=104.0, y=51.6, alt=50.4, tow=3604, prot=10)
+t= 10.00 s # 100  time: holdover (tow=3609, holdover=0)
+t= 10.10 s # 101  status: coasting (x=110.1, y=54.0, alt=51.0, tow=3609, prot=120)
+t= 13.00 s # 130  time: synced (tow=3613, holdover=0)
+t= 13.10 s # 131  status: fused (x=113.1, y=55.2, alt=51.3, tow=3613, prot=10)
+t= 20.00 s # 200  alert: integrity
+t= 20.10 s # 201  status: coasting (x=120.1, y=58.0, alt=52.0, tow=3620, prot=120)
+t= 23.00 s # 230  alert: none
+t= 23.10 s # 231  status: fused (x=123.1, y=59.2, alt=52.3, tow=3623, prot=10)
+t= 30.00 s # 300  alert: sensor
+t= 30.10 s # 301  status: hold (x=130.0, y=62.0, alt=53.0, tow=3630, prot=0)
+t= 35.00 s # 350  alert: none
+t= 35.10 s # 351  status: acquiring (x=134.9, y=64.0, alt=53.5, tow=3635, prot=0)
+t= 37.00 s # 370  status: fused (x=137.0, y=64.8, alt=53.7, tow=3637, prot=10)
+t= 40.00 s # 400  alert: integrity
+t= 42.00 s # 420  alert: none
+t= 50.00 s # 500  time: holdover (tow=3649, holdover=0)
+t= 50.10 s # 501  status: coasting (x=150.1, y=70.0, alt=55.0, tow=3649, prot=120)
+t= 55.10 s # 551  alert: timeout
+t= 55.20 s # 552  status: hold (x=155.1, y=72.0, alt=55.5, tow=3654, prot=0)
+t= 55.20 s # 552  alert: none
+t= 58.00 s # 580  time: synced (tow=3658, holdover=0)
+t= 58.10 s # 581  status: acquiring (x=158.0, y=73.2, alt=55.8, tow=3658, prot=0)
+t= 60.00 s # 600  status: fused (x=160.0, y=74.0, alt=56.0, tow=3660, prot=10)
+t= 61.90 s # 619  mission end: fused, none
