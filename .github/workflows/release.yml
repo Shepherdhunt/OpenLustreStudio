@@ -1,10 +1,13 @@
 # Release: push a version tag (v0.1.0, …) and this workflow runs the tests,
 # builds and smoke-tests every OS's downloads (package.yml), and attaches
-# them to a GitHub release for that tag — one download per OS and installer:
+# them to a GitHub release for that tag. OpenLustreStudio-<v>-installers.tar.gz
+# carries every OS's installer in one shareable tarball; otherwise one
+# download per OS and installer:
 #
 #   Windows  OpenLustreStudio-<v>-windows-x86_64-Setup.exe, …-windows-x86_64.zip
 #   Linux    openlustre-studio_<v>_amd64.deb, …-linux-x86_64.tar.gz
-#   macOS    …-macos-arm64.pkg / .tar.gz (Apple Silicon), …-macos-x86_64.pkg / .tar.gz (Intel)
+#   macOS    …-macos-arm64.dmg (drag & drop) / .pkg / .tar.gz (Apple Silicon),
+#            the same three for x86_64 (Intel)
 
 name: release
 
@@ -41,11 +44,13 @@ jobs:
           body: |
             OpenLustre Studio ${{ github.ref_name }} — for demonstration and prototyping (not a qualified tool).
 
+            **One file, every OS:** `OpenLustreStudio-<v>-installers.tar.gz` — the macOS, Windows and Ubuntu installers with an INSTALL.txt. Otherwise pick your row:
+
             | OS | Installer | Alternative |
             |---|---|---|
             | Windows 10/11 (x64) | `OpenLustreStudio-*-windows-x86_64-Setup.exe` | `…-windows-x86_64.zip` (portable) |
             | Ubuntu 22.04+ (x64) | `openlustre-studio_*_amd64.deb` (`sudo apt install ./…deb`) | `…-linux-x86_64.tar.gz` + `./install.sh` |
-            | macOS 13+ Apple Silicon | `…-macos-arm64.pkg` | `…-macos-arm64.tar.gz` + `./install.sh` |
-            | macOS 13+ Intel | `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` + `./install.sh` |
+            | macOS 13+ Apple Silicon | `…-macos-arm64.dmg` (drag & drop) or `…-macos-arm64.pkg` | `…-macos-arm64.tar.gz` + `./install.sh` |
+            | macOS 13+ Intel | `…-macos-x86_64.dmg` (drag & drop) or `…-macos-x86_64.pkg` | `…-macos-x86_64.tar.gz` + `./install.sh` |
 
-            Linux and macOS downloads bundle the Kind 2 prover and Z3; on Windows, Kind 2 runs through WSL or Docker (see README-windows.txt). Every download ships the PMS sample: `openlustre studio launch --sample pms`.
+            Linux and macOS downloads bundle the Kind 2 prover and Z3; on Windows, Kind 2 runs through WSL or Docker (see README-windows.txt). Every download ships the PMS and PNT samples: `openlustre studio launch --sample pms` / `--sample pnt`, or pick them from the welcome page.
