@@ -97,6 +97,7 @@ impl Library {
             ..Default::default()
         };
         Project {
+            format_version: Default::default(),
             name: package_name.to_string(),
             packages: vec![pkg],
             main: None,

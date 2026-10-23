@@ -1,0 +1,5 @@
+cycle,master_arm,station_selected,consent,fault_present,release_request,release_cmd,inhibit,active_mode,violations
+0,true,true,true,false,true,true,false,AuthorizedRelease,<none>
+1,true,true,true,true,true,false,true,SafeInhibit,<none>
+2,true,true,true,true,false,false,false,Idle,<none>
+3,true,true,true,false,true,true,false,AuthorizedRelease,<none>

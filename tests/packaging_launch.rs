@@ -11,6 +11,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 #[test]
 fn embedded_library_is_identical_to_the_on_disk_library() {
     let embedded = ol_stdlib::load_embedded().expect("embedded loads");
@@ -54,11 +57,7 @@ impl Drop for LaunchGuard {
 }
 
 fn start_launch() -> LaunchGuard {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let home =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_home_{stamp}"));
     start_launch_in(home)
@@ -84,8 +83,10 @@ fn start_launch_in(home: PathBuf) -> LaunchGuard {
         .unwrap_or_else(|| real_home.join(".rustup"));
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "launch", "--no-open"])
         .args(["--port", "0"])
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .env("HOME", &home)
         .env("USERPROFILE", &home)
         .env("CARGO_HOME", cargo_home)
@@ -128,7 +129,7 @@ fn start_launch_in(home: PathBuf) -> LaunchGuard {
 fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req =
-        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nConnection: close\r\n\r\n");
     stream.write_all(req.as_bytes()).ok()?;
     stream.shutdown(Shutdown::Write).ok()?;
     let mut raw = String::new();
@@ -141,7 +142,7 @@ fn http_get(port: u16, path: &str) -> Option<(u16, String)> {
 fn http_post(port: u16, path: &str, body: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len(),
     );
     stream.write_all(req.as_bytes()).ok()?;

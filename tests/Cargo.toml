@@ -185,5 +185,9 @@ name = "native_project"
 path = "native_project.rs"
 
 [[test]]
+name = "model_format"
+path = "model_format.rs"
+
+[[test]]
 name = "studio_qol_features"
 path = "studio_qol_features.rs"

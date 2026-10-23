@@ -711,6 +711,7 @@ pub(super) fn resolve_graph(
     let resolver = Resolver { owner: root_id, inventories: &inventories };
     Ok(Project {
         name: root.project.name.clone(),
+        format_version: Default::default(),
         packages: vec![package],
         main: Some(resolver.declaration(Kind::Node, &root.manifest.entrypoint)?),
         includes: Vec::new(),

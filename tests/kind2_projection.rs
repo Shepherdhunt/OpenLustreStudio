@@ -356,7 +356,7 @@ fn kind2() -> Option<ol_kind2::Kind2Options> {
 fn prove(project: &Project, root: &str, opts: ol_kind2::Kind2Options) -> (String, ol_kind2::Kind2Result) {
     let contracts_only = ol_cocospec_emit::kind2::EmitOptions { runtime_errors: false };
     let input = ol_cocospec_emit::kind2::emit_with(project, contracts_only).expect("view");
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let dir = std::env::temp_dir().join(format!("ol_kind2_projection_{stamp}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("model.lus");

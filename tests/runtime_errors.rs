@@ -217,7 +217,7 @@ fn a_call_in_an_untaken_branch_is_stepped_on_the_model_and_in_c() {
     }
     let bundle = ol_clite_emit::emit_project(&pr);
     let driver = ol_clite_emit::harness::emit_csv_driver(pr.find_node("Top").unwrap());
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let dir = std::env::temp_dir().join(format!("ol_rte_untaken_{stamp}"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("openlustre_generated.h"), &bundle.header).unwrap();
@@ -271,7 +271,7 @@ fn kind2() -> Option<ol_kind2::Kind2Options> {
 /// Each check's outcome, by what it checks.
 fn prove(project: &Project, opts: ol_kind2::Kind2Options) -> Vec<(String, ol_kind2::Outcome)> {
     let input = emit(project).expect("view");
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let dir = std::env::temp_dir().join(format!("ol_rte_{stamp}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("model.lus");

@@ -1269,13 +1269,17 @@ fn serve_studio(
     let listener = studio_server::bind(studio_server::loopback(port))
         .with_context(|| format!("binding 127.0.0.1:{port}"))?;
     let local = listener.local_addr()?;
-    let url = format!("http://{local}");
+    // The link carries this launch's token; without it the Studio refuses
+    // requests (other web pages must not drive it).
+    let token = studio_server::launch_token().map_err(anyhow::Error::msg)?;
+    let access = studio_server::Access::new(token, local.port());
+    let url = access.launch_url();
     if welcome.load(std::sync::atomic::Ordering::Relaxed) {
-        println!("studio: serving {url} (welcome page — open or create a workspace, or pick a sample)");
+        say(format_args!("studio: serving {url} (welcome page — open or create a workspace, or pick a sample)"));
     } else {
-        println!("studio: serving {url} (model: {})", model.display());
+        say(format_args!("studio: serving {url} (model: {})", model.display()));
     }
-    println!("studio: ctrl-c to stop.");
+    say(format_args!("studio: open that link (it includes this launch's access token); ctrl-c to stop."));
     if open_browser {
         open_in_browser(&url);
     }
@@ -1298,9 +1302,19 @@ fn serve_studio(
         history: Default::default(),
         sim: Default::default(),
         c_cache: Default::default(),
+        access,
     };
     studio_server::serve(listener, ctx)?;
     Ok(())
+}
+
+/// Print one status line of the Studio. Its stdout may be closed — started
+/// from a launcher, or piped into a program that stopped reading — and that
+/// must not stop the Studio (`println!` would panic), so errors are ignored.
+fn say(line: std::fmt::Arguments) {
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = out.write_fmt(line).and_then(|_| out.write_all(b"\n")).and_then(|_| out.flush());
 }
 
 /// Resolve a model argument that may be a workspace directory. Opening a
@@ -1443,7 +1457,7 @@ pub(crate) fn sample_workspace(name: &str) -> Result<PathBuf> {
     let dest = home.join("OpenLustre").join("samples").join(name);
     if !dest.exists() {
         copy_tree(&src, &dest).with_context(|| format!("copying the sample to {}", dest.display()))?;
-        println!("studio: copied the `{name}` sample to {}", dest.display());
+        say(format_args!("studio: copied the `{name}` sample to {}", dest.display()));
     }
     // A workspace file, else a model in model/.
     let first = |dir: &Path, ext: &str| -> Option<PathBuf> {

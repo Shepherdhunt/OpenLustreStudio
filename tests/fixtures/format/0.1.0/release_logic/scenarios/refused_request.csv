@@ -1,0 +1,8 @@
+master_arm,station_selected,consent,fault_present,release_request
+true,true,true,false,true
+true,false,true,false,true
+true,true,true,false,true
+true,true,false,false,true
+true,true,true,false,true
+false,true,true,false,true
+true,true,true,false,false

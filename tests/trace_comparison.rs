@@ -172,11 +172,7 @@ fn ir_simulator_and_generated_c_lite_agree_byte_for_byte() {
 /// this test. Creates and returns a unique directory under `parent`; the
 /// caller is responsible for treating it as ephemeral.
 fn tempdir_in(parent: &std::path::Path) -> std::io::Result<PathBuf> {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let p = parent.join(format!("__trace_tmp_{stamp}"));
     std::fs::create_dir_all(&p)?;
     Ok(p)

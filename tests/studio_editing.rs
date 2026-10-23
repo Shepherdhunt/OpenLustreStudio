@@ -13,6 +13,9 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::Duration;
 
+/// The Studio's access token for these tests (`OPENLUSTRE_STUDIO_TOKEN`).
+const TEST_TOKEN: &str = "openlustre-test-token";
+
 struct ServerGuard {
     child: Child,
     port: u16,
@@ -28,11 +31,7 @@ impl Drop for ServerGuard {
 }
 
 fn start_server_on_copy() -> ServerGuard {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let tmp = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_edit_{stamp}"));
     std::fs::create_dir_all(&tmp).unwrap();
     let model = tmp.join("model.json");
@@ -42,6 +41,7 @@ fn start_server_on_copy() -> ServerGuard {
     let libraries = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../libraries");
 
     let mut child = Command::new(env!("CARGO"))
+        .env("OPENLUSTRE_STUDIO_TOKEN", TEST_TOKEN)
         .args(["run", "-q", "-p", "ol_cli", "--", "studio", "serve"])
         .arg(&model)
         .arg("--with-stdlib")
@@ -86,7 +86,7 @@ fn start_server_on_copy() -> ServerGuard {
 fn request(port: u16, method: &str, path: &str, body: &str) -> Option<(u16, String)> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).ok()?;
     let req = format!(
-        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
+        "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nX-OpenLustre-Token: {TEST_TOKEN}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n{body}",
         len = body.len(),
     );
     stream.write_all(req.as_bytes()).ok()?;

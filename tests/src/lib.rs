@@ -121,3 +121,16 @@ pub fn build_release_logic_project() -> Project {
         ..Default::default()
     }
 }
+
+/// A name part for a scratch folder that no other call returns, in this
+/// test process or another running alongside: the process id, a counter,
+/// and the clock. The clock alone is not enough — on macOS it advances in
+/// whole microseconds, so two tests starting together got the same folder
+/// and one deleted the other's files.
+pub fn unique_stamp() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    format!("{}_{}_{nanos}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+}

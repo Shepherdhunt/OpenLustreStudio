@@ -23,11 +23,7 @@ fn cc_available() -> bool {
 }
 
 fn make_tempdir() -> PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_act_{stamp}"));
     std::fs::create_dir_all(&p).unwrap();
     p

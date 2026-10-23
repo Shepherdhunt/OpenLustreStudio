@@ -11,7 +11,7 @@ fn example() -> PathBuf {
 }
 
 fn tempdir(tag: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_evidence_{tag}_{stamp}"));
     std::fs::create_dir_all(&p).unwrap();
     p

@@ -6,21 +6,12 @@ use std::path::PathBuf;
 use ol_ir::load_project;
 
 fn make_tempdir() -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // The nanosecond stamp can clamp to the same value for tests starting on
-    // parallel threads (macOS clock granularity), which made two tests share
-    // — and delete — one fixture directory. A process-wide counter keeps the
-    // names unique.
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-        "__trace_tmp_multifile_{stamp}_{}",
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
+    // Unique scratch folders: main's shared helper (a plain nanosecond
+    // stamp clamped on parallel macOS threads and tests deleted each
+    // other's fixtures).
+    let stamp = openlustre_integration_tests::unique_stamp();
+    let p =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("__trace_tmp_multifile_{stamp}"));
     std::fs::create_dir_all(&p).unwrap();
     p
 }

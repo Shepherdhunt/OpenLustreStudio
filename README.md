@@ -278,6 +278,12 @@ openlustre studio launch --sample pms    # straight to the PMS sample
 openlustre studio launch --sample pnt    # straight to the PNT OS demo
 ```
 
+The Studio answers only its own page: the link it opens carries a token
+drawn at each launch, and requests from other web pages are refused (see
+[`apps/studio_ui/README.md`](apps/studio_ui/README.md#openlustre-studio-ui)).
+If you close the tab while the Studio runs, open the link printed in its
+console again (or its address without the token, in the same browser).
+
 To build the downloads yourself: `packaging/linux/build.sh <version>` (or
 `packaging/linux/build-in-docker.sh <version>` from any machine with
 Docker — on a Mac it cross-compiles the amd64 package in an Ubuntu 22.04

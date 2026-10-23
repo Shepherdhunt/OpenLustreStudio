@@ -24,3 +24,4 @@ ol_clite_emit = { workspace = true }
 ol_sim = { workspace = true }
 ol_kind2 = { workspace = true }
 ol_stdlib = { workspace = true }
+getrandom = "0.3"

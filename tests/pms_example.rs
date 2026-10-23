@@ -75,7 +75,7 @@ fn the_generated_flight_code_flies_the_scripted_mission() {
         eprintln!("no C compiler: skipping the mission");
         return;
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let out = std::env::temp_dir().join(format!("ol_pms_mission_{stamp}"));
     let o = Command::new(env!("CARGO"))
         .args(["run", "-q", "-p", "ol_cli", "--", "emit-clite"])
@@ -136,7 +136,7 @@ fn the_pms_is_proved_by_kind2() {
     };
     let slice = project().slice_for_root("PMS").unwrap();
     let input = ol_cocospec_emit::kind2::emit(&slice).expect("Kind 2 view");
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let stamp = openlustre_integration_tests::unique_stamp();
     let dir = std::env::temp_dir().join(format!("ol_pms_proof_{stamp}"));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("pms.lus");

@@ -18,7 +18,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+mod access;
 mod sim_session;
+
+pub use access::{launch_token, Access};
 
 const STUDIO_UI_HTML: &str = include_str!("studio_ui.html");
 const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
@@ -57,6 +60,9 @@ pub struct ServerCtx {
     /// The last root compiled for C-in-the-loop, keyed by the model's
     /// semantic signature — so Reset / re-attach doesn't recompile.
     pub c_cache: std::sync::Mutex<Option<(u64, String, std::sync::Arc<crate::scenario::CompiledModel>)>>,
+    /// Who may send requests: this launch's token, loopback hosts, the
+    /// Studio's own origin (see `access`).
+    pub access: Access,
 }
 
 impl ServerCtx {
@@ -209,6 +215,18 @@ fn handle_connection(mut stream: TcpStream, ctx: &ServerCtx) -> std::io::Result<
 
     let header_str = std::str::from_utf8(&buf[..headers_end]).unwrap_or("");
     let (method, path) = parse_request_line(header_str);
+    // Who is asking, before reading a body or touching anything.
+    let (bare_path, query) = path.split_once('?').unwrap_or((&path, ""));
+    match ctx.access.check(&method, bare_path, query, header_str) {
+        access::Verdict::Allow => {}
+        access::Verdict::Enter(cookie) => {
+            let extra = format!("Location: /\r\nSet-Cookie: {cookie}\r\n");
+            return write_response_with(&mut stream, 303, "text/plain", &extra, b"");
+        }
+        access::Verdict::Deny(status, ctype, body) => {
+            return write_response(&mut stream, status, ctype, &body);
+        }
+    }
     let content_length = parse_content_length(header_str).unwrap_or(0).min(MAX_REQUEST_BYTES);
 
     let body_start = headers_end + 4;
@@ -524,9 +542,30 @@ fn write_response(
     ctype: &str,
     body: &[u8],
 ) -> std::io::Result<()> {
+    write_response_with(stream, status, ctype, "", body)
+}
+
+/// Every response: not cached, not sniffed as another type, not framed by
+/// another page, not readable by other origins, and no `Referer` (the
+/// launch link's token) sent from the page to the sites it links to.
+const SECURITY_HEADERS: &str = "Cache-Control: no-store\r\n\
+    X-Content-Type-Options: nosniff\r\n\
+    X-Frame-Options: DENY\r\n\
+    Content-Security-Policy: frame-ancestors 'none'\r\n\
+    Cross-Origin-Resource-Policy: same-origin\r\n\
+    Referrer-Policy: no-referrer\r\n";
+
+/// [`write_response`] with `extra` header lines (each ending in CRLF).
+fn write_response_with(
+    stream: &mut TcpStream,
+    status: u16,
+    ctype: &str,
+    extra: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
     let reason = status_text(status);
     let head = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\n{SECURITY_HEADERS}{extra}Connection: close\r\n\r\n",
         len = body.len(),
     );
     stream.write_all(head.as_bytes())?;
@@ -537,7 +576,9 @@ fn write_response(
 fn status_text(s: u16) -> &'static str {
     match s {
         200 => "OK",
+        303 => "See Other",
         400 => "Bad Request",
+        403 => "Forbidden",
         404 => "Not Found",
         413 => "Payload Too Large",
         500 => "Internal Server Error",
@@ -1972,36 +2013,29 @@ fn build_diagram(
 /// state-machine lowering — still runs on the *read* path (`load`), so
 /// diagnostics reflect the complete picture.
 fn load_raw_path(path: &std::path::Path) -> Result<ol_ir::Project, String> {
+    use ol_ir::format::{ParseError, Syntax};
+    let syntax = Syntax::of(path).ok_or_else(|| format!("unsupported model extension: {}", path.display()))?;
     let data = std::fs::read_to_string(path)
         .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        // `.wksc` is the workspace file: JSON content, same `Project` schema.
-        Some("json") | Some("wksc") => serde_json::from_str(&data).map_err(|e| format!("JSON: {e}")),
-        Some("ols") | Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&data).map_err(|e| format!("YAML: {e}"))
-        }
-        other => Err(format!("unsupported model extension: {other:?}")),
-    }
+    ol_ir::format::parse(&data, syntax).map_err(|e| match e {
+        ParseError::Json(e) => format!("JSON: {e}"),
+        ParseError::Yaml(e) => format!("YAML: {e}"),
+        ParseError::Format(e) => format!("{}: {e}", path.display()),
+    })
 }
 
+/// Write `project` over `path` in the current model format — after keeping
+/// a copy of the file if it was in an older one (`<file>.format<N>.bak`).
 fn save_raw_path(path: &std::path::Path, project: &ol_ir::Project) -> Result<(), String> {
     if is_native_path(path) || project.resolution.is_some() {
         return Err("cannot save transient native resolution as an authored model".into());
     }
-    let text = match path
-        .extension()
-        .and_then(|s| s.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("json") | Some("wksc") => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
+    let text = match ol_ir::format::Syntax::of(path) {
+        Some(ol_ir::format::Syntax::Json) => serde_json::to_string_pretty(project).map_err(|e| e.to_string())?,
         _ => serde_yaml::to_string(project).map_err(|e| e.to_string())?,
     };
+    ol_ir::format::backup_before_upgrade(path)
+        .map_err(|e| format!("keeping a copy of {} before upgrading its format: {e}", path.display()))?;
     std::fs::write(path, text).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 

@@ -6,18 +6,29 @@ A first browser-based front end ships **inside the `openlustre` binary**:
 
 ```bash
 openlustre studio serve path/to/model.ols --with-stdlib libraries --port 8181
-# studio: serving http://127.0.0.1:8181 (model: path/to/model.ols)
+# studio: serving http://127.0.0.1:8181/?token=3f9c… (model: path/to/model.ols)
 ```
+
+**Access.** The printed link carries a token drawn afresh at each launch
+(`studio launch` opens it for you). Opening it sets a cookie for that
+Studio and drops the token from the address bar; requests without the
+token are refused, as are requests from other web pages (`Origin`) and
+requests not addressed to `127.0.0.1` / `localhost` (`Host`, against DNS
+rebinding) — the Studio edits files and runs compilers, so no web page the
+browser happens to have open may drive it. Scripts and other front ends
+send the token in an `X-OpenLustre-Token` header; set
+`OPENLUSTRE_STUDIO_TOKEN` (16+ letters, digits, `-`, `_`) to choose it
+instead of a random one. `/api/health` answers without a token.
 
 Started with **no model** (`openlustre studio launch`, or `studio serve`
 with no argument — what the installed apps run), the Studio opens on a
-**welcome page** (VS Code / SCADE style): create a workspace, open one from
-the recent list (`~/OpenLustre` and its subfolders, `GET /api/inspect`
-answers `welcome` + `workspaces`), or pick a shipped sample — the PMS, the PNT OS demo and
-release-logic (`POST /api/workspace/sample {name}` copies it to
-`~/OpenLustre/samples` and opens it; samples never point at the machine they
-were built on). The Recent column lists the last four workspaces this user
-opened (`~/OpenLustre/recent.json`), not a folder scan. `POST /api/workspace/{open,new}` clear the welcome state; File ▸
+**welcome page** (VS Code / SCADE style): create a workspace, open one
+from the last four this user opened (`~/OpenLustre/recent.json`,
+`GET /api/inspect` answers `welcome` + `recent`), or pick a shipped
+sample — the PMS, the PNT OS demo and release-logic
+(`POST /api/workspace/sample {name}` copies it to `~/OpenLustre/samples`
+and opens it; samples never point at the machine they were built on).
+`POST /api/workspace/{open,new}` clear the welcome state; File ▸
 New/Open Workspace keep working afterwards.
 
 Open the printed URL in any browser to get the Project Explorer, the
