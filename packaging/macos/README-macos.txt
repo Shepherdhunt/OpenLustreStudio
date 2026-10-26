@@ -1,6 +1,26 @@
 OpenLustre Studio for macOS
 ===========================
 
+If macOS blocks the app ("Apple could not verify…" / "unidentified
+developer"): the download is not signed with an Apple developer
+certificate, so macOS questions the first launch. Do ONE of these:
+
+  * The no-dialogs way — install from Terminal (this also puts
+    `openlustre` on your PATH and starts the Studio):
+        double-click the .dmg to open it, then in Terminal:
+            cd /Volumes/OpenLustre\ Studio
+            ./install.sh
+        It asks for your Mac password, installs into /Applications and
+        starts the Studio (a Terminal window with its log, then your
+        browser). Eject the .dmg afterwards.
+
+  * Or keep the drag-and-drop install and allow the app once:
+        drag "OpenLustre Studio" onto Applications, double-click it once
+        (it will be blocked), then open System Settings › Privacy &
+        Security, scroll down, and click "Open Anyway" next to the
+        message about OpenLustre Studio, then Open. On macOS 13–14 it is
+        instead: right-click the app ▸ Open ▸ Open.
+
 Needs macOS 13 (Ventura) or later. Three ways to install (pick the download
 for your Mac's chip: arm64 for Apple Silicon M1/M2/M3/M4, x86_64 for
 Intel):

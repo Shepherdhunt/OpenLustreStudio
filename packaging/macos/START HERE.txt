@@ -1,0 +1,23 @@
+START HERE
+==========
+
+1. Fastest install — no security dialogs (recommended):
+
+   Double-click the .dmg to open it, then run these two lines in
+   Terminal:
+
+       cd /Volumes/OpenLustre\ Studio
+       ./install.sh
+
+   It asks for your Mac password, installs into /Applications and starts
+   the Studio: a Terminal window opens with its log, then the Studio
+   opens in your browser. Eject the .dmg (and delete the download
+   folder, if you took the .tar.gz) afterwards.
+
+2. Or the standard drag-and-drop install: drag "OpenLustre Studio" onto
+   the Applications folder in this window. The app is not signed with an
+   Apple developer certificate, so macOS blocks its first open — allow
+   it once in System Settings › Privacy & Security ("Open Anyway"), or
+   just use option 1, which skips the block entirely.
+
+Uninstall, troubleshooting, and details: README-macos.txt

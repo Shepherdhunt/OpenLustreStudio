@@ -14,8 +14,8 @@
 # doesn't, so install.sh sits next to the folder inside the .dmg for the
 # command (and per-user installs). The program, Kind 2 + Z3 for that CPU
 # and the samples live inside OpenLustre Studio.app. Runs on a Mac (Apple
-# Silicon builds both CPUs). Not signed or notarized: the .dmg and .pkg
-# may need right-click ▸ Open the first time — see README-macos.txt.
+# Silicon builds both CPUs). Ad-hoc signed only: macOS blocks the first
+# open of a downloaded app until allowed once — see README-macos.txt.
 
 set -eu
 VERSION="${1:?usage: packaging/macos/build.sh <version> <aarch64|x86_64>}"
@@ -92,11 +92,18 @@ chmod 755 "$APP/Contents/MacOS/OpenLustreStudio" "$RES/OpenLustre Studio.command
 cp packaging/macos/uninstall.sh "$RES/uninstall.sh"
 chmod 755 "$RES/uninstall.sh"
 
+# Ad-hoc signature (no Apple certificate): seals the bundles so macOS
+# consistently offers the Privacy & Security "Open Anyway" path for the
+# first launch. The dialogs only go away with Developer ID signing +
+# notarization (Apple Developer Program).
+codesign --force --sign - "$APP"
+codesign --force --sign - "$SAMPLE"
+
 # The tarball: the folder plus the per-user installer.
 TAR="$WORK/tar/$NAME"
 mkdir -p "$TAR"
 cp -R "$FOLDER" "$TAR/"
-cp packaging/macos/install.sh packaging/macos/README-macos.txt "$TAR/"
+cp packaging/macos/install.sh packaging/macos/README-macos.txt "packaging/macos/START HERE.txt" "$TAR/"
 chmod 755 "$TAR/install.sh"
 tar -C "$WORK/tar" -czf "$DIST/$NAME.tar.gz" "$NAME"
 
@@ -107,7 +114,7 @@ tar -C "$WORK/tar" -czf "$DIST/$NAME.tar.gz" "$NAME"
 DMGROOT="$WORK/dmg"
 mkdir -p "$DMGROOT"
 cp -R "$FOLDER" "$DMGROOT/"
-cp packaging/macos/install.sh packaging/macos/README-macos.txt "$DMGROOT/"
+cp packaging/macos/install.sh packaging/macos/README-macos.txt "packaging/macos/START HERE.txt" "$DMGROOT/"
 chmod 755 "$DMGROOT/install.sh"
 ln -s /Applications "$DMGROOT/Applications"
 hdiutil create -volname "OpenLustre Studio" -srcfolder "$DMGROOT" -ov -format UDZO "$DIST/$NAME.dmg" > /dev/null
